@@ -11,10 +11,12 @@ import html
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import asyncpg
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from maat.pipeline.corroborate import confidence_label as _confidence_label
 
@@ -50,6 +52,147 @@ async def feed() -> str:
     for c in claims:
         by_article.setdefault(c["article_id"], []).append(c)
     return _page(articles, by_article, clusters, id_to_source)
+
+
+# ── JSON feed API (P5 #48, minimal) — the Apple client reads this ──────────────
+#
+# The story (a corroboration cluster, §5.5) is the unit: its confidence read (§5.6-5.7),
+# its independent-originator collapse, and the claims that compose it. The Swift `Story`
+# model mirrors this shape exactly. Reads the same projections as the HTML view.
+
+
+async def _article_meta(pool) -> dict[str, dict]:
+    rows = await pool.fetch("select id, source, language, title, url from articles")
+    return {r["id"]: dict(r) for r in rows}
+
+
+async def _claims_by_id(pool) -> dict[str, dict]:
+    rows = await pool.fetch(
+        "select id, article_id, voice, speaker, kind, is_synthesis, horizon, "
+        "in_headline, evidence_span, text from claims"
+    )
+    return {str(r["id"]): dict(r) for r in rows}
+
+
+def _origin_groups(cluster, meta: dict[str, dict]) -> list[dict]:
+    groups = []
+    for grp in _jload(cluster["originators"]):
+        sources = sorted({(meta.get(a) or {}).get("source") or a for a in grp})
+        groups.append({"sources": sources, "collapsed": len(grp) > 1})
+    return groups
+
+
+def _claim_json(c: dict, meta: dict[str, dict]) -> dict:
+    a = meta.get(c["article_id"]) or {}
+    return {
+        "id": str(c["id"]),
+        "text": c["text"],
+        "voice": c["voice"],
+        "speaker": c["speaker"],
+        "kind": c["kind"],
+        "is_synthesis": bool(c["is_synthesis"]),
+        "horizon": c["horizon"],
+        "in_headline": bool(c["in_headline"]),
+        "evidence_span": c.get("evidence_span"),
+        "article_id": c["article_id"],
+        "source": a.get("source"),
+        "language": a.get("language") or "en",
+    }
+
+
+def _story_json(cluster, claims_by_id: dict, meta: dict[str, dict]) -> dict:
+    claim_ids = [str(x) for x in _jload(cluster["claim_ids"])]
+    claims = [_claim_json(claims_by_id[cid], meta) for cid in claim_ids if cid in claims_by_id]
+    languages = sorted({c["language"] for c in claims}) or ["en"]
+    return {
+        "id": cluster["id"],
+        "fact": cluster["fact"],
+        "confidence": float(cluster["confidence"] or 0.0),
+        "extremity": cluster["extremity"] or "notable",
+        "independent_originators": int(cluster["independent_originators"] or 0),
+        "has_primary": bool(cluster["has_primary"]),
+        "source_count": len(_jload(cluster["sources"])),
+        "originator_groups": _origin_groups(cluster, meta),
+        "languages": languages,
+        "claims": claims,
+    }
+
+
+@app.get("/api/feed")
+async def api_feed() -> JSONResponse:
+    pool = app.state.pool
+    clusters = await pool.fetch(
+        "select id, fact, sources, originators, independent_originators, has_primary, "
+        "claim_ids, confidence, extremity from clusters "
+        "order by confidence desc, independent_originators desc"
+    )
+    meta = await _article_meta(pool)
+    claims_by_id = await _claims_by_id(pool)
+    stories = [_story_json(c, claims_by_id, meta) for c in clusters]
+    return JSONResponse(
+        {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "count": len(stories),
+            "stories": stories,
+        }
+    )
+
+
+@app.get("/api/story/{cluster_id}")
+async def api_story(cluster_id: str, deeper: int = 0) -> JSONResponse:
+    pool = app.state.pool
+    row = await pool.fetchrow(
+        "select id, fact, sources, originators, independent_originators, has_primary, "
+        "claim_ids, confidence, extremity from clusters where id = $1",
+        cluster_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such story")
+    meta = await _article_meta(pool)
+    claims_by_id = await _claims_by_id(pool)
+    story = _story_json(row, claims_by_id, meta)
+    if deeper:
+        # Tier-3 "go deeper" (§2.1, §11): the PCC / server middle tier expands provenance,
+        # fetches-and-verifies primary sources, and runs cross-language corroboration. Stubbed
+        # here as the per-claim provenance the deeper pass would assemble — the PCC developer
+        # surface is verified at P6 and slots in behind this boundary.
+        story["deeper"] = {
+            "note": "Tier-3 expansion (server/PCC stub): primary-source fetch-and-verify and "
+            "cross-language corroboration would run here.",
+            "provenance": [
+                {
+                    "claim_id": c["id"],
+                    "voice": c["voice"],
+                    "speaker": c["speaker"],
+                    "evidence_span": c["evidence_span"],
+                    "source": c["source"],
+                }
+                for c in story["claims"]
+            ],
+        }
+    return JSONResponse(story)
+
+
+class TranslateReq(BaseModel):
+    text: str
+    target: str = "en"
+    source: str | None = None
+
+
+@app.post("/api/translate")
+async def api_translate(req: TranslateReq) -> JSONResponse:
+    # Cloud fallback for §4 translate-for-display. The client translates ON-DEVICE first
+    # (Apple Translation framework); it only calls this when the on-device pair is unavailable.
+    # Real impl routes through the Source/Effect seam (maat/providers/seam.py) — model-translate,
+    # never score a translation. Stubbed echo until that route is wired, so the reader runs keyless.
+    return JSONResponse(
+        {
+            "translated": req.text,
+            "source": req.source,
+            "target": req.target,
+            "engine": "cloud-fallback-stub",
+        }
+    )
 
 
 def _badge(text: str, cls: str) -> str:
