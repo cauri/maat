@@ -1,0 +1,5 @@
+# Maat ingestion-clock topics — one per line. Each tick (`make tick`) pulls fresh articles for
+# every topic and ingests the ones it hasn't seen (deduped by URL). Topic choice is editorial —
+# edit freely. GDELT operators work too, e.g. append "sourcelang:French" or "sourcecountry:JA".
+central bank interest rate decision
+climate negotiations agreement
