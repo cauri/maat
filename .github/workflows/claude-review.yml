@@ -1,0 +1,26 @@
+name: claude-review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review this PR for Maat — a veracity-weighted news feed (Rust kernel + Python
+            agents, event-sourced). Focus on: correctness bugs; the bright-line discipline
+            (deterministic kernel = tested, LLM judgement = evals not unit tests); the
+            convention that agent prompts live in code, not external files; and that no stage
+            judges truth where it shouldn't (the Assessor extracts/characterises, it does not
+            decide truth). Be concise — flag only real issues, with file:line.
