@@ -1,0 +1,8 @@
+#cloud-config
+# First-boot provisioning for a Maat box: install Docker + compose plugin.
+package_update: true
+package_upgrade: false
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - docker --version > /var/log/maat-docker-installed.log 2>&1
