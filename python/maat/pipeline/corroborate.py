@@ -191,6 +191,46 @@ def is_primary_source(source: str) -> bool:
     return any(k in s for k in _PRIMARY_MARKERS)
 
 
+# §5.2 laundering — endorsement / dropped attribution. A good outlet states WHERE its
+# information comes from (even "a source who declined to be named"). An article that asserts a
+# claim with NO stated provenance is low-quality — we cannot tell independent reporting from
+# laundered repetition — so it counts as LESS than a full independent originator (cauri's
+# call). A primary source is its own provenance. DRAFT markers + weight; co-design with cauri.
+_PROVENANCE_MARKERS = (
+    "according to", "said", "says", "told", "reported", "reports", "stated", "stating",
+    "announced", "confirm", "revealed", "cited", "citing", "alleged", "denied", "wrote",
+    "source", "sources", "official", "spokesperson", "spokesman", "statement", "briefing",
+    "documents", "filing", "study", "survey", "data show", "we found", "this paper",
+    "our investigation", "has learned", "understands", "interview", '"', "“",
+)
+_BALD_ORIGINATOR_WEIGHT = 0.35
+
+
+def has_provenance(body: str) -> bool:
+    """Does the article state where its information comes from (attribution / sourcing)?
+
+    Lenient by design — we only want to flag a TRULY bald assertion (no attribution of any
+    kind), since wrongly discounting a real report is worse than missing one launderer.
+    """
+    low = body.lower()
+    return any(m in low for m in _PROVENANCE_MARKERS)
+
+
+def effective_originators(
+    groups: list[list[str]], bodies: dict[str, str], sources: dict[str, str]
+) -> float:
+    """Independent-originator count weighted by sourcing quality (§5.2). An originator whose
+    article(s) state no provenance — a bald assertion, possibly laundered — counts as a
+    fraction of one. A primary source is its own provenance and always counts fully."""
+    total = 0.0
+    for g in groups:
+        sourced = any(
+            is_primary_source(sources.get(a, "")) or has_provenance(bodies.get(a, "")) for a in g
+        )
+        total += 1.0 if sourced else _BALD_ORIGINATOR_WEIGHT
+    return round(total, 2)
+
+
 # How much doubt each independent originator leaves, by the claim's prior (§5.6): an
 # extraordinary claim earns less from the same corroboration than an ordinary one.
 _DECAY = {"ordinary": 0.40, "notable": 0.50, "extraordinary": 0.68}
@@ -251,6 +291,7 @@ def corroborate(
         groups_idx = collapse_originators(article_ids, bodies, art_source, duplicate_source_threshold)
         originators = [[article_ids[i] for i in g] for g in groups_idx]
         ind = len(originators)
+        eff = effective_originators(originators, bodies, art_source)
         primary = any(is_primary_source(s) for s in {m.source for m in members})
         extremity = extremity_of(members[0].text)
         results.append(
@@ -262,7 +303,7 @@ def corroborate(
                 independent_originators=ind,
                 has_primary=primary,
                 extremity=extremity,
-                confidence=confidence_read(ind, primary, extremity),
+                confidence=confidence_read(eff, primary, extremity),
             )
         )
     results.sort(key=lambda r: r.independent_originators, reverse=True)
@@ -294,6 +335,7 @@ def corroborate_fixed(
     groups_idx = collapse_originators(article_ids, bodies, art_source, duplicate_source_threshold)
     originators = [[article_ids[i] for i in g] for g in groups_idx]
     ind = len(originators)
+    eff = effective_originators(originators, bodies, art_source)
     primary = any(is_primary_source(s) for s in {c.source for c in claims})
     return Corroboration(
         fact=claims[0].text,
@@ -303,5 +345,5 @@ def corroborate_fixed(
         independent_originators=ind,
         has_primary=primary,
         extremity=extremity,
-        confidence=confidence_read(ind, primary, extremity),
+        confidence=confidence_read(eff, primary, extremity),
     )
