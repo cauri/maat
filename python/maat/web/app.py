@@ -39,8 +39,8 @@ async def feed() -> str:
         "from claims order by created_at"
     )
     clusters = await pool.fetch(
-        "select fact, sources, originators, independent_originators, has_primary "
-        "from clusters order by independent_originators desc, fact"
+        "select fact, sources, originators, independent_originators, has_primary, confidence "
+        "from clusters order by confidence desc, independent_originators desc"
     )
     id_to_source = {a["id"]: a["source"] for a in articles}
     by_article: dict[str, list] = {}
@@ -101,8 +101,13 @@ def _corro(cl, id_to_source) -> str:
         )
     primary = _badge("primary source", "fact") if cl["has_primary"] else ""
     n_src = len(_jload(cl["sources"]))
+    conf = float(cl["confidence"] or 0.0)
+    pct = round(conf * 100)
+    lvl = "hi" if conf >= 0.8 else "mid" if conf >= 0.5 else "lo"
     return (
         f'<div class="corro"><div class="cfact">{html.escape(cl["fact"])}</div>'
+        f'<div class="conf {lvl}"><div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
+        f'<span class="cpct">{pct}%</span><span class="clab">confidence</span></div>'
         f'<div class="cmeta"><b>{n_src}</b> sources &rarr; '
         f'<b>{cl["independent_originators"]}</b> independent originators {primary}</div>'
         f'<div class="origs">{"".join(rows)}</div></div>'
@@ -141,6 +146,13 @@ main{max-width:760px;margin:0 auto;padding:12px 20px 60px}
 .corro:first-of-type{border-top:0}
 .cfact{font-weight:600;letter-spacing:-.01em}
 .cmeta{font-size:14px;color:#3a3833;margin:2px 0 7px}
+.conf{display:flex;align-items:center;gap:9px;margin:6px 0 7px}
+.cbar{flex:1;height:7px;background:var(--line);border-radius:5px;overflow:hidden}
+.cfill{height:100%;border-radius:5px}
+.conf.hi .cfill{background:#3b6d11}.conf.mid .cfill{background:#92580a}.conf.lo .cfill{background:#b3402e}
+.cpct{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums}
+.conf.hi .cpct{color:#3b6d11}.conf.mid .cpct{color:#92580a}.conf.lo .cpct{color:#b3402e}
+.clab{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
 .origs{display:flex;flex-direction:column;gap:5px}
 .orig{font-size:13px;padding:5px 11px;border-radius:9px}
 .orig.wire{background:#faeeda}

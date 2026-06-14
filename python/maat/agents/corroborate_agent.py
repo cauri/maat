@@ -55,6 +55,7 @@ async def main() -> None:
                 "originators": r.originators,
                 "independent_originators": r.independent_originators,
                 "has_primary": r.has_primary,
+                "confidence": r.confidence,
                 "claim_ids": r.claim_ids,
             },
         )

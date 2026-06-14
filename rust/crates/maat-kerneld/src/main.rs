@@ -164,12 +164,13 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         let d = &ev.data;
         sqlx::query(
             "insert into clusters \
-             (id, tenant_id, fact, sources, originators, independent_originators, has_primary, claim_ids) \
-             values ($1, $2, $3, $4, $5, $6, $7, $8) \
+             (id, tenant_id, fact, sources, originators, independent_originators, has_primary, claim_ids, confidence) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              on conflict (id) do update set fact = excluded.fact, sources = excluded.sources, \
                originators = excluded.originators, \
                independent_originators = excluded.independent_originators, \
-               has_primary = excluded.has_primary, claim_ids = excluded.claim_ids",
+               has_primary = excluded.has_primary, claim_ids = excluded.claim_ids, \
+               confidence = excluded.confidence",
         )
         .bind(d.get("id").and_then(|v| v.as_str()))
         .bind(&ev.tenant_id)
@@ -179,6 +180,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(d.get("independent_originators").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
         .bind(d.get("has_primary").and_then(|v| v.as_bool()).unwrap_or(false))
         .bind(d.get("claim_ids").map(Json))
+        .bind(d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0))
         .execute(pool)
         .await?;
     }
