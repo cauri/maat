@@ -196,6 +196,21 @@ def confidence_read(
     return round(min(base, 0.97), 2)
 
 
+def confidence_label(conf: float) -> tuple[str, str]:
+    """Gate-the-floor labelling (§5.7): a verbal verdict + colour tier for a confidence read.
+
+    The bottom tier is the gate — below it a claim is flagged 'thinly sourced', not presented
+    as established. DRAFT thresholds; co-design with cauri.
+    """
+    if conf >= 0.85:
+        return ("Well corroborated", "hi")
+    if conf >= 0.60:
+        return ("Corroborated", "mid")
+    if conf >= 0.40:
+        return ("Limited corroboration", "lo")
+    return ("Thinly sourced", "floor")
+
+
 def corroborate(
     claims: list[ClaimRow],
     bodies: dict[str, str],

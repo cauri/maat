@@ -1,0 +1,17 @@
+{
+  "_note": "Golden outcomes for the synthetic fixtures — the regression guard for the veracity core. Keyed by story; `match` finds the headline cluster (most-sourced fact containing the substring).",
+  "resignation": {
+    "match": "Reyes",
+    "independent_originators": 3,
+    "extremity": "ordinary",
+    "has_primary": true,
+    "label": "Well corroborated"
+  },
+  "central-bank-gold-leak": {
+    "match": "gold reserve",
+    "max_independent_originators": 1,
+    "extremity": "extraordinary",
+    "has_primary": false,
+    "label": "Thinly sourced"
+  }
+}
