@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from maat.obs import llm_span, record_completion
+
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
 MISTRAL_EMBED_URL = "https://api.mistral.ai/v1/embeddings"
@@ -38,49 +40,66 @@ class Reply:
 def claude_complete(prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 256) -> Reply:
     """Claude (Anthropic) — reserved for the hardest judgement stages."""
     key = os.environ["ANTHROPIC_API_KEY"]
-    resp = httpx.post(
-        ANTHROPIC_URL,
-        headers={
-            "x-api-key": key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
-    return Reply(text=resp.json()["content"][0]["text"], model=model)
+    with llm_span("judge", model, prompt) as span:
+        resp = httpx.post(
+            ANTHROPIC_URL,
+            headers={
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["content"][0]["text"]
+        u = data.get("usage", {})
+        record_completion(span, text, input_tokens=u.get("input_tokens", 0),
+                          output_tokens=u.get("output_tokens", 0))
+        return Reply(text=text, model=model)
 
 
 def mistral_complete(prompt: str, *, model: str = MISTRAL_BULK, max_tokens: int = 256) -> Reply:
     """Mistral — bulk / near-mechanical stages (and EU-sovereign)."""
     key = os.environ["MISTRAL_API_KEY"]
-    resp = httpx.post(
-        MISTRAL_CHAT_URL,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
-    return Reply(text=resp.json()["choices"][0]["message"]["content"], model=model)
+    with llm_span("bulk", model, prompt) as span:
+        resp = httpx.post(
+            MISTRAL_CHAT_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"]
+        u = data.get("usage", {})
+        record_completion(span, text, input_tokens=u.get("prompt_tokens", 0),
+                          output_tokens=u.get("completion_tokens", 0))
+        return Reply(text=text, model=model)
 
 
 def mistral_embed(texts: list[str], *, model: str = MISTRAL_EMBED) -> list[list[float]]:
     """Multilingual embeddings for clustering / dedup / identity (1024-dim)."""
     key = os.environ["MISTRAL_API_KEY"]
-    resp = httpx.post(
-        MISTRAL_EMBED_URL,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"model": model, "input": texts},
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
-    return [item["embedding"] for item in resp.json()["data"]]
+    with llm_span("embed", model, f"{len(texts)} texts") as span:
+        resp = httpx.post(
+            MISTRAL_EMBED_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "input": texts},
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if span is not None:
+            span.set_attribute("gen_ai.usage.input_tokens", data.get("usage", {}).get("prompt_tokens", 0))
+            span.set_attribute("maat.embed.count", len(texts))
+        return [item["embedding"] for item in data["data"]]
