@@ -14,6 +14,9 @@ class Claim(BaseModel):
     accountable for getting the utterance right; the embedded claim ("Y") is
     voice="attributed" to its speaker. relay_chain records nested reporting
     (outlet -> relay -> original speaker).
+
+    kind / is_synthesis / horizon are set later by the fact/projection classifier
+    (§5.3); they are None/False until that stage runs.
     """
 
     text: str
@@ -22,3 +25,8 @@ class Claim(BaseModel):
     relay_chain: list[str] | None = None
     in_headline: bool = False
     evidence_span: str
+
+    # set by the fact/projection classifier (§5.3)
+    kind: Literal["fact", "projection"] | None = None
+    is_synthesis: bool = False
+    horizon: str | None = None
