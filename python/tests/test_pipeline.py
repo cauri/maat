@@ -128,21 +128,39 @@ def test_has_provenance_flags_bald_assertions():
     assert not has_provenance("The central bank secretly sold its entire gold reserve last year.")
 
 
-def test_effective_originators_discounts_unsourced():
+def test_attribution_gradient_named_anonymous_bald():
+    from maat.pipeline.corroborate import attribution_weight
+
+    # named person / organisation -> full weight
+    assert attribution_weight("The minister, Jane Doe, said the talks failed.", "Daily Report") == 1.0
+    assert attribution_weight("The Finance Ministry said the deal was signed.", "Daily Report") == 1.0
+    # anonymous but stated -> middle
+    w_anon = attribution_weight("Two sources familiar with the matter said the deal is off.", "Daily Report")
+    assert 0.3 < w_anon < 1.0
+    # bald assertion, no attribution -> least
+    assert attribution_weight("The deal is off.", "Random Blog") == 0.3
+    # a primary source is its own provenance — full, even with a bald body
+    assert attribution_weight("Rates go up a quarter point.", "Federal Reserve") == 1.0
+    # the gradient orders strictly: named > anonymous > none
+    assert attribution_weight("The deal is off.", "Random Blog") < w_anon < 1.0
+
+
+def test_effective_originators_weights_by_sourcing():
     from maat.pipeline.corroborate import effective_originators
 
     bodies = {
-        "sourced": "X happened, officials said at a briefing.",
+        "named": "X happened, the Finance Ministry said in a statement.",
+        "anon": "X happened, two sources familiar with the talks said.",
         "bald": "X happened.",
         "primary": "We are raising rates by a quarter point.",
     }
-    sources = {"sourced": "Daily Report", "bald": "Random Blog", "primary": "Federal Reserve"}
-    # one sourced + one bald originator -> less than 2 (bald discounted) but more than 1
-    assert 1.0 < effective_originators([["sourced"], ["bald"]], bodies, sources) < 2.0
-    # two sourced originators count fully
-    assert effective_originators([["sourced"], ["primary"]], bodies, sources) == 2.0
-    # a primary source is its own provenance, even with a bald body
-    assert effective_originators([["primary"]], bodies, sources) == 1.0
+    sources = {"named": "Daily Report", "anon": "Weekly", "bald": "Random Blog", "primary": "Federal Reserve"}
+    # named (1.0) + bald (0.3) -> 1.3
+    assert effective_originators([["named"], ["bald"]], bodies, sources) == 1.3
+    # named + anonymous (0.6) -> 1.6, between 1 and 2
+    assert effective_originators([["named"], ["anon"]], bodies, sources) == 1.6
+    # two fully-attributed originators -> 2.0
+    assert effective_originators([["named"], ["primary"]], bodies, sources) == 2.0
 
 
 def test_confidence_read_rises_with_corroboration_and_primary():
