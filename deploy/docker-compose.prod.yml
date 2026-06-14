@@ -33,10 +33,15 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
+      # The admin console (P8, #82) publishes corrections to NATS; without this the reader
+      # hit localhost:4222 and crash-looped. Point it at the compose nats service.
+      NATS_URL: "nats://nats:4222"
     ports:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      nats:
         condition: service_healthy
 
 volumes:
