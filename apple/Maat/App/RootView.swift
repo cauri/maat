@@ -1,29 +1,26 @@
 import SwiftUI
 
 struct RootView: View {
-    @Environment(AppSettings.self) private var settings
-    @Environment(TopicStore.self) private var topics
-    @Environment(FeedStore.self) private var feed
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
-        TabView {
-            Tab("Feed", systemImage: "newspaper") {
+        @Bindable var router = router
+        TabView(selection: $router.selectedTab) {
+            Tab("Feed", systemImage: "newspaper", value: AppTab.feed) {
                 FeedView()
             }
-            Tab("Search", systemImage: "magnifyingglass") {
+            Tab("Search", systemImage: "magnifyingglass", value: AppTab.search) {
                 SearchView()
             }
-            Tab("Topics", systemImage: "tag") {
+            Tab("Topics", systemImage: "tag", value: AppTab.topics) {
                 TopicsView()
             }
-            Tab("Settings", systemImage: "gearshape") {
+            Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
                 SettingsView()
             }
         }
         .task {
-            feed.setService(settings.makeFeedService())
-            await feed.refresh()
-            await feed.applyRerank(FoundationModelsReranker(), topics: topics.topics)
+            await MaatCore.shared.bootstrap()
         }
     }
 }

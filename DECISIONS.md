@@ -160,3 +160,15 @@ the API's isolation annotations are ergonomic (candidate: isolate the Translatio
 small module). **Prompts:** the on-device `Summarizer` / `Reranker` instructions fed to Foundation
 Models are **`DRAFT — review with cauri`** (per D22; they are in-platform agent prompts). Verified
 building on macOS + iOS 27 SDK and running on the iOS 27 simulator across all six P6 stories.
+
+### D24 — App Intents surface (Siri / Shortcuts / Spotlight / other apps)
+**Decision (cauri):** the client's features must be drivable by **Siri, Shortcuts, Spotlight, and other
+apps**, not just the in-app UI. **Shape (#80):** the App Intents framework — a `StoryEntity` (+ string
+query reusing on-device `SemanticSearch`), intents (open feed, search, top-story-summary, show story,
+add topic, go deeper), and an `AppShortcutsProvider` with spoken phrases. Free-text params (search
+query, topic) **can't** appear in spoken phrases — only `AppEntity`/`AppEnum` can — so Siri prompts for
+them via `requestValueDialog`. **Shared state:** intents and UI share one `@MainActor` singleton
+(`MaatCore.shared`) so an intent mutates the same feed/topics the UI shows, and UI-opening intents
+route through a small `AppRouter`. Intents live in the app target (no separate extension yet — follow-
+up for launch-free execution + `IndexedEntity` Spotlight donation). Verified: the four actions surface
+under "Maat" in the iOS 27 Shortcuts app. Part of #6.

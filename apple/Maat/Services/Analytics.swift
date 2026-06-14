@@ -21,6 +21,7 @@ enum EngagementSignal: String, Codable, Sendable, CaseIterable {
     case translated
     case wentDeeper
     case searched
+    case intentInvoked
 }
 
 struct EngagementEvent: Identifiable, Sendable {

@@ -77,6 +77,25 @@ Maat/
 - **#57 Edge-aggregated analytics** — `Analytics`: two lanes — individual signals stay on-device;
   anonymised counts are the only edge-aggregation lane. Collection-only (no transmission yet).
 
+### App Intents — Siri / Shortcuts / Spotlight / other apps (#80)
+
+`Maat/Intents/` exposes the app's features to the system via the **App Intents** framework, so Siri,
+the Shortcuts app, Spotlight, the Action button, and other apps' automations can drive Maat — not just
+the in-app UI:
+
+- **`StoryEntity`** (+ `StoryEntityQuery` / `EntityStringQuery`) — a story as a system entity; the
+  string query reuses on-device `SemanticSearch`.
+- **Intents** — Open Feed, Search Maat, Top Story (speaks an on-device summary), Show a Story, Add a
+  Topic, Go Deeper. UI-opening intents route through `AppRouter`; read-only ones return a value +
+  spoken `IntentDialog`. Each records an engagement signal (#57).
+- **`MaatShortcuts`** (`AppShortcutsProvider`) — zero-setup spoken phrases ("What's the top story on
+  Maat", "Search Maat", "Open my Maat feed", "Add a topic to Maat").
+
+Intents and the UI share one source of truth (`MaatCore.shared`, `@MainActor`), so an intent that adds
+a topic re-ranks the same feed the UI shows. Verified: the four actions appear under **Maat** in the
+iOS 27 Shortcuts app. Follow-up: `IndexedEntity` Spotlight donation, and an App Intents extension so
+intents run without launching the app.
+
 ## Known constraints / follow-ups
 
 - **Swift 5 language mode (target-wide, temporary).** The iOS 26/27 `Translation` framework's

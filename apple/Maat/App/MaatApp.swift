@@ -3,18 +3,16 @@ import SwiftData
 
 @main
 struct MaatApp: App {
-    @State private var settings = AppSettings()
-    @State private var topics = TopicStore()
-    @State private var analytics = Analytics()
-    @State private var feed = FeedStore(primary: FixtureFeedService())
+    private let core = MaatCore.shared
 
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environment(settings)
-                .environment(topics)
-                .environment(analytics)
-                .environment(feed)
+                .environment(core.settings)
+                .environment(core.topics)
+                .environment(core.analytics)
+                .environment(core.feed)
+                .environment(core.router)
         }
         .modelContainer(for: Comment.self)
     }

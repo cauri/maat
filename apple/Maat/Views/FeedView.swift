@@ -3,9 +3,11 @@ import SwiftUI
 struct FeedView: View {
     @Environment(FeedStore.self) private var feed
     @Environment(TopicStore.self) private var topics
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
-        NavigationStack {
+        @Bindable var router = router
+        return NavigationStack(path: $router.feedPath) {
             ScrollView {
                 LazyVStack(spacing: 14) {
                     if feed.usingFallback, let error = feed.error {
