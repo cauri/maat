@@ -1,0 +1,30 @@
+{
+  "_note": "SYNTHETIC test fixture (not real news). Companion to resignation-scandal.json, and the regression case for #20. An EXTRAORDINARY claim (a central bank secretly selling its entire gold reserve) carried by 3 outlets that all trace to ONE leaked-document report — a citation cascade collapsing to 1 independent originator, no primary source. Extraordinary prior + thin independent corroboration + no primary => LOW confidence, the inverse of the well-corroborated ordinary resignation. Ingested alongside the resignation it also guards §5.4: the two distinct stories must NOT merge into one cluster. Live acquisition replaces this in P2.",
+  "event": "central-bank-gold-leak",
+  "articles": [
+    {
+      "id": "ledger-2026-0608",
+      "source": "The Ledger",
+      "kind": "independent-original",
+      "language": "en",
+      "title": "Leaked files: Valoria central bank secretly sold its gold reserve",
+      "body": "Valoria's central bank secretly sold its entire gold reserve over the past year to cover undisclosed budget shortfalls, The Ledger has found, citing leaked internal documents. The documents could not be independently verified. The central bank did not respond to requests for comment."
+    },
+    {
+      "id": "capitalwire-2026-0608",
+      "source": "Capital Wire",
+      "kind": "cascade",
+      "language": "en",
+      "title": "Report: Valoria sold off gold reserve to cover shortfalls",
+      "body": "Valoria's central bank secretly sold its entire gold reserve to cover budget shortfalls, according to The Ledger, which cited leaked documents. Officials would not confirm the claim and no other outlet has seen the documents."
+    },
+    {
+      "id": "bulletin-2026-0608",
+      "source": "Daily Bulletin",
+      "kind": "cascade",
+      "language": "en",
+      "title": "Valoria said to have secretly sold its gold reserve",
+      "body": "Valoria secretly sold its entire gold reserve to plug hidden budget shortfalls, as reported by The Ledger. The central bank declined to comment on the report."
+    }
+  ]
+}

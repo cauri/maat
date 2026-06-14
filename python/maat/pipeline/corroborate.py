@@ -70,18 +70,47 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+def _agglomerate(sim: list[list[float]], threshold: float) -> list[list[int]]:
+    """Average-linkage agglomerative clustering over a similarity matrix (§5.4).
+
+    Repeatedly merge the two clusters with the highest MEAN cross-similarity, while that
+    mean clears `threshold`. This is the fix for #20: single-linkage / connected components
+    chains transitively — one mid-similarity bridge claim drags two otherwise unrelated
+    stories into a single cluster — whereas a mean requirement won't merge groups joined by
+    a lone bridge. DRAFT choice of linkage (average vs complete); revisit with cauri.
+
+    O(n^3)-ish; fine at current corpus scale, revisit (Lance-Williams) for P2 volume.
+    """
+    n = len(sim)
+    if n <= 1:
+        return [[0]] if n else []
+    clusters = [[i] for i in range(n)]
+    while len(clusters) > 1:
+        best, bi, bj = threshold, -1, -1
+        for a in range(len(clusters)):
+            for b in range(a + 1, len(clusters)):
+                pairs = [sim[i][j] for i in clusters[a] for j in clusters[b]]
+                avg = sum(pairs) / len(pairs)
+                if avg >= best:
+                    best, bi, bj = avg, a, b
+        if bi == -1:
+            break
+        clusters[bi].extend(clusters[bj])
+        del clusters[bj]
+    return clusters
+
+
 def group_by_similarity(texts: list[str], threshold: float) -> list[list[int]]:
-    """Connected components where cosine(emb_i, emb_j) >= threshold (semantic same-fact)."""
+    """Cluster same-fact claims by embedding cosine, average-linkage (§5.4, fixes #20)."""
     if len(texts) <= 1:
         return [[0]] if texts else []
     embs = mistral_embed(texts)
-    edges = [
-        (i, j)
-        for i in range(len(texts))
-        for j in range(i + 1, len(texts))
-        if _cosine(embs[i], embs[j]) >= threshold
-    ]
-    return _components(len(texts), edges)
+    n = len(texts)
+    sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim[i][j] = sim[j][i] = _cosine(embs[i], embs[j])
+    return _agglomerate(sim, threshold)
 
 
 # --- originator collapse (§5.5): lexical near-duplication + citation cascade ---

@@ -113,6 +113,41 @@ def test_confidence_read_rises_with_corroboration_and_primary():
     assert confidence_read(1, False) < confidence_read(2, True)
 
 
+def test_agglomerate_resists_single_link_chaining():
+    from maat.pipeline.corroborate import _agglomerate
+
+    # A~B and B~C strongly, but A and C are dissimilar. Single-linkage / connected
+    # components would chain all three into one cluster (#20); average-linkage must not.
+    sim = [
+        [1.00, 0.86, 0.50],
+        [0.86, 1.00, 0.86],
+        [0.50, 0.86, 1.00],
+    ]
+    groups = _agglomerate(sim, 0.82)
+    assert len(groups) == 2  # the bridge (B) does not drag A and C together
+    assert not any(0 in g and 2 in g for g in groups)
+
+
+def test_agglomerate_keeps_tight_cluster_together():
+    from maat.pipeline.corroborate import _agglomerate
+
+    sim = [[1.00, 0.91, 0.90], [0.91, 1.00, 0.92], [0.90, 0.92, 1.00]]
+    assert [sorted(g) for g in _agglomerate(sim, 0.82)] == [[0, 1, 2]]
+
+
+def test_agglomerate_separates_distinct_groups():
+    from maat.pipeline.corroborate import _agglomerate
+
+    # two tight pairs, far apart — must stay two clusters
+    sim = [
+        [1.0, 0.90, 0.10, 0.10],
+        [0.90, 1.0, 0.10, 0.10],
+        [0.10, 0.10, 1.0, 0.90],
+        [0.10, 0.10, 0.90, 1.0],
+    ]
+    assert sorted(sorted(g) for g in _agglomerate(sim, 0.82)) == [[0, 1], [2, 3]]
+
+
 def test_confidence_read_scales_with_extremity():
     from maat.pipeline.corroborate import confidence_read
 
