@@ -53,7 +53,10 @@ jobs:
           echo "$DEPLOY_SSH_KEY" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.ruff_cache' \
+            python/ "root@$DEPLOY_HOST:/root/python/"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             deploy/docker-compose.prod.yml "root@$DEPLOY_HOST:/root/docker-compose.yml"
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "root@$DEPLOY_HOST" \
-            'cd /root && docker compose pull && docker compose up -d --wait && docker compose ps'
+            'cd /root && docker compose up -d --build && docker compose ps'
