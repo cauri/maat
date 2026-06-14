@@ -1,0 +1,153 @@
+{
+  "generated_at": "2026-06-14T12:00:00+00:00",
+  "count": 3,
+  "_note": "SYNTHETIC offline fixture mirroring GET /api/feed. Lets the client build, preview, and run with no backend. Story 1 is the corpus resignation-scandal cluster (§5.5 wire-collapse + primary); story 2 is an extraordinary, wire-only, low-confidence claim (§5.6 extremity); story 3 is French, to exercise on-device translation (§4, #54).",
+  "stories": [
+    {
+      "id": "cluster-resignation",
+      "fact": "Valoria's finance minister Daniel Reyes resigned amid a procurement scandal.",
+      "confidence": 0.88,
+      "extremity": "notable",
+      "independent_originators": 3,
+      "has_primary": true,
+      "source_count": 5,
+      "languages": ["en"],
+      "originator_groups": [
+        { "sources": ["AFP", "Daily Herald", "Morning Post"], "collapsed": true },
+        { "sources": ["The Investigative Times"], "collapsed": false },
+        { "sources": ["Valoria Ministry of Finance (official statement)"], "collapsed": false }
+      ],
+      "claims": [
+        {
+          "id": "11111111-1111-1111-1111-111111111111",
+          "text": "Valoria's finance minister Daniel Reyes resigned on Tuesday amid a widening procurement scandal.",
+          "voice": "attributed",
+          "speaker": "the finance ministry",
+          "kind": "fact",
+          "is_synthesis": false,
+          "horizon": null,
+          "in_headline": true,
+          "evidence_span": "the finance ministry said",
+          "article_id": "afp-2026-0601",
+          "source": "AFP",
+          "language": "en"
+        },
+        {
+          "id": "22222222-2222-2222-2222-222222222222",
+          "text": "Three state contracts were routed through a shell company controlled by Reyes's brother-in-law.",
+          "voice": "own",
+          "speaker": null,
+          "kind": "fact",
+          "is_synthesis": true,
+          "horizon": null,
+          "in_headline": false,
+          "evidence_span": "this paper revealed",
+          "article_id": "investigativetimes-2026-0601",
+          "source": "The Investigative Times",
+          "language": "en"
+        },
+        {
+          "id": "33333333-3333-3333-3333-333333333333",
+          "text": "An independent review of recent procurement decisions will commence under an external auditor.",
+          "voice": "own",
+          "speaker": null,
+          "kind": "fact",
+          "is_synthesis": false,
+          "horizon": null,
+          "in_headline": false,
+          "evidence_span": "An independent review ... will commence",
+          "article_id": "ministry-statement-2026-0601",
+          "source": "Valoria Ministry of Finance (official statement)",
+          "language": "en"
+        }
+      ]
+    },
+    {
+      "id": "cluster-goldreserve",
+      "fact": "A leaked memo shows Country X's central bank secretly sold its entire gold reserve.",
+      "confidence": 0.31,
+      "extremity": "extraordinary",
+      "independent_originators": 1,
+      "has_primary": false,
+      "source_count": 3,
+      "languages": ["en"],
+      "originator_groups": [
+        { "sources": ["Global Wire", "Daily Mirror", "Evening Star"], "collapsed": true }
+      ],
+      "claims": [
+        {
+          "id": "44444444-4444-4444-4444-444444444444",
+          "text": "Country X's central bank secretly sold its entire gold reserve, according to a leaked memo.",
+          "voice": "attributed",
+          "speaker": "a leaked memo",
+          "kind": "fact",
+          "is_synthesis": false,
+          "horizon": null,
+          "in_headline": true,
+          "evidence_span": "according to a leaked memo",
+          "article_id": "globalwire-2026-0608",
+          "source": "Global Wire",
+          "language": "en"
+        },
+        {
+          "id": "55555555-5555-5555-5555-555555555555",
+          "text": "Analysts warn the currency could collapse within a week.",
+          "voice": "attributed",
+          "speaker": "analysts",
+          "kind": "projection",
+          "is_synthesis": false,
+          "horizon": "short-term",
+          "in_headline": false,
+          "evidence_span": "Analysts warn",
+          "article_id": "globalwire-2026-0608",
+          "source": "Global Wire",
+          "language": "en"
+        }
+      ]
+    },
+    {
+      "id": "cluster-marseille",
+      "fact": "Wildfires near Marseille forced thousands to evacuate.",
+      "confidence": 0.72,
+      "extremity": "notable",
+      "independent_originators": 2,
+      "has_primary": true,
+      "source_count": 3,
+      "languages": ["fr"],
+      "originator_groups": [
+        { "sources": ["Le Méridional"], "collapsed": false },
+        { "sources": ["Préfecture des Bouches-du-Rhône (communiqué)"], "collapsed": false }
+      ],
+      "claims": [
+        {
+          "id": "66666666-6666-6666-6666-666666666666",
+          "text": "Les incendies près de Marseille ont forcé des milliers de personnes à évacuer mardi soir.",
+          "voice": "own",
+          "speaker": null,
+          "kind": "fact",
+          "is_synthesis": false,
+          "horizon": null,
+          "in_headline": true,
+          "evidence_span": "des milliers de personnes à évacuer",
+          "article_id": "meridional-2026-0610",
+          "source": "Le Méridional",
+          "language": "fr"
+        },
+        {
+          "id": "77777777-7777-7777-7777-777777777777",
+          "text": "La préfecture a déclaré l'état d'urgence dans trois communes.",
+          "voice": "attributed",
+          "speaker": "la préfecture",
+          "kind": "fact",
+          "is_synthesis": false,
+          "horizon": null,
+          "in_headline": false,
+          "evidence_span": "a déclaré l'état d'urgence",
+          "article_id": "prefecture-2026-0610",
+          "source": "Préfecture des Bouches-du-Rhône (communiqué)",
+          "language": "fr"
+        }
+      ]
+    }
+  ]
+}

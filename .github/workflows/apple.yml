@@ -1,0 +1,42 @@
+name: apple
+
+# Path-filtered iOS/macOS client CI (PLAN §8 P6; DECISIONS D23). Kept off the Rust/Python merge gate;
+# only runs when the Apple client changes.
+on:
+  push:
+    branches: [main]
+    paths: ['apple/**', '.github/workflows/apple.yml']
+  pull_request:
+    paths: ['apple/**', '.github/workflows/apple.yml']
+
+jobs:
+  client:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apple
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # Real gate today: project.yml must generate a valid project on any macOS runner.
+      - name: Generate project
+        run: xcodegen generate
+
+      # The build needs the iOS 26+ SDK (Foundation Models / Translation / SwiftData). Hosted runners
+      # lag the beta toolchain, so compile only when a 26+ SDK is actually present — otherwise this is a
+      # green no-op until GitHub ships Xcode ≥26 (or a self-hosted runner provides it). Build locally
+      # with Xcode 27 in the meantime (see apple/README.md).
+      - name: Build (if iOS 26+ SDK available)
+        run: |
+          if xcodebuild -showsdks | grep -qE 'iphonesimulator(2[6-9]|[3-9][0-9])'; then
+            SDK=$(xcodebuild -showsdks | grep -oE 'iphonesimulator(2[6-9]|[3-9][0-9])\.[0-9]+' | head -1)
+            echo "Building against $SDK"
+            xcodebuild -project Maat.xcodeproj -scheme Maat \
+              -sdk "$SDK" -destination 'generic/platform=iOS Simulator' \
+              build CODE_SIGNING_ALLOWED=NO
+          else
+            echo "::notice::No iOS 26+ SDK on this runner — skipping build (project generation passed). Build locally with Xcode 27."
+          fi
