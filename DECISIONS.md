@@ -1,0 +1,121 @@
+# Maat — Decision Record
+
+ADR-style log of the engineering decisions made so far. Format per decision: **Decision** ·
+**Context** · **Options** · **Why** (and, where it matters, who decided). Newest context lives in
+`PLAN.md`; this file is the *why* behind each call so we don't re-litigate. The product *why* lives in
+`BRIEF.md`.
+
+_Started 2026-06-14 (design conversation)._
+
+---
+
+### D1 — Name: Maat
+**Decision:** the product/repo/CLI is **Maat** (Ma'at, "mah-AHT"), no apostrophe. Agents named from
+the myth: Anubis (scorer), Thoth (scribe/store), Assessor (classification judgement), Ammit (gate).
+**Why:** Ma'at = truth/balance, the heart weighed against the feather — the product's literal
+mechanic, not a skin. No apostrophe keeps URLs/packages/DNS clean.
+
+### D2 — No orchestrator; peer-to-peer choreography
+**Decision:** agents coordinate peer-to-peer (event choreography + backward "find me corroboration"
+asks). No central orchestrator (no "Osiris"). **A2A** the protocol deferred until a real cross-trust
+boundary exists. **Options:** A2A mesh + orchestrator now / logical agents + simple coordination.
+**Why (cauri):** getting agents to coordinate beats a conductor; A2A ceremony buys nothing inside one
+backend yet.
+
+### D3 — Agent decomposition: judgement → agent, mechanical → tool; dynamic sub-agents
+**Decision:** judgement work is an agent; deterministic work is a tool. Any agent can **spawn
+sub-agents on demand** — decomposition is a runtime decision, not a fixed roster. **Why (cauri):**
+keeps the agent count honest and emergent; "tools become agents only when they must judge" (a lean,
+not a law).
+
+### D4 — Rust kernel + Python multi-agent layer
+**Decision:** Rust for the deterministic kernel/spine; Python for the LLM judgement agents.
+**Options:** all-Rust / Rust kernel + Python agents. **Why (cauri):** Rust gives a fast, correct,
+auditable spine; Python keeps the agents where the LLM/agent/MCP ecosystem is richest.
+
+### D5 — Event-sourcing from the start; events are the source of truth
+**Decision:** append-only event log is the source of truth; confidence/reputation are folds over
+events, never stored truth; one log = audit + RL substrate + projections. **Options:** event-sourcing
+on the spine / events as an audit layer over a mutable store. **Why (cauri):** auditability +
+longitudinal re-credit against primary truth fall out for free; it's the substrate the whole product
+needs.
+
+### D6 — Postgres + pgvector; NATS (JetStream)
+**Decision:** Postgres+pgvector as the read-model/canonical store; NATS JetStream as the durable
+event log + bus. **Why:** simplest durable store that also carries the graph + vectors; NATS does both
+the choreography and the durable audit log; both self-hostable EU.
+
+### D7 — Claude/Mistral split; Claude allowed via EU region
+**Decision:** Mistral for bulk/near-mechanical stages, Claude for the hardest corroboration judgement
+(possibly language-aware); route Claude via an EU region. **Options:** Claude-in-region / Mistral-only
+/ split. **Why (cauri):** "European as much as possible" is a strong preference, **not** a hard line;
+the core judgement gets the strongest model.
+
+### D8 — Mistral embeddings
+**Decision:** use Mistral embeddings behind a swappable tool interface. **Why (cauri):** worth trying;
+trivially swappable; watch language coverage once any-language. 
+
+### D9 — Host on Hetzner, EU-sovereign where feasible
+**Decision:** self-host on Hetzner in the EU; European infra as much as possible. **Why (cauri):**
+sovereignty. Honest limit: Apple on-device + PCC (Tier 2/3) are inherently Apple/US.
+
+### D10 — Judge in native language; translate for display only
+**Decision:** veracity judgement runs in the source language; translation is display-only, on-device
+first with cloud-foundation-model fallback. **Why:** translation alters the things veracity hinges on
+(said vs alleged, hedges, attribution) — never score a translation. EN/PT/FR constraint **dropped**:
+any language/culture works.
+
+### D11 — RL pillar; reward = primary truth, never consensus; ~5y backfill
+**Decision:** RL learns where to compensate for bias from truth-over-time; reward anchored to eventual
+primary truth, never consensus; bootstrap by replaying ~5 years (decaying capped prior, resolved-
+subset-only, archive-bias corrected). **Why (cauri):** truth-over-time tells us where bias is;
+consensus-as-reward would rebuild the conformity machine.
+
+### D12 — Corroboration is reputation-weighted but bounded
+**Decision:** higher-reputation sources count for more toward corroboration, but bounded — never
+over-index on one source; reputation shifts over time; a primary source lets an unknown/low-rep source
+still win. **Why (cauri):** weight reputation without rebuilding conformity (protects §6.6).
+
+### D13 — Multimodality is first-class, suspect evidence
+**Decision:** images/video are evidence but AI-gen-suspect; corroboration carries them. Same clip
+reshared = one source (perceptual-dedup); N independent angles corroborate. Don't trust deepfake
+detectors over corroboration. **Why (cauri):** corroboration is the real defence against synthetic
+media; mirrors the text independent-originator logic.
+
+### D14 — Gamelan = inspiration, never a fork (IP)
+**Decision:** Gamelan may inspire Maat's platform (Source/Effect seam, event-sourced folds, Check/
+Verdict gate, bounded self-modification, verification practices) but is never referenced or forked;
+patterns re-derived under Maat's own names. **Why (cauri):** keep Maat's IP lineage clean.
+
+### D15 — cat-cafe adopted for observability + immediate-eval; longitudinal eval is native
+**Decision:** adopt cat-cafe (Apache-2.0, self-hosted EU) for trace ingestion, trace UI, online LLM-
+judge, eval metrics; build the longitudinal half (deferred primary-truth resolution, calibration, RL
+feedback, tenancy) natively in the event-sourced kernel, linked by `trace_id`. **Why:** cat-cafe's
+data model (7-day TTL, resolve-at-trace-time, no tenancy) fights the longitudinal loop — which our
+event log owns by design.
+
+### D16 — Code quality organised by the bright line
+**Decision:** deterministic kernel = property tests + replay-goldens + clippy-deny, **hard-block**;
+reference-oracle differential testing added once scoring stabilises. Judgement rim = evals +
+calibration, **advisory-band** gating. Unit + integration coverage, **all on CI** (deterministic
+blocks, evals advisory + nightly). DECISIONS/TIMELINE + "what breaks if wrong?" ritual from day one.
+**Why (cauri):** advisory band on the rim, hard block on the kernel; #3 (oracle timing) delegated to
+me — oracle pays off once there's a stable thing to be an oracle of.
+
+### D17 — User-activity capture: collection-only, edge-aggregated, two lanes
+**Decision:** capture engagement signals for the platform's learning; **collection-only now**,
+meaning discovered later by regression. Individual signals stay on-device (personalisation); aggregate
+signals are anonymised **at the edge** before transmission and feed the shared layer. **What the
+signals mean is an open question — no pre-imposed routing.** **Why (cauri):** edge-aggregation makes
+"aggregate/anonymised" GDPR/Apple-safe by construction; don't govern data we haven't collected.
+
+### D18 — Feedback auto-fix loop (design; guardrails TO CONFIRM)
+**Decision (shape):** in-app feedback → event → triage agent → doable: coding sub-agent opens a
+tested PR through CI; questionable: review-queue projection. Intake/triage/queue bespoke on the event
+log (EU-sovereign); code path via real PRs. **Guardrails proposed, awaiting cauri:** "fix immediately"
+= green PR not auto-deploy; veracity core never auto-fixed; feedback is untrusted input.
+
+### D19 — Build riskiest-slice-first
+**Decision:** start with the veracity-core vertical slice on a small corpus (P1), not the whole
+estate; deferred items (schema, claim→node attachment, prompts) resolve by building. **Why:** the core
+is the make-or-break; the brief itself says expect change as the build teaches us.

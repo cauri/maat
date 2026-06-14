@@ -1,0 +1,29 @@
+# --- secrets / local env (NEVER commit) ---
+.env
+.env.*
+!.env.example
+
+# --- rust ---
+**/target/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- local data / build ---
+/data/
+*.log
+
+# --- task tracker (pending ba-vs-github-issues decision, PLAN §11) ---
+.ba/
+
+# --- os / editor ---
+.DS_Store
+.idea/
+.vscode/
