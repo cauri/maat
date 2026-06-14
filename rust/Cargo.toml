@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/maat-kernel"]
+members = ["crates/maat-kernel", "crates/maat-kerneld"]
 
 [workspace.package]
 edition = "2021"

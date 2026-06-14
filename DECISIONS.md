@@ -119,3 +119,21 @@ log (EU-sovereign); code path via real PRs. **Guardrails proposed, awaiting caur
 **Decision:** start with the veracity-core vertical slice on a small corpus (P1), not the whole
 estate; deferred items (schema, claim→node attachment, prompts) resolve by building. **Why:** the core
 is the make-or-break; the brief itself says expect change as the build teaches us.
+
+### D20 — Stand up the real event-sourced architecture from the start
+**Decision (cauri):** build the real system, not a Python prototype, and iterate in it. **Shape:**
+Postgres = append-only `events` log (source of truth) + projections + pgvector; NATS = live
+choreography bus; the Rust kernel (`maat-kerneld`) = the deterministic spine / single writer
+(validates + appends events, folds projections, will host the mechanical tools); Python agents = LLM
+judgement on the bus. Refines D6 — Postgres is the durable event store, NATS is transport, not the
+durable log; a pragmatic iteration cauri sanctioned ("iterate in the real thing").
+
+### D21 — Single-user now; tenant-aware but not over-engineered
+**Decision (cauri):** "this is for me only for right now." Schema carries a `tenant_id` (default
+`cauri`) so multi-tenancy isn't painted out, but build NO auth/tenant-isolation machinery yet.
+
+### D22 — Autonomous-session flow + budget
+**Decision (cauri delegated the flow):** one feature branch per coherent chunk → CI + Claude review →
+self-merge when green → deploy on merge; no stacking (merge each before the next). Budget ≤ $1000 for
+the session. Veracity prompts created without per-prompt sign-off, each marked `DRAFT — review on
+return`.
