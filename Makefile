@@ -21,6 +21,15 @@ py-setup:
 py-smoke:
 	cd python && uv run python scripts/smoke_providers.py
 
+agents:
+	cd python && uv run python -m maat.agents
+
+ingest-corpus:
+	cd python && uv run python scripts/ingest_corpus.py
+
+web:
+	cd python && uv run uvicorn maat.web.app:app --host 0.0.0.0 --port 8000
+
 py-lint:
 	cd python && uv run ruff check .
 
