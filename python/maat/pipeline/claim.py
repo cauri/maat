@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Claim(BaseModel):
@@ -19,6 +20,7 @@ class Claim(BaseModel):
     (§5.3); they are None/False until that stage runs.
     """
 
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     text: str
     voice: Literal["own", "attributed"]
     speaker: str | None = None
