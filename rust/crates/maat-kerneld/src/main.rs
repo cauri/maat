@@ -61,7 +61,10 @@ async fn main() -> Result<()> {
     while let Some(msg) = sub.next().await {
         match serde_json::from_slice::<EventEnvelope>(&msg.payload) {
             Ok(ev) => {
-                record_and_project(&pool, &ev).await?;
+                if let Err(e) = record_and_project(&pool, &ev).await {
+                    tracing::error!("project failed (type={}): {e}", ev.typ);
+                    continue;
+                }
                 tracing::info!("recorded event type={} stream={}", ev.typ, ev.stream_id);
                 if smoke {
                     let n: i64 = sqlx::query_scalar("select count(*) from articles")
@@ -103,5 +106,39 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .execute(pool)
         .await?;
     }
+
+    if ev.typ == "claims.extracted" {
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let claims = ev.data.get("claims").and_then(|v| v.as_array()).unwrap_or(&empty);
+        let article_id = ev
+            .data
+            .get("article_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(ev.stream_id.as_str());
+        for c in claims {
+            sqlx::query(
+                "insert into claims \
+                 (id, tenant_id, article_id, text, voice, speaker, relay_chain, in_headline, \
+                  evidence_span, kind, is_synthesis, horizon) \
+                 values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                 on conflict (id) do nothing",
+            )
+            .bind(c.get("id").and_then(|v| v.as_str()))
+            .bind(&ev.tenant_id)
+            .bind(article_id)
+            .bind(c.get("text").and_then(|v| v.as_str()))
+            .bind(c.get("voice").and_then(|v| v.as_str()))
+            .bind(c.get("speaker").and_then(|v| v.as_str()))
+            .bind(c.get("relay_chain").map(Json))
+            .bind(c.get("in_headline").and_then(|v| v.as_bool()).unwrap_or(false))
+            .bind(c.get("evidence_span").and_then(|v| v.as_str()))
+            .bind(c.get("kind").and_then(|v| v.as_str()))
+            .bind(c.get("is_synthesis").and_then(|v| v.as_bool()).unwrap_or(false))
+            .bind(c.get("horizon").and_then(|v| v.as_str()))
+            .execute(pool)
+            .await?;
+        }
+    }
+
     Ok(())
 }

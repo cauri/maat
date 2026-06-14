@@ -57,3 +57,22 @@ def test_prompts_keep_context_placeholders():
         assert token in EXTRACT_PROMPT
     for token in ("{article_text}", "{claims_json}"):
         assert token in CLASSIFY_PROMPT
+
+
+def test_event_envelope_shape():
+    import json
+
+    from maat.events import envelope
+
+    e = json.loads(envelope("art-1", "article.ingested", {"title": "x"}))
+    assert e == {
+        "stream_id": "art-1",
+        "type": "article.ingested",
+        "data": {"title": "x"},
+        "tenant_id": "cauri",
+    }
+
+
+def test_claim_gets_default_id():
+    c = Claim.model_validate({"text": "x", "voice": "own", "evidence_span": "x"})
+    assert isinstance(c.id, str) and len(c.id) == 36
