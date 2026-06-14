@@ -1,7 +1,8 @@
 """Deterministic pipeline tests (no live API — those stay out of the CI gate)."""
 
 from maat.pipeline.claim import Claim
-from maat.pipeline.extract import PROMPT
+from maat.pipeline.classify import PROMPT as CLASSIFY_PROMPT
+from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 
 
 def test_claim_validates_attributed_with_chain():
@@ -29,6 +30,30 @@ def test_claim_defaults_for_own_voice():
     assert c.in_headline is False
 
 
-def test_prompt_keeps_context_placeholders():
+def test_claim_carries_classification_fields():
+    c = Claim.model_validate(
+        {
+            "text": "The deal will collapse next quarter",
+            "voice": "own",
+            "evidence_span": "the deal will collapse next quarter",
+            "kind": "projection",
+            "is_synthesis": False,
+            "horizon": "next quarter",
+        }
+    )
+    assert c.kind == "projection"
+    assert c.horizon == "next quarter"
+
+
+def test_classification_fields_default_unset():
+    c = Claim.model_validate({"text": "x", "voice": "own", "evidence_span": "x"})
+    assert c.kind is None
+    assert c.is_synthesis is False
+    assert c.horizon is None
+
+
+def test_prompts_keep_context_placeholders():
     for token in ("{article_text}", "{source_metadata}", "{detected_language}"):
-        assert token in PROMPT
+        assert token in EXTRACT_PROMPT
+    for token in ("{article_text}", "{claims_json}"):
+        assert token in CLASSIFY_PROMPT
