@@ -203,7 +203,19 @@ _PROVENANCE_MARKERS = (
     "documents", "filing", "study", "survey", "data show", "we found", "this paper",
     "our investigation", "has learned", "understands", "interview", '"', "“",
 )
-_BALD_ORIGINATOR_WEIGHT = 0.35
+# Anonymous-but-stated sourcing — attributed, but to an unnamed source. Weighted between a
+# named source and a bald assertion (cauri's gradient: named > anonymous > none).
+_ANONYMOUS_MARKERS = (
+    "sources said", "sources told", "sources say", "a source", "two sources", "three sources",
+    "sources familiar", "people familiar", "person familiar", "people briefed", "person briefed",
+    "people close to", "person close to", "officials said", "official said", "officials told",
+    "on condition of anonymity", "speaking on condition", "declined to be named",
+    "did not want to be named", "asked not to be named", "wished to remain", "anonymity",
+    "insiders", "an insider", "a senior official", "people with knowledge",
+)
+_W_NAMED = 1.0      # primary source, or a named person / organisation / document
+_W_ANONYMOUS = 0.6  # attributed, but to an unnamed source
+_W_BALD = 0.3       # no attribution at all — stated in the outlet's own voice
 
 
 def has_provenance(body: str) -> bool:
@@ -216,18 +228,34 @@ def has_provenance(body: str) -> bool:
     return any(m in low for m in _PROVENANCE_MARKERS)
 
 
+def _is_anonymous(body: str) -> bool:
+    low = body.lower()
+    return any(m in low for m in _ANONYMOUS_MARKERS)
+
+
+def attribution_weight(body: str, source: str) -> float:
+    """How much one article counts as an independent originator, by sourcing quality (§5.2):
+    a primary or NAMED source counts fully; an ANONYMOUS but stated source counts less; a BALD
+    assertion with no attribution counts least. (cauri: good outlets say where it came from;
+    the more specific the attribution, the more it corroborates.) DRAFT tiers + weights."""
+    if is_primary_source(source):
+        return _W_NAMED
+    if not has_provenance(body):
+        return _W_BALD
+    return _W_ANONYMOUS if _is_anonymous(body) else _W_NAMED
+
+
 def effective_originators(
     groups: list[list[str]], bodies: dict[str, str], sources: dict[str, str]
 ) -> float:
-    """Independent-originator count weighted by sourcing quality (§5.2). An originator whose
-    article(s) state no provenance — a bald assertion, possibly laundered — counts as a
-    fraction of one. A primary source is its own provenance and always counts fully."""
+    """Independent-originator count weighted by sourcing quality (§5.2). Each originator counts
+    by its best-attributed article — a named/primary source fully, an anonymous source less, a
+    bald assertion least — so spread behind weak sourcing adds little corroboration."""
     total = 0.0
     for g in groups:
-        sourced = any(
-            is_primary_source(sources.get(a, "")) or has_provenance(bodies.get(a, "")) for a in g
+        total += max(
+            (attribution_weight(bodies.get(a, ""), sources.get(a, "")) for a in g), default=_W_BALD
         )
-        total += 1.0 if sourced else _BALD_ORIGINATOR_WEIGHT
     return round(total, 2)
 
 
