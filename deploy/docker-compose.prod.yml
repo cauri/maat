@@ -28,6 +28,17 @@ services:
       timeout: 3s
       retries: 10
 
+  reader:
+    build: ./python
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
   natsdata:
