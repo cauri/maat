@@ -76,3 +76,24 @@ def test_event_envelope_shape():
 def test_claim_gets_default_id():
     c = Claim.model_validate({"text": "x", "voice": "own", "evidence_span": "x"})
     assert isinstance(c.id, str) and len(c.id) == 36
+
+
+def test_collapse_wire_and_cascade_to_independent_originators():
+    from maat.pipeline.corroborate import collapse_originators
+
+    bodies = {
+        "afp": "Minister X resigned on Tuesday amid a procurement scandal, the ministry said.",
+        "reprint": "Minister X resigned on Tuesday amid a procurement scandal, the ministry said.",
+        "cascade": "X has quit, according to AFP, amid the scandal.",
+        "indie": "After our shell-company investigation, X stepped down today, this paper found.",
+    }
+    sources = {"afp": "AFP", "reprint": "Daily News", "cascade": "Morning Post", "indie": "The Investigative Times"}
+    groups = collapse_originators(["afp", "reprint", "cascade", "indie"], bodies, sources)
+    assert len(groups) == 2  # {afp, reprint, cascade} wire/cascade node + {indie}
+
+
+def test_is_primary_source():
+    from maat.pipeline.corroborate import is_primary_source
+
+    assert is_primary_source("Valoria Ministry of Finance (official statement)")
+    assert not is_primary_source("Daily Herald")

@@ -1,13 +1,13 @@
 """Maat reader — a minimal web feed over the Postgres projections.
 
-Shows every article and the claims the pipeline pulled from it, with the veracity signals
-we have so far (voice/attribution, fact vs projection, synthesis). Corroboration + a
-confidence read fill in as §5.4-5.7 land. Run: `make web` (or uvicorn maat.web.app:app).
+Shows the corroboration read (independent originators per fact, §5.5) up top, then every
+article and the claims pulled from it with their veracity signals. Run: `make web`.
 """
 
 from __future__ import annotations
 
 import html
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -38,10 +38,15 @@ async def feed() -> str:
         "select article_id, voice, speaker, kind, is_synthesis, horizon, in_headline, text "
         "from claims order by created_at"
     )
+    clusters = await pool.fetch(
+        "select fact, sources, originators, independent_originators, has_primary "
+        "from clusters order by independent_originators desc, fact"
+    )
+    id_to_source = {a["id"]: a["source"] for a in articles}
     by_article: dict[str, list] = {}
     for c in claims:
         by_article.setdefault(c["article_id"], []).append(c)
-    return _page(articles, by_article)
+    return _page(articles, by_article, clusters, id_to_source)
 
 
 def _badge(text: str, cls: str) -> str:
@@ -75,15 +80,48 @@ def _card(a, claims) -> str:
         f'<article class="card"><div class="src">{html.escape(a["source"] or "")}</div>'
         f'<h2>{html.escape(a["title"] or "")}</h2>'
         f'<div class="claims">{rows}</div>'
-        f'<div class="foot">{len(claims)} claims · corroboration pending</div></article>'
+        f'<div class="foot">{len(claims)} claims</div></article>'
     )
 
 
-def _page(articles, by_article) -> str:
+def _jload(v):
+    return json.loads(v) if isinstance(v, str) else (v or [])
+
+
+def _corro(cl, id_to_source) -> str:
+    origs = _jload(cl["originators"])
+    rows = []
+    for grp in origs:
+        names = sorted({id_to_source.get(a, a) for a in grp})
+        wire = len(grp) > 1
+        label = "wire · collapsed" if wire else "independent"
+        rows.append(
+            f'<div class="orig {"wire" if wire else "indep"}">'
+            f'<span class="ol">{label}</span>{html.escape(", ".join(names))}</div>'
+        )
+    primary = _badge("primary source", "fact") if cl["has_primary"] else ""
+    n_src = len(_jload(cl["sources"]))
+    return (
+        f'<div class="corro"><div class="cfact">{html.escape(cl["fact"])}</div>'
+        f'<div class="cmeta"><b>{n_src}</b> sources &rarr; '
+        f'<b>{cl["independent_originators"]}</b> independent originators {primary}</div>'
+        f'<div class="origs">{"".join(rows)}</div></div>'
+    )
+
+
+def _page(articles, by_article, clusters, id_to_source) -> str:
+    panel = ""
+    if clusters:
+        items = "".join(_corro(c, id_to_source) for c in clusters)
+        panel = f'<section class="panel"><h3>Corroboration · independent originators, not spread</h3>{items}</section>'
     cards = "".join(_card(a, by_article.get(a["id"], [])) for a in articles)
     if not cards:
         cards = '<p class="empty">No articles yet — start the agents and ingest a corpus.</p>'
-    return _HTML.replace("{{cards}}", cards).replace("{{count}}", str(len(articles)))
+    return (
+        _HTML.replace("{{panel}}", panel)
+        .replace("{{cards}}", cards)
+        .replace("{{count}}", str(len(articles)))
+    )
 
 
 _HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -93,10 +131,21 @@ _HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
  font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-header.top{padding:28px 20px 8px;max-width:760px;margin:0 auto}
+header.top{padding:28px 20px 6px;max-width:760px;margin:0 auto}
 header.top h1{margin:0;font-size:26px;letter-spacing:-.02em}
 header.top p{margin:4px 0 0;color:var(--mut);font-size:14px}
 main{max-width:760px;margin:0 auto;padding:12px 20px 60px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:14px 0}
+.panel h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+.corro{padding:11px 0;border-top:1px solid var(--line)}
+.corro:first-of-type{border-top:0}
+.cfact{font-weight:600;letter-spacing:-.01em}
+.cmeta{font-size:14px;color:#3a3833;margin:2px 0 7px}
+.origs{display:flex;flex-direction:column;gap:5px}
+.orig{font-size:13px;padding:5px 11px;border-radius:9px}
+.orig.wire{background:#faeeda}
+.orig.indep{background:#eaf3de}
+.ol{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-right:8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
  padding:18px 18px 12px;margin:14px 0;box-shadow:0 1px 2px rgba(0,0,0,.03)}
 .card .src{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
@@ -116,4 +165,4 @@ main{max-width:760px;margin:0 auto;padding:12px 20px 60px}
 .empty{text-align:center;padding:60px 0}
 </style></head><body>
 <header class="top"><h1>Maat</h1><p>{{count}} stories · corroboration over spread · confidence on every claim</p></header>
-<main>{{cards}}</main></body></html>"""
+<main>{{panel}}{{cards}}</main></body></html>"""

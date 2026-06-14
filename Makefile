@@ -27,6 +27,9 @@ agents:
 ingest-corpus:
 	cd python && uv run python scripts/ingest_corpus.py
 
+corroborate:
+	cd python && uv run python -m maat.agents.corroborate_agent
+
 web:
 	cd python && uv run uvicorn maat.web.app:app --host 0.0.0.0 --port 8000
 
