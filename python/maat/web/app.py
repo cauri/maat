@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from maat import events
 from maat.bus import connect as nats_connect
+from maat.evals import evaluate, load_expectations
 from maat.pipeline.corroborate import (
     ClaimRow,
     cluster_id,
@@ -33,6 +34,8 @@ from maat.pipeline.corroborate import (
     confidence_read,
     corroborate_fixed,
 )
+
+CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
 
 DB = os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
 
@@ -128,6 +131,28 @@ async def audit(limit: int = 200) -> str:
         limit,
     )
     return _doc(_audit_page(rows), "audit", "audit")
+
+
+@app.get("/eval", response_class=HTMLResponse)
+async def eval_view() -> str:
+    """A4a — surface the eval harness (#32) over the live projections. Includes, never rebuilds:
+    the same `evaluate()` the CLI runs, rendered for the operator. Golden regression + metrics."""
+    pool = app.state.pool
+    clusters = [
+        dict(r)
+        for r in await pool.fetch(
+            "select fact, sources, originators, independent_originators, has_primary, "
+            "confidence, extremity from clusters"
+        )
+    ]
+    claims = [dict(r) for r in await pool.fetch("select kind from claims")]
+    try:
+        report = evaluate(clusters, claims, load_expectations())
+        err = ""
+    except FileNotFoundError as exc:  # no fixtures checked out
+        report, err = None, f"eval fixtures not found: {exc}"
+    otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    return _doc(_eval_page(report, err, otlp), "eval", "eval")
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -772,15 +797,70 @@ def _audit_page(rows) -> str:
     )
 
 
+def _eval_page(report, err: str, otlp: str) -> str:
+    """A4a — render the eval harness output (#32). `report` is `maat.evals.evaluate(...)`."""
+    obs = (
+        f'<div class="deriv">Tracing → cat-cafe · OTLP <span class="mono">{html.escape(otlp)}</span> · '
+        f'<a class="clink" href="{html.escape(CATCAFE_URL)}">open trace UI ↗</a></div>'
+        if otlp
+        else '<div class="mut sm">OTLP tracing off — set OTEL_EXPORTER_OTLP_ENDPOINT and run '
+        "<span class=\"mono\">make obs-up</span> to stream LLM spans to cat-cafe.</div>"
+    )
+    head = (
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Eval — golden regression + metrics (surfacing #32, not rebuilt)</h3>'
+    )
+    if report is None:
+        return f'{head}<div class="empty">{html.escape(err)}</div>{obs}</div>'
+    m = report["metrics"]
+    n_ok = sum(1 for s in report["stories"] if s.ok)
+    banner = (
+        f'<div class="evbanner {"ok" if report["passed"] else "bad"}">'
+        f'{"PASS" if report["passed"] else "FAIL"} · {n_ok}/{len(report["stories"])} golden stories</div>'
+    )
+    kinds = ", ".join(f"{k}: {v}" for k, v in m["claim_kinds"].items()) or "—"
+    labels = ", ".join(f"{k}: {v}" for k, v in m["labels"].items()) or "—"
+    cells = [
+        ("claims", f'{m["claims"]} <span class="mut">({html.escape(kinds)})</span>'),
+        ("clusters",
+         f'{m["clusters"]} <span class="mut">· primary {m["with_primary"]} '
+         f'· extraordinary {m["extraordinary"]}</span>'),
+        ("confidence mean", str(m["confidence_mean"])),
+        ("labels", html.escape(labels)),
+    ]
+    mgrid = "".join(
+        f'<div class="mcell"><div class="mk">{k}</div><div class="mv">{v}</div></div>' for k, v in cells
+    )
+    stories = []
+    for s in report["stories"]:
+        checks = "".join(
+            f'<li>{"✓" if c.ok else "✗"} <b>{html.escape(c.field)}</b> '
+            f'<span class="mono">{html.escape(c.detail)}</span></li>'
+            for c in s.checks
+        )
+        stories.append(
+            f'<div class="estory {"ok" if s.ok else "bad"}">'
+            f'<div class="eh">{"✓" if s.ok else "✗"} {html.escape(s.name)}'
+            f'<span class="mut"> — {html.escape((s.fact or "")[:70])}</span></div>'
+            f'<ul class="prov">{checks or "<li class=mut>matched (no field checks)</li>"}</ul></div>'
+        )
+    return (
+        f'{head}{banner}<div class="mgrid">{mgrid}</div>'
+        f'<div class="bl mt">Golden stories</div>{"".join(stories)}{obs}</div>'
+    )
+
+
 # ============================ chrome ========================================================
 
 
 def _nav(active: str) -> str:
-    links = []
-    for href, label, key in (("/", "Content", "content"), ("/audit", "Audit", "audit")):
-        cls = "on" if key == active else ""
-        links.append(f'<a class="{cls}" href="{href}">{label}</a>')
-    links.append('<span class="dim" title="F4">Runs</span><span class="dim" title="F5">Config</span>')
+    tabs = [("/", "Content", "content"), ("/eval", "Eval", "eval"), ("/audit", "Audit", "audit")]
+    dimmed = [("Runs", "F4"), ("Config", "F5"), ("Sources", "A2")]
+    links = [
+        f'<a class="{"on" if key == active else ""}" href="{href}">{label}</a>'
+        for href, label, key in tabs
+    ]
+    links += [f'<span class="dim" title="{t}">{lbl}</span>' for lbl, t in dimmed]
     return f'<nav class="nav">{"".join(links)}</nav>'
 
 
@@ -878,6 +958,16 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .aud th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border-bottom:1px solid var(--line);padding:6px 8px}
 .aud td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 .atype{font-weight:600;color:var(--acc)}
+.evbanner{display:inline-block;font-weight:700;font-size:13px;padding:4px 12px;border-radius:8px;margin:4px 0 12px}
+.evbanner.ok{background:#eaf3de;color:#3b6d11}.evbanner.bad{background:#fbe4df;color:#b3402e}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:8px 0}
+.mcell{background:#f6f5f2;border-radius:9px;padding:9px 11px}
+.mk{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);font-weight:700}
+.mv{font-size:15px;margin-top:2px}
+.estory{border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin:7px 0}
+.estory.ok{border-color:#cfe3b6;background:#f6faef}
+.estory.bad{border-color:#e9b8ae;background:#fdf4f1}
+.eh{font-weight:600;font-size:14px}
 </style></head><body>
 <header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
 {{nav}}<p>{{subtitle}}</p></header>
