@@ -1,0 +1,46 @@
+{
+  "_note": "SYNTHETIC test fixture (not real news). Built to exercise corroboration §5.5: the fact 'Reyes resigned' is asserted by 5 sources, but independent originators collapse to ~3 — one AFP wire node (the wire story + its 2 near-verbatim reprints + the citation-cascade all collapse to one), one independent original report, and one primary source (weighted highest). Live acquisition replaces this in P2.",
+  "event": "finance-minister-resignation",
+  "articles": [
+    {
+      "id": "afp-2026-0601",
+      "source": "AFP",
+      "kind": "wire",
+      "language": "en",
+      "title": "Valoria finance minister resigns amid procurement scandal",
+      "body": "Valoria's finance minister, Daniel Reyes, resigned on Tuesday amid a widening procurement scandal, the finance ministry said. Reyes had faced mounting pressure over state contracts awarded to a firm linked to his family. 'I am stepping down to allow a full and independent inquiry,' he said in a statement."
+    },
+    {
+      "id": "herald-2026-0601",
+      "source": "Daily Herald",
+      "kind": "wire-reprint",
+      "language": "en",
+      "title": "Valoria finance minister resigns amid procurement scandal",
+      "body": "Valoria's finance minister, Daniel Reyes, resigned on Tuesday amid a widening procurement scandal, the finance ministry said. Reyes had faced mounting pressure over state contracts awarded to a firm linked to his family. He said he was stepping down to allow a full and independent inquiry."
+    },
+    {
+      "id": "morningpost-2026-0601",
+      "source": "Morning Post",
+      "kind": "wire-reprint",
+      "language": "en",
+      "title": "Reyes quits as Valoria finance minister",
+      "body": "Valoria's finance minister Daniel Reyes resigned on Tuesday amid a widening procurement scandal, the finance ministry said, according to AFP. Reyes had faced mounting pressure over state contracts awarded to a firm linked to his family."
+    },
+    {
+      "id": "investigativetimes-2026-0601",
+      "source": "The Investigative Times",
+      "kind": "independent-original",
+      "language": "en",
+      "title": "Reyes steps down days after our shell-company revelations",
+      "body": "Daniel Reyes stepped down from Valoria's finance ministry on Tuesday, days after this paper revealed that three state contracts had been routed through a shell company controlled by his brother-in-law. Reyes denied wrongdoing but said an independent inquiry was warranted."
+    },
+    {
+      "id": "ministry-statement-2026-0601",
+      "source": "Valoria Ministry of Finance (official statement)",
+      "kind": "primary",
+      "language": "en",
+      "title": "Statement on the resignation of the Minister of Finance",
+      "body": "The Minister of Finance, Daniel Reyes, has today tendered his resignation, effective immediately. An independent review of recent procurement decisions will commence under an external auditor."
+    }
+  ]
+}
