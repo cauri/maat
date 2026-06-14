@@ -1,4 +1,4 @@
-.PHONY: help kernel-test kernel-lint py-setup py-smoke py-lint eval acquire obs-up db-up db-down ci
+.PHONY: help kernel-test kernel-lint py-setup py-smoke py-lint eval acquire tick obs-up db-up db-down ci
 
 help:
 	@echo "kernel-test  - cargo test (rust kernel)"
@@ -8,6 +8,7 @@ help:
 	@echo "py-lint      - ruff check"
 	@echo "eval         - eval harness over the projections (golden + metrics)"
 	@echo "acquire      - GDELT: fetch real articles (QUERY=... N=12, live web + APIs)"
+	@echo "tick         - ingestion clock: acquire NEW articles for config/topics.txt"
 	@echo "obs-up       - start cat-cafe (OTLP eval sink) on :8800 / :4318"
 	@echo "db-up/db-down- local Postgres + pgvector"
 	@echo "ci           - deterministic gates (kernel-test, kernel-lint, py-lint)"
@@ -38,6 +39,9 @@ eval:
 
 acquire:
 	cd python && uv run python scripts/acquire.py "$(QUERY)" $(N)
+
+tick:
+	cd python && uv run python scripts/clock.py
 
 obs-up:
 	docker compose --profile obs up -d cat-cafe
