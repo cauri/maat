@@ -31,3 +31,28 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --extra dev
       - run: uv run ruff check .
+
+  # Push-to-deploy: only on main, only after the deterministic gates pass.
+  # Deploys the infra baseline today; extends to the app image once it exists.
+  deploy:
+    needs: [rust, python]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy stack over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            deploy/docker-compose.prod.yml "root@$DEPLOY_HOST:/root/docker-compose.yml"
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "root@$DEPLOY_HOST" \
+            'cd /root && docker compose pull && docker compose up -d --wait && docker compose ps'
