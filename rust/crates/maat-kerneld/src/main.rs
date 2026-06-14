@@ -148,8 +148,10 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
             .and_then(|v| v.as_array())
             .unwrap_or(&empty);
         for c in cls {
+            // `and not corrected`: never clobber an operator fix (P8 F3) on a pipeline re-run.
             sqlx::query(
-                "update claims set kind = $2, is_synthesis = $3, horizon = $4 where id = $1::uuid",
+                "update claims set kind = $2, is_synthesis = $3, horizon = $4 \
+                 where id = $1::uuid and not corrected",
             )
             .bind(c.get("id").and_then(|v| v.as_str()))
             .bind(c.get("kind").and_then(|v| v.as_str()))
@@ -184,6 +186,43 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(d.get("extremity").and_then(|v| v.as_str()).unwrap_or("notable"))
         .execute(pool)
         .await?;
+    }
+
+    // --- Admin / operator-console projections (P8, F3) -------------------------------------
+    // Operator fixes are events; we fold them like any other and set `corrected` so the
+    // pipeline (claims.classified) will not overwrite the fix on a re-run.
+    if ev.typ == "admin.classification.corrected" {
+        let d = &ev.data;
+        sqlx::query(
+            "update claims set kind = coalesce($2, kind), voice = coalesce($3, voice), \
+             speaker = coalesce($4, speaker), corrected = true, corrected_at = now() \
+             where id = $1::uuid",
+        )
+        .bind(d.get("target").and_then(|v| v.as_str()))
+        .bind(d.get("kind").and_then(|v| v.as_str()))
+        .bind(d.get("voice").and_then(|v| v.as_str()))
+        .bind(d.get("speaker").and_then(|v| v.as_str()))
+        .execute(pool)
+        .await?;
+    }
+
+    if ev.typ == "admin.laundering.flagged" {
+        let d = &ev.data;
+        sqlx::query("update claims set laundering_flag = $2, corrected = true where id = $1::uuid")
+            .bind(d.get("target").and_then(|v| v.as_str()))
+            .bind(d.get("abuse").and_then(|v| v.as_str()))
+            .execute(pool)
+            .await?;
+    }
+
+    // A split / merge / move publishes cluster.removed for the superseded cluster(s) and
+    // cluster.corroborated for the new one(s); the §5.5 recompute runs in the Python console
+    // (where that logic lives). Here we only drop the superseded projection row.
+    if ev.typ == "cluster.removed" {
+        sqlx::query("delete from clusters where id = $1")
+            .bind(ev.data.get("id").and_then(|v| v.as_str()))
+            .execute(pool)
+            .await?;
     }
 
     Ok(())
