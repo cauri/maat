@@ -139,3 +139,26 @@ def test_runs_page_shows_stages_dead_letters_and_recent():
     assert "Acquire / ingest" in out
     assert "Dead-letter" in out and "boom" in out
     assert "Recent events" in out
+
+
+def test_config_knobs_sourced_from_live_code():
+    from maat.config import KNOBS_BY_KEY, groups
+    from maat.providers.seam import CLAUDE_JUDGE
+
+    assert {"model.judge", "gate.floor", "cluster.same_fact"} <= set(KNOBS_BY_KEY)
+    assert KNOBS_BY_KEY["model.judge"]["core"] is True
+    assert KNOBS_BY_KEY["model.bulk"]["core"] is False
+    assert KNOBS_BY_KEY["model.judge"]["default"] == CLAUDE_JUDGE  # not invented
+    assert "Model routing" in groups()
+
+
+def test_config_page_shows_default_override_and_signoff_guard():
+    from maat.web.app import _config_page
+
+    out = _config_page(
+        {"gate.floor": {"value": "0.35", "reason": "too strict", "at": dt.datetime(2026, 6, 15, 10, 0)}}
+    )
+    assert "Config" in out
+    assert "0.35" in out and "pending sign-off" in out  # the proposal is shown, marked pending
+    assert "not auto-applied" in out  # the guardrail is surfaced to the operator
+    assert "core · sign-off" in out  # core knobs flagged

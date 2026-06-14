@@ -24,7 +24,7 @@ from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from maat import events
+from maat import config, events
 from maat.bus import connect as nats_connect
 from maat.evals import evaluate, load_expectations
 from maat.pipeline.corroborate import (
@@ -182,6 +182,32 @@ async def trigger_run(stage: str = Form(...), reason: str = Form("")):
         events.ADMIN_RUN_TRIGGERED, "pipeline", events.admin_event("pipeline", reason=reason, stage=stage)
     )
     return RedirectResponse("/runs", status_code=303)
+
+
+@app.get("/config", response_class=HTMLResponse)
+async def config_view() -> str:
+    """F5 — show every tunable knob with its live default + any proposed (pending) override."""
+    rows = await app.state.pool.fetch(
+        "select distinct on (data->>'key') data->>'key' k, data->>'value' v, "
+        "data->>'reason' r, created_at from events where type = $1 "
+        "order by data->>'key', id desc",
+        events.ADMIN_THRESHOLD_CHANGED,
+    )
+    overrides = {r["k"]: {"value": r["v"], "reason": r["r"], "at": r["created_at"]} for r in rows}
+    return _doc(_config_page(overrides), "config", "config")
+
+
+@app.post("/config/set")
+async def config_set(key: str = Form(...), value: str = Form(...), reason: str = Form("")):
+    # A proposal only — recorded + audited, never auto-applied. Promotion to live (esp. core
+    # knobs: gate floor, scoring, judge model) needs sign-off + A/B-on-replay (D18 / §5).
+    if key in config.KNOBS_BY_KEY and value.strip():
+        await _publish(
+            events.ADMIN_THRESHOLD_CHANGED,
+            key,
+            events.admin_event(key, reason=reason, key=key, value=value.strip()),
+        )
+    return RedirectResponse("/config", status_code=303)
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -896,6 +922,43 @@ def _runs_page(stages, proj, recent, dead) -> str:
     )
 
 
+def _config_page(overrides: dict) -> str:
+    """F5 — render the knob registry grouped, with live defaults + pending proposals."""
+    out = [
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Config — model routing + veracity thresholds (F5)</h3>'
+        '<div class="deriv">Changes are recorded as audited, versioned events — they are '
+        '<b>not auto-applied</b>. Core knobs (gate floor, scoring, judge/classifier models) need '
+        'explicit sign-off + an A/B-on-replay pass before going live (D18 / §5); that promotion '
+        "path is not wired yet.</div>"
+    ]
+    for g in config.groups():
+        out.append(f'<div class="bl mt">{html.escape(g)}</div>')
+        for k in (kn for kn in config.KNOBS if kn["group"] == g):
+            badge = _badge("core · sign-off", "laun") if k["core"] else _badge("ops", "own")
+            ov = overrides.get(k["key"])
+            ov_html = ""
+            if ov:
+                extra = f' · {html.escape(ov["reason"])}' if ov.get("reason") else ""
+                ov_html = (
+                    f'<div class="ovr">proposed → <b>{html.escape(ov["value"])}</b> '
+                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · pending sign-off</span></div>'
+                )
+            out.append(
+                '<div class="crow"><div class="cinfo">'
+                f'<div class="cname">{html.escape(k["label"])} {badge}</div>'
+                f'<div class="mut sm">default <span class="mono">{html.escape(str(k["default"]))}</span> '
+                f'· <span class="mono">{html.escape(k["source"])}</span></div>{ov_html}</div>'
+                '<form class="inline" method="post" action="/config/set">'
+                f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
+                '<input name="value" placeholder="new value">'
+                '<input class="reason" name="reason" placeholder="why">'
+                '<button>Propose</button></form></div>'
+            )
+    out.append("</div>")
+    return "".join(out)
+
+
 def _eval_page(report, err: str, otlp: str) -> str:
     """A4a — render the eval harness output (#32). `report` is `maat.evals.evaluate(...)`."""
     obs = (
@@ -956,10 +1019,11 @@ def _nav(active: str) -> str:
     tabs = [
         ("/", "Content", "content"),
         ("/runs", "Runs", "runs"),
+        ("/config", "Config", "config"),
         ("/eval", "Eval", "eval"),
         ("/audit", "Audit", "audit"),
     ]
-    dimmed = [("Config", "F5"), ("Sources", "A2")]
+    dimmed = [("Sources", "A2")]
     links = [
         f'<a class="{"on" if key == active else ""}" href="{href}">{label}</a>'
         for href, label, key in tabs
@@ -1075,6 +1139,9 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .srow{display:grid;grid-template-columns:1.1fr 1.3fr 1.8fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
 .sname{font-weight:600}
 .scmd{color:var(--mut);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crow{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.cname{font-weight:600;font-size:14px}
+.ovr{font-size:13px;color:#0b6b86;margin-top:3px}
 </style></head><body>
 <header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
 {{nav}}<p>{{subtitle}}</p></header>
