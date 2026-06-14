@@ -16,6 +16,8 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from maat.pipeline.corroborate import confidence_label as _confidence_label
+
 DB = os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
 
 
@@ -87,21 +89,6 @@ def _card(a, claims) -> str:
 
 def _jload(v):
     return json.loads(v) if isinstance(v, str) else (v or [])
-
-
-def _confidence_label(conf: float) -> tuple[str, str]:
-    """Gate-the-floor labelling (§5.7): a verbal verdict + colour tier for a confidence read.
-
-    The bottom tier is the gate — below it a claim is flagged 'thinly sourced', not presented
-    as established. DRAFT thresholds; co-design with cauri.
-    """
-    if conf >= 0.85:
-        return ("Well corroborated", "hi")
-    if conf >= 0.60:
-        return ("Corroborated", "mid")
-    if conf >= 0.40:
-        return ("Limited corroboration", "lo")
-    return ("Thinly sourced", "floor")
 
 
 def _cluster_articles(cl) -> set[str]:
