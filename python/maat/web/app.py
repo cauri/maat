@@ -33,6 +33,7 @@ from maat.pipeline.corroborate import (
     confidence_label as _confidence_label,
     confidence_read,
     corroborate_fixed,
+    is_primary_source,
 )
 
 CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
@@ -208,6 +209,54 @@ async def config_set(key: str = Form(...), value: str = Form(...), reason: str =
             events.admin_event(key, reason=reason, key=key, value=value.strip()),
         )
     return RedirectResponse("/config", status_code=303)
+
+
+@app.get("/sources", response_class=HTMLResponse)
+async def sources_view() -> str:
+    """A2 — source registry off ingested articles + operator allow/deny + ownership grouping."""
+    pool = app.state.pool
+    srcs = await pool.fetch(
+        "select source, count(*) n, max(ingested_at) last, array_agg(distinct language) langs "
+        "from articles where source is not null group by source order by n desc"
+    )
+    id_to_source = {a["id"]: a["source"] for a in await pool.fetch("select id, source from articles")}
+    clusters = [dict(c) for c in await pool.fetch("select originators from clusters")]
+    wire = wire_collapsed_sources(clusters, id_to_source)
+    flags = await pool.fetch(
+        "select distinct on (data->>'source') data->>'source' s, data->>'status' st, "
+        "data->>'reason' r from events where type = $1 order by data->>'source', id desc",
+        events.ADMIN_SOURCE_FLAGGED,
+    )
+    grps = await pool.fetch(
+        "select distinct on (data->>'source') data->>'source' s, data->>'group' g "
+        "from events where type = $1 order by data->>'source', id desc",
+        events.ADMIN_SOURCE_GROUPED,
+    )
+    flag_by = {r["s"]: {"status": r["st"], "reason": r["r"]} for r in flags}
+    group_by = {r["s"]: r["g"] for r in grps}
+    return _doc(_sources_page(srcs, wire, flag_by, group_by), "sources", "sources")
+
+
+@app.post("/sources/flag")
+async def source_flag(source: str = Form(...), status: str = Form(...), reason: str = Form("")):
+    if status in ("allow", "deny"):
+        await _publish(
+            events.ADMIN_SOURCE_FLAGGED,
+            source,
+            events.admin_event(source, reason=reason, source=source, status=status),
+        )
+    return RedirectResponse("/sources", status_code=303)
+
+
+@app.post("/sources/group")
+async def source_group(source: str = Form(...), group: str = Form(...), reason: str = Form("")):
+    if group.strip():
+        await _publish(
+            events.ADMIN_SOURCE_GROUPED,
+            source,
+            events.admin_event(source, reason=reason, source=source, group=group.strip()),
+        )
+    return RedirectResponse("/sources", status_code=303)
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -922,6 +971,62 @@ def _runs_page(stages, proj, recent, dead) -> str:
     )
 
 
+def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
+    """Sources collapsed as wire/cascade — present in a multi-article originator group (§5.5). Pure."""
+    out: set = set()
+    for cl in clusters:
+        for grp in _jload(cl["originators"]):
+            if len(grp) > 1:
+                for art in grp:
+                    out.add(id_to_source.get(art, art))
+    return out
+
+
+def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
+    note = (
+        '<div class="deriv">Registry from ingested articles. Allow/deny + ownership grouping are '
+        "recorded, audited <b>proposals</b> — enforcement (deny → acquisition; the ownership graph "
+        "→ §5.5 originator-collapse) is the follow-up wiring, not faked here. The ownership graph is "
+        "a learned first-class asset (§5); this is where the operator seeds and corrects it.</div>"
+    )
+    rows = []
+    for s in srcs:
+        name = s["source"] or ""
+        esc = html.escape(name)
+        langs = ", ".join(x for x in (s["langs"] or []) if x) or "—"
+        last = f'{s["last"]:%Y-%m-%d}' if s["last"] else "—"
+        badges = []
+        if is_primary_source(name):
+            badges.append(_badge("primary", "fact"))
+        if name in wire:
+            badges.append(_badge("wire-collapsed", "proj"))
+        fl = flag_by.get(name) or {}
+        if fl.get("status") == "deny":
+            badges.append(_badge("denied", "laun"))
+        elif fl.get("status") == "allow":
+            badges.append(_badge("allowed", "own"))
+        if group_by.get(name):
+            badges.append(_badge(f"group · {group_by[name]}", "syn"))
+        rows.append(
+            f'<div class="srow2"><div><div class="sname">{esc} '
+            f'<span class="bs">{"".join(badges)}</span></div>'
+            f'<div class="mut sm">{s["n"]} articles · {html.escape(langs)} · last {last}</div></div>'
+            '<form class="inline" method="post" action="/sources/flag">'
+            f'<input type="hidden" name="source" value="{esc}">'
+            '<select name="status"><option value="deny">deny</option>'
+            '<option value="allow">allow</option></select><button>flag</button></form>'
+            '<form class="inline" method="post" action="/sources/group">'
+            f'<input type="hidden" name="source" value="{esc}">'
+            '<input name="group" placeholder="owner / wire group"><button>group</button></form></div>'
+        )
+    body = "".join(rows) or '<p class="empty">No sources yet — run acquisition (make acquire QUERY=… N=12).</p>'
+    return (
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Sources — registry, allow/deny, ownership graph (A2)</h3>'
+        f"{note}{body}</div>"
+    )
+
+
 def _config_page(overrides: dict) -> str:
     """F5 — render the knob registry grouped, with live defaults + pending proposals."""
     out = [
@@ -1020,10 +1125,11 @@ def _nav(active: str) -> str:
         ("/", "Content", "content"),
         ("/runs", "Runs", "runs"),
         ("/config", "Config", "config"),
+        ("/sources", "Sources", "sources"),
         ("/eval", "Eval", "eval"),
         ("/audit", "Audit", "audit"),
     ]
-    dimmed = [("Sources", "A2")]
+    dimmed: list = []
     links = [
         f'<a class="{"on" if key == active else ""}" href="{href}">{label}</a>'
         for href, label, key in tabs
@@ -1142,6 +1248,7 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .crow{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
 .cname{font-weight:600;font-size:14px}
 .ovr{font-size:13px;color:#0b6b86;margin-top:3px}
+.srow2{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
 </style></head><body>
 <header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
 {{nav}}<p>{{subtitle}}</p></header>

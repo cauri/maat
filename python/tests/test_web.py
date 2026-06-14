@@ -162,3 +162,32 @@ def test_config_page_shows_default_override_and_signoff_guard():
     assert "0.35" in out and "pending sign-off" in out  # the proposal is shown, marked pending
     assert "not auto-applied" in out  # the guardrail is surfaced to the operator
     assert "core · sign-off" in out  # core knobs flagged
+
+
+def test_wire_collapsed_sources_flags_only_multi_article_groups():
+    from maat.web.app import wire_collapsed_sources
+
+    id_to_source = {"a1": "AFP", "a2": "Daily News", "a3": "Indie Times"}
+    clusters = [{"originators": [["a1", "a2"], ["a3"]]}]  # a1+a2 are one wire node; a3 independent
+    assert wire_collapsed_sources(clusters, id_to_source) == {"AFP", "Daily News"}
+
+
+def test_sources_page_registry_badges_and_proposal_note():
+    from maat.web.app import _sources_page
+
+    srcs = [
+        {"source": "European Central Bank", "n": 3, "last": dt.datetime(2026, 6, 15), "langs": ["en"]},
+        {"source": "AFP", "n": 9, "last": dt.datetime(2026, 6, 15), "langs": ["en", "fr"]},
+    ]
+    out = _sources_page(srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}}, {"AFP": "Wire"})
+    assert "European Central Bank" in out and "primary" in out  # primary-source role detected
+    assert "wire-collapsed" in out and "denied" in out and "group · Wire" in out
+    assert "proposals" in out  # enforcement-deferred guardrail surfaced
+
+
+def test_nav_includes_all_p8_tabs():
+    from maat.web.app import _nav
+
+    n = _nav("content")
+    for label in ("Content", "Runs", "Config", "Sources", "Eval", "Audit"):
+        assert label in n
