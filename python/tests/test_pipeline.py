@@ -96,7 +96,11 @@ def test_is_primary_source():
     from maat.pipeline.corroborate import is_primary_source
 
     assert is_primary_source("Valoria Ministry of Finance (official statement)")
+    assert is_primary_source("European Central Bank")  # issuer of its own rate decision
+    assert is_primary_source("Federal Reserve")
     assert not is_primary_source("Daily Herald")
+    assert not is_primary_source("AFP")  # a wire agency relays, it is not a primary source
+    assert not is_primary_source("Reuters")
 
 
 def test_confidence_read_rises_with_corroboration_and_primary():

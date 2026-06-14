@@ -169,9 +169,21 @@ def collapse_originators(
     return _components(n, edges)
 
 
+# Markers that the source IS the issuing body / a primary record, not an outlet relaying it.
+# A stand-in for proper identity resolution (§6.7) — DRAFT, widened from real-data testing
+# (it had missed central banks: the ECB is the primary source for its own rate decision).
+# Deliberately excludes "agency" and "report" — news agencies (AFP, Reuters) are wire, not primary.
+_PRIMARY_MARKERS = (
+    "statement", "press release", "communiqué", "communique", "official",
+    "ministry", "department", "commission", "authority", "regulator",
+    "central bank", "reserve bank", "federal reserve",
+    "document", "dataset", "filing", "transcript",
+)
+
+
 def is_primary_source(source: str) -> bool:
     s = source.lower()
-    return any(k in s for k in ("statement", "ministry", "document", "dataset", "filing", "official"))
+    return any(k in s for k in _PRIMARY_MARKERS)
 
 
 # How much doubt each independent originator leaves, by the claim's prior (§5.6): an
