@@ -1,7 +1,8 @@
 """Maat reader — a minimal web feed over the Postgres projections.
 
-Shows the corroboration read (independent originators per fact, §5.5) up top, then every
-article and the claims pulled from it with their veracity signals. Run: `make web`.
+Rolls corroborated facts up into stories (§5.7): each story leads with its most-asserted
+claim, carries a gate-the-floor confidence label, and lists the other corroborated facts
+beneath. Then every source article and the claims pulled from it. Run: `make web`.
 """
 
 from __future__ import annotations
@@ -88,47 +89,128 @@ def _jload(v):
     return json.loads(v) if isinstance(v, str) else (v or [])
 
 
-def _corro(cl, id_to_source) -> str:
-    origs = _jload(cl["originators"])
+def _confidence_label(conf: float) -> tuple[str, str]:
+    """Gate-the-floor labelling (§5.7): a verbal verdict + colour tier for a confidence read.
+
+    The bottom tier is the gate — below it a claim is flagged 'thinly sourced', not presented
+    as established. DRAFT thresholds; co-design with cauri.
+    """
+    if conf >= 0.85:
+        return ("Well corroborated", "hi")
+    if conf >= 0.60:
+        return ("Corroborated", "mid")
+    if conf >= 0.40:
+        return ("Limited corroboration", "lo")
+    return ("Thinly sourced", "floor")
+
+
+def _cluster_articles(cl) -> set[str]:
+    arts: set[str] = set()
+    for grp in _jload(cl["originators"]):
+        arts.update(grp)
+    return arts
+
+
+def _group_stories(clusters) -> list[list]:
+    """Roll corroborated facts up into stories (§5.7): clusters whose source articles overlap
+    are one story. Render-time grouping for now; a story projection lands with the P4 graph.
+    Within a story the headline is the most-asserted claim (most sources), then confidence."""
+    n = len(clusters)
+    arts = [_cluster_articles(c) for c in clusters]
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if arts[i] & arts[j]:
+                parent[find(i)] = find(j)
+    groups: dict[int, list] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(clusters[i])
+    stories = [
+        sorted(g, key=lambda c: (len(_jload(c["sources"])), float(c["confidence"] or 0)), reverse=True)
+        for g in groups.values()
+    ]
+    stories.sort(key=lambda g: len(_jload(g[0]["sources"])), reverse=True)
+    return stories
+
+
+def _conf_bar(cl) -> str:
+    conf = float(cl["confidence"] or 0.0)
+    pct = round(conf * 100)
+    label, tier = _confidence_label(conf)
+    return (
+        f'<div class="conf {tier}"><div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
+        f'<span class="cpct">{pct}%</span><span class="label {tier}">{html.escape(label)}</span></div>'
+    )
+
+
+def _headline(cl, id_to_source) -> str:
     rows = []
-    for grp in origs:
+    for grp in _jload(cl["originators"]):
         names = sorted({id_to_source.get(a, a) for a in grp})
         wire = len(grp) > 1
-        label = "wire · collapsed" if wire else "independent"
+        lbl = "wire · collapsed" if wire else "independent"
         rows.append(
             f'<div class="orig {"wire" if wire else "indep"}">'
-            f'<span class="ol">{label}</span>{html.escape(", ".join(names))}</div>'
+            f'<span class="ol">{lbl}</span>{html.escape(", ".join(names))}</div>'
         )
     primary = _badge("primary source", "fact") if cl["has_primary"] else ""
     n_src = len(_jload(cl["sources"]))
-    conf = float(cl["confidence"] or 0.0)
-    pct = round(conf * 100)
-    lvl = "hi" if conf >= 0.8 else "mid" if conf >= 0.5 else "lo"
     extremity = cl["extremity"] or "notable"
     ex_text = "extraordinary · bar raised" if extremity == "extraordinary" else f"{extremity} claim"
     ex_badge = f'<span class="ex {extremity}">{html.escape(ex_text)}</span>'
     return (
-        f'<div class="corro"><div class="cfact">{html.escape(cl["fact"])}</div>'
-        f'<div class="conf {lvl}"><div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
-        f'<span class="cpct">{pct}%</span><span class="clab">confidence</span></div>'
+        f'<div class="cfact">{html.escape(cl["fact"])}</div>'
+        f"{_conf_bar(cl)}"
         f'<div class="cmeta"><b>{n_src}</b> sources &rarr; '
         f'<b>{cl["independent_originators"]}</b> independent originators {ex_badge} {primary}</div>'
-        f'<div class="origs">{"".join(rows)}</div></div>'
+        f'<div class="origs">{"".join(rows)}</div>'
     )
+
+
+def _supporting(cl) -> str:
+    conf = float(cl["confidence"] or 0.0)
+    pct = round(conf * 100)
+    _, tier = _confidence_label(conf)
+    return (
+        f'<div class="sup"><span class="sup-pct {tier}">{pct}%</span>'
+        f'<span class="sup-fact">{html.escape(cl["fact"])}</span></div>'
+    )
+
+
+def _story(group, id_to_source) -> str:
+    head = _headline(group[0], id_to_source)
+    sup = ""
+    if len(group) > 1:
+        items = "".join(_supporting(c) for c in group[1:])
+        sup = f'<div class="sup-wrap"><div class="sup-head">Also corroborated in this story</div>{items}</div>'
+    return f'<div class="story">{head}{sup}</div>'
 
 
 def _page(articles, by_article, clusters, id_to_source) -> str:
     panel = ""
+    n_stories = 0
     if clusters:
-        items = "".join(_corro(c, id_to_source) for c in clusters)
-        panel = f'<section class="panel"><h3>Corroboration · independent originators, not spread</h3>{items}</section>'
+        stories = _group_stories(clusters)
+        n_stories = len(stories)
+        items = "".join(_story(g, id_to_source) for g in stories)
+        panel = (
+            '<section class="panel"><h3>Stories · corroboration over spread, confidence on '
+            f"every claim</h3>{items}</section>"
+        )
     cards = "".join(_card(a, by_article.get(a["id"], [])) for a in articles)
     if not cards:
         cards = '<p class="empty">No articles yet — start the agents and ingest a corpus.</p>'
     return (
         _HTML.replace("{{panel}}", panel)
         .replace("{{cards}}", cards)
-        .replace("{{count}}", str(len(articles)))
+        .replace("{{count}}", str(n_stories or len(articles)))
     )
 
 
@@ -145,17 +227,19 @@ header.top p{margin:4px 0 0;color:var(--mut);font-size:14px}
 main{max-width:760px;margin:0 auto;padding:12px 20px 60px}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:14px 0}
 .panel h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
-.corro{padding:11px 0;border-top:1px solid var(--line)}
-.corro:first-of-type{border-top:0}
-.cfact{font-weight:600;letter-spacing:-.01em}
+.story{padding:15px 0;border-top:1px solid var(--line)}
+.story:first-of-type{border-top:0}
+.cfact{font-weight:600;font-size:16px;letter-spacing:-.01em}
 .cmeta{font-size:14px;color:#3a3833;margin:2px 0 7px}
-.conf{display:flex;align-items:center;gap:9px;margin:6px 0 7px}
+.conf{display:flex;align-items:center;gap:9px;margin:7px 0}
 .cbar{flex:1;height:7px;background:var(--line);border-radius:5px;overflow:hidden}
 .cfill{height:100%;border-radius:5px}
-.conf.hi .cfill{background:#3b6d11}.conf.mid .cfill{background:#92580a}.conf.lo .cfill{background:#b3402e}
 .cpct{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums}
-.conf.hi .cpct{color:#3b6d11}.conf.mid .cpct{color:#92580a}.conf.lo .cpct{color:#b3402e}
-.clab{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+.label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:1px 8px;border-radius:20px}
+.conf.hi .cfill{background:#3b6d11}.conf.hi .cpct{color:#3b6d11}.conf.hi .label{background:#eaf3de;color:#3b6d11}
+.conf.mid .cfill{background:#92580a}.conf.mid .cpct{color:#92580a}.conf.mid .label{background:#faeeda;color:#92580a}
+.conf.lo .cfill{background:#b3402e}.conf.lo .cpct{color:#b3402e}.conf.lo .label{background:#fbe4df;color:#b3402e}
+.conf.floor .cfill{background:#8a2a1e}.conf.floor .cpct{color:#8a2a1e}.conf.floor .label{background:#f7d9d3;color:#8a2a1e}
 .ex{font-size:11px;font-weight:600;padding:1px 8px;border-radius:20px;background:#f0efe9;color:#67645d}
 .ex.extraordinary{background:#fbe4df;color:#b3402e}
 .origs{display:flex;flex-direction:column;gap:5px}
@@ -163,6 +247,12 @@ main{max-width:760px;margin:0 auto;padding:12px 20px 60px}
 .orig.wire{background:#faeeda}
 .orig.indep{background:#eaf3de}
 .ol{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-right:8px}
+.sup-wrap{margin-top:10px;padding-top:9px;border-top:1px dashed var(--line)}
+.sup-head{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin-bottom:5px}
+.sup{display:flex;gap:8px;align-items:baseline;padding:2px 0;font-size:13px}
+.sup-pct{font-weight:700;font-variant-numeric:tabular-nums;min-width:34px}
+.sup-pct.hi{color:#3b6d11}.sup-pct.mid{color:#92580a}.sup-pct.lo{color:#b3402e}.sup-pct.floor{color:#8a2a1e}
+.sup-fact{color:#3a3833}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
  padding:18px 18px 12px;margin:14px 0;box-shadow:0 1px 2px rgba(0,0,0,.03)}
 .card .src{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
