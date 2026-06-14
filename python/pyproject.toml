@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn>=0.30",
     "asyncpg>=0.30",
     "python-multipart>=0.0.9",
+    "trafilatura>=1.8",
 ]
 
 [project.optional-dependencies]

@@ -33,6 +33,10 @@ async def main() -> None:
     src = {r["id"]: r["source"] for r in arts}
     bodies = {r["id"]: r["body"] for r in arts}
     rows = await pool.fetch("select id, text, article_id from claims")
+    # Batch recompute: reset the clusters projection so a re-run REPLACES rather than
+    # accumulates. Cluster ids are keyed on their claim_ids, so a changed claim set (or
+    # changed collapse) would otherwise leave orphan clusters behind.
+    await pool.execute("delete from clusters")
     await pool.close()
 
     claims = [

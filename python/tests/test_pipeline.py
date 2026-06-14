@@ -92,6 +92,19 @@ def test_collapse_wire_and_cascade_to_independent_originators():
     assert len(groups) == 2  # {afp, reprint, cascade} wire/cascade node + {indie}
 
 
+def test_collapse_same_outlet_to_one_originator():
+    from maat.pipeline.corroborate import collapse_originators
+
+    # Two distinct articles from the SAME outlet are one originator, not two — an outlet is
+    # not independent of itself (real GDELT data: one domain published several pieces).
+    bodies = {
+        "a1": "The central bank raised rates today in a widely expected quarter-point move.",
+        "a2": "Separately, the bank sharply revised its inflation forecast upward for next year.",
+    }
+    sources = {"a1": "econotimes.com", "a2": "econotimes.com"}
+    assert len(collapse_originators(["a1", "a2"], bodies, sources)) == 1
+
+
 def test_is_primary_source():
     from maat.pipeline.corroborate import is_primary_source
 
