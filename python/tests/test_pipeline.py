@@ -174,3 +174,52 @@ def test_parse_extremity():
     assert _parse_extremity('prose then {"extremity":"ordinary"} trailing') == "ordinary"
     assert _parse_extremity("no json at all") == "notable"  # safe default
     assert _parse_extremity('{"extremity": "wild"}') == "notable"  # unknown level -> default
+
+
+def test_admin_event_payload():
+    from maat.events import admin_event
+
+    d = admin_event("claim-1", reason="wrong axis", kind="fact")
+    assert d == {"target": "claim-1", "actor": "operator", "reason": "wrong axis", "kind": "fact"}
+
+
+def test_cluster_id_stable_and_order_independent():
+    from maat.pipeline.corroborate import cluster_id
+
+    assert cluster_id(["b", "a"]) == cluster_id(["a", "b"])  # order-independent
+    assert cluster_id(["a", "b"]) != cluster_id(["a", "c"])  # membership-sensitive
+
+
+def test_corroborate_fixed_collapses_wire_then_reads_confidence():
+    # F3 recompute: an operator-fixed claim set is read WITHOUT re-clustering. The wire pair
+    # collapses to one originator; the independent paper is the second. No LLM, no DB.
+    from maat.pipeline.corroborate import ClaimRow, confidence_read, corroborate_fixed
+
+    bodies = {
+        "afp": "Minister X resigned on Tuesday amid a procurement scandal, the ministry said.",
+        "reprint": "Minister X resigned on Tuesday amid a procurement scandal, the ministry said.",
+        "indie": "After our shell-company investigation, X stepped down today, this paper found.",
+    }
+    claims = [
+        ClaimRow(id="11111111-1111-1111-1111-111111111111", text="X resigned", article_id="afp", source="AFP"),
+        ClaimRow(id="22222222-2222-2222-2222-222222222222", text="X resigned", article_id="reprint", source="Daily News"),
+        ClaimRow(id="33333333-3333-3333-3333-333333333333", text="X resigned", article_id="indie", source="The Investigative Times"),
+    ]
+    corr = corroborate_fixed(claims, bodies, "notable")
+    assert corr.independent_originators == 2  # wire reprint collapsed onto AFP
+    assert not corr.has_primary
+    assert corr.confidence == confidence_read(2, False, "notable")
+
+
+def test_corroborate_fixed_honours_primary_and_carried_extremity():
+    from maat.pipeline.corroborate import ClaimRow, confidence_read, corroborate_fixed
+
+    bodies = {"a": "The ECB raised rates today.", "b": "Separately, the bank moved rates, our desk confirms."}
+    claims = [
+        ClaimRow(id="aaaaaaaa-0000-0000-0000-000000000001", text="rates up", article_id="a", source="European Central Bank"),
+        ClaimRow(id="bbbbbbbb-0000-0000-0000-000000000002", text="rates up", article_id="b", source="Daily Herald"),
+    ]
+    corr = corroborate_fixed(claims, bodies, "extraordinary")
+    assert corr.has_primary  # the ECB is the primary source for its own rate decision
+    assert corr.extremity == "extraordinary"  # carried over, not re-rated
+    assert corr.confidence == confidence_read(2, True, "extraordinary")

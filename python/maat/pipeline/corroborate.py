@@ -15,6 +15,7 @@ identity resolution, §6.7), and primary-source detection are first cuts.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -262,3 +263,41 @@ def corroborate(
         )
     results.sort(key=lambda r: r.independent_originators, reverse=True)
     return results
+
+
+def cluster_id(claim_ids: list[str]) -> str:
+    """Stable id for a cluster = hash of its member claim ids (matches the corroborate agent)."""
+    return hashlib.sha1("|".join(sorted(claim_ids)).encode()).hexdigest()[:24]
+
+
+def corroborate_fixed(
+    claims: list[ClaimRow],
+    bodies: dict[str, str],
+    extremity: str = "notable",
+    *,
+    duplicate_source_threshold: float = 0.40,
+) -> Corroboration:
+    """Recompute ONE cluster over a FIXED claim set (operator-decided) — no same-fact
+    re-clustering, no LLM. The admin console (P8 F3) uses this when an operator splits,
+    merges, or moves claims: take the given claims AS a single cluster, collapse to
+    independent originators (§5.5), and read confidence (§5.6-5.7). Extremity is carried
+    over from the original cluster rather than re-rated — deterministic, free, testable.
+    """
+    if not claims:
+        raise ValueError("corroborate_fixed needs at least one claim")
+    art_source = {c.article_id: c.source for c in claims}
+    article_ids = list(dict.fromkeys(c.article_id for c in claims))
+    groups_idx = collapse_originators(article_ids, bodies, art_source, duplicate_source_threshold)
+    originators = [[article_ids[i] for i in g] for g in groups_idx]
+    ind = len(originators)
+    primary = any(is_primary_source(s) for s in {c.source for c in claims})
+    return Corroboration(
+        fact=claims[0].text,
+        claim_ids=[c.id for c in claims],
+        sources=sorted({c.source for c in claims}),
+        originators=originators,
+        independent_originators=ind,
+        has_primary=primary,
+        extremity=extremity,
+        confidence=confidence_read(ind, primary, extremity),
+    )
