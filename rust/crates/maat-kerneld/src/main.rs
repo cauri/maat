@@ -63,6 +63,23 @@ async fn main() -> Result<()> {
             Ok(ev) => {
                 if let Err(e) = record_and_project(&pool, &ev).await {
                     tracing::error!("project failed (type={}): {e}", ev.typ);
+                    // Record the failure so the operator Run console can surface it (P8 F4),
+                    // not just the logs. Best-effort: a dead-letter insert must not itself wedge
+                    // the consumer.
+                    let dl = sqlx::query(
+                        "insert into dead_letters (stream_id, type, data, error, tenant_id) \
+                         values ($1, $2, $3, $4, $5)",
+                    )
+                    .bind(&ev.stream_id)
+                    .bind(&ev.typ)
+                    .bind(Json(&ev.data))
+                    .bind(e.to_string())
+                    .bind(&ev.tenant_id)
+                    .execute(&pool)
+                    .await;
+                    if let Err(de) = dl {
+                        tracing::error!("dead-letter insert failed: {de}");
+                    }
                     continue;
                 }
                 tracing::info!("recorded event type={} stream={}", ev.typ, ev.stream_id);

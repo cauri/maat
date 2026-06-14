@@ -110,3 +110,32 @@ def test_eval_page_otlp_note_and_missing_fixtures():
     assert "OTLP tracing off" in _eval_page(None, "no fixtures", "")
     assert "no fixtures" in _eval_page(None, "no fixtures", "")
     assert "open trace UI" in _eval_page(None, "x", "http://localhost:4318")
+
+
+def test_stage_summary_maps_event_types_to_stages():
+    from maat.web.app import stage_summary
+
+    rows = stage_summary(
+        {"claims.extracted": {"n": 5, "last": None}, "cluster.corroborated": {"n": 2, "last": None}}
+    )
+    by = {r["label"]: r for r in rows}
+    assert by["Extract"]["count"] == 5
+    assert by["Corroborate"]["count"] == 2
+    assert by["Classify"]["count"] == 0  # an absent event type reads as zero, not missing
+    assert all("make" in r["cmd"] for r in rows)
+
+
+def test_runs_page_shows_stages_dead_letters_and_recent():
+    from maat.web.app import _runs_page, stage_summary
+
+    stages = stage_summary({"article.ingested": {"n": 3, "last": dt.datetime(2026, 6, 15, 9, 0)}})
+    proj = {"articles": 3, "claims": 0, "clusters": 0, "events": 3}
+    recent = [{"type": "article.ingested", "stream_id": "a1", "created_at": dt.datetime(2026, 6, 15, 9, 0)}]
+    dead = [
+        {"type": "cluster.corroborated", "stream_id": "c1", "error": "boom",
+         "created_at": dt.datetime(2026, 6, 15, 9, 1)}
+    ]
+    out = _runs_page(stages, proj, recent, dead)
+    assert "Acquire / ingest" in out
+    assert "Dead-letter" in out and "boom" in out
+    assert "Recent events" in out

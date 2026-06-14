@@ -155,6 +155,35 @@ async def eval_view() -> str:
     return _doc(_eval_page(report, err, otlp), "eval", "eval")
 
 
+@app.get("/runs", response_class=HTMLResponse)
+async def runs() -> str:
+    """F4 — run console: pipeline activity off the event log, dead-letters, run-intent."""
+    pool = app.state.pool
+    agg = await pool.fetch("select type, count(*) n, max(created_at) last from events group by type")
+    counts = {r["type"]: {"n": r["n"], "last": r["last"]} for r in agg}
+    proj = {
+        "articles": await pool.fetchval("select count(*) from articles"),
+        "claims": await pool.fetchval("select count(*) from claims"),
+        "clusters": await pool.fetchval("select count(*) from clusters"),
+        "events": await pool.fetchval("select count(*) from events"),
+    }
+    recent = await pool.fetch("select type, stream_id, created_at from events order by id desc limit 25")
+    dead = await pool.fetch(
+        "select type, stream_id, error, created_at from dead_letters order by id desc limit 25"
+    )
+    return _doc(_runs_page(stage_summary(counts), proj, recent, dead), "runs", "runs")
+
+
+@app.post("/runs/trigger")
+async def trigger_run(stage: str = Form(...), reason: str = Form("")):
+    # Record operator intent in the audit log. Execution stays a deliberate CLI/cron step until a
+    # job runner with budget guardrails (D22) is wired — the console must not silently spend API $.
+    await _publish(
+        events.ADMIN_RUN_TRIGGERED, "pipeline", events.admin_event("pipeline", reason=reason, stage=stage)
+    )
+    return RedirectResponse("/runs", status_code=303)
+
+
 # ============================ routes: corrections (F3, admin events) =========================
 
 
@@ -797,6 +826,76 @@ def _audit_page(rows) -> str:
     )
 
 
+_STAGES = [
+    ("Acquire / ingest", "article.ingested", "make acquire QUERY=… N=12  ·  make ingest-corpus"),
+    ("Extract", "claims.extracted", "make agents"),
+    ("Classify", "claims.classified", "make agents"),
+    ("Corroborate", "cluster.corroborated", "make corroborate"),
+]
+
+
+def stage_summary(counts: dict) -> list[dict]:
+    """Map event-type aggregates {type: {n, last}} to the pipeline stages (F4). Pure."""
+    rows = []
+    for label, etype, cmd in _STAGES:
+        c = counts.get(etype) or {}
+        rows.append(
+            {"label": label, "type": etype, "cmd": cmd, "count": c.get("n", 0), "last": c.get("last")}
+        )
+    return rows
+
+
+def _runs_page(stages, proj, recent, dead) -> str:
+    pcells = "".join(
+        f'<div class="mcell"><div class="mk">{html.escape(k)}</div><div class="mv">{v}</div></div>'
+        for k, v in proj.items()
+    )
+    srows = []
+    for s in stages:
+        last = f'{s["last"]:%Y-%m-%d %H:%M}' if s["last"] else "—"
+        srows.append(
+            '<div class="srow"><div class="sname">'
+            f'{html.escape(s["label"])}<span class="mut sm"> · {html.escape(s["type"])}</span></div>'
+            f'<div class="snum">{s["count"]}<span class="mut sm"> events · last {last}</span></div>'
+            f'<div class="scmd mono">{html.escape(s["cmd"])}</div>'
+            '<form class="inline" method="post" action="/runs/trigger">'
+            f'<input type="hidden" name="stage" value="{html.escape(s["label"])}">'
+            '<button title="record intent in the audit log">log run</button></form></div>'
+        )
+    dead_html = ""
+    if dead:
+        drows = "".join(
+            f'<tr><td class="mut">{r["created_at"]:%m-%d %H:%M}</td>'
+            f'<td class="mono" style="color:#b3402e">{html.escape(r["type"])}</td>'
+            f'<td class="mono">{html.escape(str(r["stream_id"] or ""))}</td>'
+            f'<td class="mono">{html.escape((r["error"] or "")[:160])}</td></tr>'
+            for r in dead
+        )
+        dead_html = (
+            f'<div class="bl mt">Dead-letter — projection failures ({len(dead)})</div>'
+            '<table class="aud"><tr><th>when</th><th>type</th><th>stream</th><th>error</th></tr>'
+            f"{drows}</table>"
+        )
+    rrows = "".join(
+        f'<tr><td class="mut">{r["created_at"]:%m-%d %H:%M}</td>'
+        f'<td><span class="atype">{html.escape(r["type"])}</span></td>'
+        f'<td class="mono">{html.escape(str(r["stream_id"] or ""))}</td></tr>'
+        for r in recent
+    )
+    note = (
+        '<div class="mut sm">Token spend + timing are traced per LLM call to cat-cafe (see Eval). '
+        "Per-run cost against the budget (D22), and projection replay (rebuild from the log, a kernel "
+        "feature), are not wired yet — flagged, not faked.</div>"
+    )
+    return (
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Runs — pipeline activity off the event log (F4)</h3>'
+        f'<div class="mgrid">{pcells}</div><div class="bl mt">Stages</div>{"".join(srows)}'
+        f'{dead_html}<div class="bl mt">Recent events</div>'
+        f'<table class="aud"><tr><th>when</th><th>type</th><th>stream</th></tr>{rrows}</table>{note}</div>'
+    )
+
+
 def _eval_page(report, err: str, otlp: str) -> str:
     """A4a — render the eval harness output (#32). `report` is `maat.evals.evaluate(...)`."""
     obs = (
@@ -854,8 +953,13 @@ def _eval_page(report, err: str, otlp: str) -> str:
 
 
 def _nav(active: str) -> str:
-    tabs = [("/", "Content", "content"), ("/eval", "Eval", "eval"), ("/audit", "Audit", "audit")]
-    dimmed = [("Runs", "F4"), ("Config", "F5"), ("Sources", "A2")]
+    tabs = [
+        ("/", "Content", "content"),
+        ("/runs", "Runs", "runs"),
+        ("/eval", "Eval", "eval"),
+        ("/audit", "Audit", "audit"),
+    ]
+    dimmed = [("Config", "F5"), ("Sources", "A2")]
     links = [
         f'<a class="{"on" if key == active else ""}" href="{href}">{label}</a>'
         for href, label, key in tabs
@@ -968,6 +1072,9 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .estory.ok{border-color:#cfe3b6;background:#f6faef}
 .estory.bad{border-color:#e9b8ae;background:#fdf4f1}
 .eh{font-weight:600;font-size:14px}
+.srow{display:grid;grid-template-columns:1.1fr 1.3fr 1.8fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+.sname{font-weight:600}
+.scmd{color:var(--mut);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style></head><body>
 <header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
 {{nav}}<p>{{subtitle}}</p></header>
