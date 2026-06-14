@@ -165,7 +165,11 @@ def collapse_originators(
             cascade = _cites(bodies[article_ids[i]], sources[article_ids[j]]) or _cites(
                 bodies[article_ids[j]], sources[article_ids[i]]
             )
-            if lexical or cascade:
+            # An outlet is not independent of itself: many articles from one source (one
+            # domain publishing several pieces — exposed by real GDELT data) are one originator.
+            s_i = sources.get(article_ids[i])
+            same_source = s_i is not None and s_i == sources.get(article_ids[j])
+            if lexical or cascade or same_source:
                 edges.append((i, j))
     return _components(n, edges)
 

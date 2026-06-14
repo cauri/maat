@@ -1,4 +1,4 @@
-.PHONY: help kernel-test kernel-lint py-setup py-smoke py-lint eval db-up db-down ci
+.PHONY: help kernel-test kernel-lint py-setup py-smoke py-lint eval acquire db-up db-down ci
 
 help:
 	@echo "kernel-test  - cargo test (rust kernel)"
@@ -7,6 +7,7 @@ help:
 	@echo "py-smoke     - verify Claude + Mistral keys (live APIs, costs \$$)"
 	@echo "py-lint      - ruff check"
 	@echo "eval         - eval harness over the projections (golden + metrics)"
+	@echo "acquire      - GDELT: fetch real articles (QUERY=... N=12, live web + APIs)"
 	@echo "db-up/db-down- local Postgres + pgvector"
 	@echo "ci           - deterministic gates (kernel-test, kernel-lint, py-lint)"
 
@@ -33,6 +34,9 @@ corroborate:
 
 eval:
 	cd python && uv run python scripts/eval.py
+
+acquire:
+	cd python && uv run python scripts/acquire.py "$(QUERY)" $(N)
 
 web:
 	cd python && uv run uvicorn maat.web.app:app --host 0.0.0.0 --port 8000
