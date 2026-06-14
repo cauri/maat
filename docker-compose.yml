@@ -31,6 +31,17 @@ services:
       timeout: 3s
       retries: 10
 
+  # cat-cafe (#32) — LLM observability + eval sink. Opt-in: `make obs-up` (profile "obs").
+  # Point the pipeline at it with OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318.
+  cat-cafe:
+    image: artiumai/cat-cafe:latest
+    container_name: maat-catcafe
+    profiles: ["obs"]
+    restart: unless-stopped
+    ports:
+      - "8800:8000"   # UI (the reader owns 8000 in dev)
+      - "4318:4318"   # OTLP / HTTP
+
 volumes:
   maat_pgdata:
   maat_natsdata:
