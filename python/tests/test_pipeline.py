@@ -116,6 +116,35 @@ def test_is_primary_source():
     assert not is_primary_source("Reuters")
 
 
+def test_has_provenance_flags_bald_assertions():
+    from maat.pipeline.corroborate import has_provenance
+
+    # good reporting states where it got the claim — even an unnamed source
+    assert has_provenance("The minister resigned, the ministry said.")
+    assert has_provenance("According to two officials, the talks collapsed.")
+    assert has_provenance('A source told this paper, "the deal is off."')
+    assert has_provenance("Leaked documents reviewed by the outlet show the sale.")
+    # a bald assertion with no stated provenance
+    assert not has_provenance("The central bank secretly sold its entire gold reserve last year.")
+
+
+def test_effective_originators_discounts_unsourced():
+    from maat.pipeline.corroborate import effective_originators
+
+    bodies = {
+        "sourced": "X happened, officials said at a briefing.",
+        "bald": "X happened.",
+        "primary": "We are raising rates by a quarter point.",
+    }
+    sources = {"sourced": "Daily Report", "bald": "Random Blog", "primary": "Federal Reserve"}
+    # one sourced + one bald originator -> less than 2 (bald discounted) but more than 1
+    assert 1.0 < effective_originators([["sourced"], ["bald"]], bodies, sources) < 2.0
+    # two sourced originators count fully
+    assert effective_originators([["sourced"], ["primary"]], bodies, sources) == 2.0
+    # a primary source is its own provenance, even with a bald body
+    assert effective_originators([["primary"]], bodies, sources) == 1.0
+
+
 def test_confidence_read_rises_with_corroboration_and_primary():
     from maat.pipeline.corroborate import confidence_read
 
