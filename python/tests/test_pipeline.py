@@ -111,3 +111,27 @@ def test_confidence_read_rises_with_corroboration_and_primary():
     assert confidence_read(9, True) <= 0.97
     # a single uncorroborated originator stays low
     assert confidence_read(1, False) < confidence_read(2, True)
+
+
+def test_confidence_read_scales_with_extremity():
+    from maat.pipeline.corroborate import confidence_read
+
+    # same corroboration, higher prior -> lower confidence (the bar rises)
+    assert (
+        confidence_read(3, True, "ordinary")
+        > confidence_read(3, True, "notable")
+        > confidence_read(3, True, "extraordinary")
+    )
+    # an extraordinary claim earns less from the same corroboration
+    assert confidence_read(2, False, "extraordinary") < confidence_read(2, False, "notable")
+    # an unknown level falls back to notable (neither penalise nor reward)
+    assert confidence_read(2, False, "???") == confidence_read(2, False, "notable")
+
+
+def test_parse_extremity():
+    from maat.pipeline.extremity import _parse_extremity
+
+    assert _parse_extremity('{"extremity": "extraordinary", "reason": "x"}') == "extraordinary"
+    assert _parse_extremity('prose then {"extremity":"ordinary"} trailing') == "ordinary"
+    assert _parse_extremity("no json at all") == "notable"  # safe default
+    assert _parse_extremity('{"extremity": "wild"}') == "notable"  # unknown level -> default

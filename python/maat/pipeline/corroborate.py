@@ -16,8 +16,10 @@ identity resolution, §6.7), and primary-source detection are first cuts.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from maat.pipeline.extremity import rate_extremity
 from maat.providers.seam import mistral_embed
 
 
@@ -37,6 +39,7 @@ class Corroboration:
     originators: list[list[str]] = field(default_factory=list)  # each inner list = one collapsed originator
     independent_originators: int = 0
     has_primary: bool = False
+    extremity: str = "notable"
     confidence: float = 0.0
 
 
@@ -142,15 +145,23 @@ def is_primary_source(source: str) -> bool:
     return any(k in s for k in ("statement", "ministry", "document", "dataset", "filing", "official"))
 
 
-def confidence_read(independent_originators: int, has_primary: bool) -> float:
-    """A first-cut confidence read (§5.6-5.7) — DRAFT, review on return.
+# How much doubt each independent originator leaves, by the claim's prior (§5.6): an
+# extraordinary claim earns less from the same corroboration than an ordinary one.
+_DECAY = {"ordinary": 0.40, "notable": 0.50, "extraordinary": 0.68}
 
-    Diminishing returns on independent corroboration (1 originator is a thin thread, each
-    further independent originator matters less), and a primary source closes half the
-    remaining gap. The extremity-scaled bar (§5.6) — extraordinary claims demand more —
-    is not yet wired in; this is corroboration strength only.
+
+def confidence_read(
+    independent_originators: int, has_primary: bool, extremity: str = "notable"
+) -> float:
+    """The confidence read on a corroborated fact (§5.6-5.7) — DRAFT, review on return.
+
+    Diminishing returns on independent corroboration (each further independent originator
+    matters less), a primary source closes half the remaining gap, and the per-originator
+    doubt is scaled by the claim's prior — an extraordinary claim needs more independent
+    originators to reach the same confidence. Capped below certainty.
     """
-    base = 1.0 - 0.5 ** max(0, independent_originators)  # 1->.50, 2->.75, 3->.875
+    decay = _DECAY.get(extremity, 0.50)
+    base = 1.0 - decay ** max(0, independent_originators)
     if has_primary:
         base += (1.0 - base) * 0.5
     return round(min(base, 0.97), 2)
@@ -163,6 +174,7 @@ def corroborate(
     same_fact_threshold: float = 0.82,
     duplicate_source_threshold: float = 0.40,
     min_corroboration: int = 2,
+    extremity_of: Callable[[str], str] = rate_extremity,
 ) -> list[Corroboration]:
     """Cluster same-fact claims; count independent originators per cluster (§5.5)."""
     if not claims:
@@ -179,6 +191,7 @@ def corroborate(
         originators = [[article_ids[i] for i in g] for g in groups_idx]
         ind = len(originators)
         primary = any(is_primary_source(s) for s in {m.source for m in members})
+        extremity = extremity_of(members[0].text)
         results.append(
             Corroboration(
                 fact=members[0].text,
@@ -187,7 +200,8 @@ def corroborate(
                 originators=originators,
                 independent_originators=ind,
                 has_primary=primary,
-                confidence=confidence_read(ind, primary),
+                extremity=extremity,
+                confidence=confidence_read(ind, primary, extremity),
             )
         )
     results.sort(key=lambda r: r.independent_originators, reverse=True)

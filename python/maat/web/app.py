@@ -39,7 +39,7 @@ async def feed() -> str:
         "from claims order by created_at"
     )
     clusters = await pool.fetch(
-        "select fact, sources, originators, independent_originators, has_primary, confidence "
+        "select fact, sources, originators, independent_originators, has_primary, confidence, extremity "
         "from clusters order by confidence desc, independent_originators desc"
     )
     id_to_source = {a["id"]: a["source"] for a in articles}
@@ -104,12 +104,15 @@ def _corro(cl, id_to_source) -> str:
     conf = float(cl["confidence"] or 0.0)
     pct = round(conf * 100)
     lvl = "hi" if conf >= 0.8 else "mid" if conf >= 0.5 else "lo"
+    extremity = cl["extremity"] or "notable"
+    ex_text = "extraordinary · bar raised" if extremity == "extraordinary" else f"{extremity} claim"
+    ex_badge = f'<span class="ex {extremity}">{html.escape(ex_text)}</span>'
     return (
         f'<div class="corro"><div class="cfact">{html.escape(cl["fact"])}</div>'
         f'<div class="conf {lvl}"><div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
         f'<span class="cpct">{pct}%</span><span class="clab">confidence</span></div>'
         f'<div class="cmeta"><b>{n_src}</b> sources &rarr; '
-        f'<b>{cl["independent_originators"]}</b> independent originators {primary}</div>'
+        f'<b>{cl["independent_originators"]}</b> independent originators {ex_badge} {primary}</div>'
         f'<div class="origs">{"".join(rows)}</div></div>'
     )
 
@@ -153,6 +156,8 @@ main{max-width:760px;margin:0 auto;padding:12px 20px 60px}
 .cpct{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums}
 .conf.hi .cpct{color:#3b6d11}.conf.mid .cpct{color:#92580a}.conf.lo .cpct{color:#b3402e}
 .clab{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+.ex{font-size:11px;font-weight:600;padding:1px 8px;border-radius:20px;background:#f0efe9;color:#67645d}
+.ex.extraordinary{background:#fbe4df;color:#b3402e}
 .origs{display:flex;flex-direction:column;gap:5px}
 .orig{font-size:13px;padding:5px 11px;border-radius:9px}
 .orig.wire{background:#faeeda}
