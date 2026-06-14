@@ -137,3 +137,26 @@ durable log; a pragmatic iteration cauri sanctioned ("iterate in the real thing"
 self-merge when green → deploy on merge; no stacking (merge each before the next). Budget ≤ $1000 for
 the session. Veracity prompts created without per-prompt sign-off, each marked `DRAFT — review on
 return`.
+
+### D23 — P6 Apple client: in-monorepo, fixture-first, Swift-5 mode, iOS 26 floor
+**Decision (cauri):** build the SwiftUI universal client (iPhone + Mac) **in this monorepo** under
+`apple/` — not a separate repo — so the JSON feed contract and the Swift models are reviewed together
+and can't drift, and the client reuses the `corpus/` fixtures. iOS CI rides along as a path-filtered
+workflow (`apple/**`). **Data:** the client reads a JSON feed API **stubbed on the reader** (P5 #48
+minimal — `/api/feed`, `/api/story/{id}?deeper=1`, `/api/translate`) over the same projections the HTML
+view uses; a bundled corpus-derived fixture (`feed.fixture.json`) lets it build/preview/run with no
+backend. **Floor:** deployment target **iOS/macOS 26.0** (Foundation Models, Translation, SwiftData all
+land at 26), built against the **iOS 27 SDK** (Xcode 27) — a 26 floor lets the same source compile on
+the stable 26.5 toolchain *and* widens device reach without giving up anything P6 needs. **Tier-2/3
+shape:** on-device re-rank / summarise / semantic search (Foundation Models + NaturalLanguage), on-
+device translation (Apple Translation framework) with cloud→identity fallback, local-only comments
+(SwiftData), Tier-3 "go deeper" (server/PCC boundary stubbed), edge-aggregated analytics (two lanes,
+collection-only). Every on-device path sits behind a protocol with a deterministic fallback + an
+availability check, so it builds and runs where Apple Intelligence is off (e.g. the simulator).
+**Why Swift 5 language mode (target-wide, temporary):** the Translation framework's `TranslationSession`
+(non-`Sendable`, `@concurrent translate`) can't be driven from the main-actor `.translationTask`
+closure under Swift 6 strict concurrency on this SDK; the rest of the app is Swift-6-clean. Revisit when
+the API's isolation annotations are ergonomic (candidate: isolate the Translation glue into its own
+small module). **Prompts:** the on-device `Summarizer` / `Reranker` instructions fed to Foundation
+Models are **`DRAFT — review with cauri`** (per D22; they are in-platform agent prompts). Verified
+building on macOS + iOS 27 SDK and running on the iOS 27 simulator across all six P6 stories.

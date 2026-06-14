@@ -1,0 +1,48 @@
+# XcodeGen project for the Maat Apple client (P6, issue #6).
+# Regenerate the .xcodeproj with:  cd apple && xcodegen generate
+#
+# One universal SwiftUI target for iPhone + Mac (PLAN §2.1 Tier 2 / §8 P6). Min OS is 26.0 so
+# Foundation Models, Translation, and SwiftData are all present while keeping reach wide; the
+# app still builds against the iOS 27 SDK (Xcode 27).
+name: Maat
+options:
+  bundleIdPrefix: dev.cauri.maat
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  defaultConfig: Debug
+
+settings:
+  base:
+    # Swift 5 language mode for now: the iOS 26/27 Translation framework's `TranslationSession`
+    # (non-Sendable + @concurrent `translate`) can't be driven from the main-actor `.translationTask`
+    # closure under Swift 6 strict concurrency. The code is otherwise Swift-6-clean; revisit when the
+    # Translation API's isolation annotations are ergonomic. (See apple/README.md.)
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  Maat:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: Maat
+    settings:
+      base:
+        PRODUCT_NAME: Maat
+        PRODUCT_BUNDLE_IDENTIFIER: dev.cauri.maat
+        GENERATE_INFOPLIST_FILE: YES
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        INFOPLIST_KEY_CFBundleDisplayName: Maat
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.news"
+        CODE_SIGN_STYLE: Automatic

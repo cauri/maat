@@ -1,0 +1,14 @@
+# The Xcode project is generated from project.yml by XcodeGen — never hand-edited, never committed.
+Maat.xcodeproj/
+*.xcworkspace/
+!project.yml
+
+# Build artifacts
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+
+.DS_Store
+xcuserdata/
+*.xcuserstate
