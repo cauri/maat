@@ -97,3 +97,17 @@ def test_is_primary_source():
 
     assert is_primary_source("Valoria Ministry of Finance (official statement)")
     assert not is_primary_source("Daily Herald")
+
+
+def test_confidence_read_rises_with_corroboration_and_primary():
+    from maat.pipeline.corroborate import confidence_read
+
+    # diminishing returns on independent originators
+    assert confidence_read(1, False) == 0.5
+    assert confidence_read(2, False) == 0.75
+    assert confidence_read(3, False) < confidence_read(4, False)
+    # a primary source closes half the remaining gap, never reaching certainty
+    assert confidence_read(3, True) > confidence_read(3, False)
+    assert confidence_read(9, True) <= 0.97
+    # a single uncorroborated originator stays low
+    assert confidence_read(1, False) < confidence_read(2, True)

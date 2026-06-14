@@ -37,6 +37,7 @@ class Corroboration:
     originators: list[list[str]] = field(default_factory=list)  # each inner list = one collapsed originator
     independent_originators: int = 0
     has_primary: bool = False
+    confidence: float = 0.0
 
 
 def _components(n: int, edges: list[tuple[int, int]]) -> list[list[int]]:
@@ -141,6 +142,20 @@ def is_primary_source(source: str) -> bool:
     return any(k in s for k in ("statement", "ministry", "document", "dataset", "filing", "official"))
 
 
+def confidence_read(independent_originators: int, has_primary: bool) -> float:
+    """A first-cut confidence read (§5.6-5.7) — DRAFT, review on return.
+
+    Diminishing returns on independent corroboration (1 originator is a thin thread, each
+    further independent originator matters less), and a primary source closes half the
+    remaining gap. The extremity-scaled bar (§5.6) — extraordinary claims demand more —
+    is not yet wired in; this is corroboration strength only.
+    """
+    base = 1.0 - 0.5 ** max(0, independent_originators)  # 1->.50, 2->.75, 3->.875
+    if has_primary:
+        base += (1.0 - base) * 0.5
+    return round(min(base, 0.97), 2)
+
+
 def corroborate(
     claims: list[ClaimRow],
     bodies: dict[str, str],
@@ -162,14 +177,17 @@ def corroborate(
         article_ids = list(dict.fromkeys(m.article_id for m in members))
         groups_idx = collapse_originators(article_ids, bodies, art_source, duplicate_source_threshold)
         originators = [[article_ids[i] for i in g] for g in groups_idx]
+        ind = len(originators)
+        primary = any(is_primary_source(s) for s in {m.source for m in members})
         results.append(
             Corroboration(
                 fact=members[0].text,
                 claim_ids=[m.id for m in members],
                 sources=sorted({m.source for m in members}),
                 originators=originators,
-                independent_originators=len(originators),
-                has_primary=any(is_primary_source(s) for s in {m.source for m in members}),
+                independent_originators=ind,
+                has_primary=primary,
+                confidence=confidence_read(ind, primary),
             )
         )
     results.sort(key=lambda r: r.independent_originators, reverse=True)
