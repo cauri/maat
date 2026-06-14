@@ -140,5 +140,25 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         }
     }
 
+    if ev.typ == "claims.classified" {
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let cls = ev
+            .data
+            .get("classifications")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        for c in cls {
+            sqlx::query(
+                "update claims set kind = $2, is_synthesis = $3, horizon = $4 where id = $1::uuid",
+            )
+            .bind(c.get("id").and_then(|v| v.as_str()))
+            .bind(c.get("kind").and_then(|v| v.as_str()))
+            .bind(c.get("is_synthesis").and_then(|v| v.as_bool()).unwrap_or(false))
+            .bind(c.get("horizon").and_then(|v| v.as_str()))
+            .execute(pool)
+            .await?;
+        }
+    }
+
     Ok(())
 }
