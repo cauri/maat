@@ -80,5 +80,9 @@ jobs:
             rust/ "root@$DEPLOY_HOST:/root/rust/"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             deploy/docker-compose.prod.yml "root@$DEPLOY_HOST:/root/docker-compose.yml"
+          # Caddyfile too: the admin-console vhost (D32) lives here; without this scp the box keeps a
+          # stale edge config after a deploy. Caddy auto-reloads it on `compose up`.
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            deploy/Caddyfile "root@$DEPLOY_HOST:/root/Caddyfile"
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "root@$DEPLOY_HOST" \
             'cd /root && docker compose up -d --build && docker compose ps'
