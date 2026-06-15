@@ -22,7 +22,7 @@ import asyncpg
 from dotenv import load_dotenv
 
 from maat.acquire import apify
-from maat.acquire.fetch import fetch_body
+from maat.acquire.fetch import fetch_article
 from maat.acquire.gdelt import search
 from maat.bus import connect
 from maat.clocks import is_paused
@@ -68,21 +68,29 @@ async def main() -> None:
 
     nc = await connect()
     new = 0
-    for topic in topics:
+    for i, topic in enumerate(topics):
+        # GDELT throttles to ~1 query/5s; space topics so we don't trip its 429 back-off (which,
+        # being a blocking sleep, would otherwise stall this tick).
+        if i:
+            await asyncio.sleep(5)
         try:
-            arts = search(topic, maxrecords=15, timespan="1d")
+            # search()/fetch_article() are blocking (httpx + trafilatura). Run them OFF the event
+            # loop — otherwise a multi-second fetch starves the NATS client's flush/ping tasks, the
+            # connection drops, and published articles are silently lost (the 83→7 bug).
+            arts = await asyncio.to_thread(search, topic, maxrecords=15, timespan="1d")
         except Exception as e:  # GDELT down / rate-limited
-            print(f"[{topic}] GDELT unavailable: {e}")
+            print(f"[{topic}] GDELT unavailable: {e}", flush=True)
             arts = []
         got = 0
-        for a in arts:  # GDELT gives metadata; fetch bodies for unseen URLs
+        for a in arts:  # GDELT gives metadata; fetch body + lead image (#1) for unseen URLs
             if a.url in seen:
                 continue
-            body = fetch_body(a.url)
+            body, image_url = await asyncio.to_thread(fetch_article, a.url)
             if not body:
                 continue
             await publish(nc, "article.ingested", _aid(a.url),
-                          {"title": a.title, "source": a.domain, "language": a.language, "body": body, "url": a.url})
+                          {"title": a.title, "source": a.domain, "language": a.language,
+                           "body": body, "url": a.url, "image_url": image_url})
             seen.add(a.url)
             new += 1
             got += 1
@@ -91,18 +99,22 @@ async def main() -> None:
         # (#108). When GDELT came back empty it widens to a full fallback. MAAT_PRIMARY_PASS=0 opts
         # out (Apify costs credits per call).
         if apify.available() and os.environ.get("MAAT_PRIMARY_PASS", "1") != "0":
-            for fa in apify.search_and_fetch(topic, max_results=10 if got == 0 else 5):
+            items = await asyncio.to_thread(
+                apify.search_and_fetch, topic, max_results=10 if got == 0 else 5
+            )
+            for fa in items:
                 if fa.url in seen:
                     continue
                 await publish(nc, "article.ingested", _aid(fa.url),
-                              {"title": fa.title, "source": fa.domain, "language": fa.language, "body": fa.body, "url": fa.url})
+                              {"title": fa.title, "source": fa.domain, "language": fa.language,
+                               "body": fa.body, "url": fa.url, "image_url": fa.image})
                 seen.add(fa.url)
                 new += 1
                 got += 1
-        print(f"[{topic}] +{got} new")
+        print(f"[{topic}] +{got} new", flush=True)
     await nc.flush()
     await nc.close()
-    print(f"tick: {new} new articles across {len(topics)} topics")
+    print(f"tick: {new} new articles across {len(topics)} topics", flush=True)
 
 
 if __name__ == "__main__":

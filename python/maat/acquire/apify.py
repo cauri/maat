@@ -24,6 +24,7 @@ class FetchedArticle:
     domain: str
     language: str
     body: str
+    image: str | None = None  # lead image (og:image) when the page exposed one — display-only (#1)
 
 
 def available() -> bool:
@@ -53,6 +54,7 @@ def parse_items(items: list, *, min_chars: int = 200) -> list[FetchedArticle]:
                 domain=_domain(url),
                 language=md.get("languageCode") or "",
                 body=body,
+                image=(md.get("image") or md.get("ogImage") or sr.get("image") or None),
             )
         )
     return out
