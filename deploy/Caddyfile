@@ -1,9 +1,10 @@
-# Maat public edge — terminates TLS (auto Let's Encrypt) and exposes ONLY the read API.
-# Everything else (the operator/admin console, corrections, run-triggers) is never served
-# publicly; reach it via an SSH tunnel to 127.0.0.1:8000 on the box.
+# Maat public edge — terminates TLS (auto Let's Encrypt). Two public surfaces:
+#   · {$MAAT_HOST}   — the read API only (/api/*) → reader; everything else 404s. The operator/
+#     admin console is never served publicly (SSH-tunnel to 127.0.0.1:8000 on the box).
+#   · www.maat.press — the marketing site (landing page + acquisition funnel) → marketing.
 #
-# $MAAT_HOST is the public hostname — e.g. <box-ip>.sslip.io (free, IP-based, real cert) or a
-# real domain whose A-record points at this box.
+# $MAAT_HOST is the API hostname — e.g. api.maat.press, or <box-ip>.sslip.io (free, real cert).
+# All three names (the API host, maat.press, www.maat.press) need A-records pointing at this box.
 {$MAAT_HOST} {
 	encode zstd gzip
 
@@ -16,4 +17,17 @@
 	handle {
 		respond "Maat — not found" 404
 	}
+}
+
+# Marketing site — the public landing page + the acquisition funnel for maat.press. Self-contained:
+# it only POSTs /track + /notify back to its own origin, so the API is not exposed here. The admin
+# /acquisition view lives on the private console, never on this host.
+www.maat.press {
+	encode zstd gzip
+	reverse_proxy marketing:8080
+}
+
+# Send the apex to www so there's one canonical home.
+maat.press {
+	redir https://www.maat.press{uri} permanent
 }

@@ -1,6 +1,7 @@
-# Maat prod stack: Postgres+pgvector + NATS JetStream + the reader API, fronted by Caddy for TLS.
-# The public edge is Caddy (80/443); it exposes ONLY /api/* (see Caddyfile). The reader is bound to
-# 127.0.0.1, so the operator/admin console is reachable only via an SSH tunnel — never the open net.
+# Maat prod stack: Postgres+pgvector + NATS JetStream + the reader API + the marketing site,
+# fronted by Caddy for TLS. The public edge is Caddy (80/443): it serves the read API at
+# $MAAT_HOST (/api/* only) and the marketing site at www.maat.press (see Caddyfile). The reader is
+# bound to 127.0.0.1, so the operator/admin console is reachable only via an SSH tunnel.
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -52,11 +53,27 @@ services:
       nats:
         condition: service_healthy
 
+  # Public marketing site (www.maat.press): the landing page + the acquisition funnel. Separate
+  # from the behind-the-box reader/console. Only needs the bus — it publishes acquisition.* events
+  # (tenant_id=public) that maat-kerneld folds for the console's /acquisition page. Internal-only
+  # (Caddy reaches it as marketing:8080); never published to the host.
+  marketing:
+    build: ./python
+    restart: unless-stopped
+    command: ["uv", "run", "--no-dev", "uvicorn", "maat.marketing.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      NATS_URL: "nats://nats:4222"
+    expose:
+      - "8080"
+    depends_on:
+      nats:
+        condition: service_healthy
+
   caddy:
     image: caddy:2
     restart: unless-stopped
     environment:
-      # Public hostname — e.g. <box-ip>.sslip.io (free) or a real domain pointed at this box.
+      # Public hostname for the read API — e.g. api.maat.press, or <box-ip>.sslip.io (free).
       MAAT_HOST: ${MAAT_HOST:?set MAAT_HOST to the public hostname (e.g. <box-ip>.sslip.io)}
     ports:
       - "80:80"
@@ -67,6 +84,7 @@ services:
       - caddyconfig:/config
     depends_on:
       - reader
+      - marketing
 
 volumes:
   pgdata:

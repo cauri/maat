@@ -44,6 +44,27 @@ ADMIN_EVENT_TYPES = frozenset(
 )
 
 
+# --- Acquisition funnel (marketing site → operator console) -----------------------------
+# The public marketing site (maat.press) publishes these as it records the visitor funnel
+# (D5/D20): a page view, a "Download on the App Store" tap (which shows "coming soon"), and
+# an optional launch-notify email. maat-kerneld folds them into the acquisition_signals /
+# acquisition_signups projections; the console reads them on /acquisition. These are pre-user
+# (anonymous visitors), so they carry the reserved tenant_id below rather than a real tenant.
+PUBLIC_TENANT = "public"
+
+ACQUISITION_PAGE_VIEWED = "acquisition.page_viewed"  # a visit to the landing page
+ACQUISITION_CTA_CLICKED = "acquisition.cta_clicked"  # "Download on the App Store" tap
+ACQUISITION_NOTIFY_REQUESTED = "acquisition.notify_requested"  # email left for launch
+
+ACQUISITION_EVENT_TYPES = frozenset(
+    {
+        ACQUISITION_PAGE_VIEWED,
+        ACQUISITION_CTA_CLICKED,
+        ACQUISITION_NOTIFY_REQUESTED,
+    }
+)
+
+
 def admin_event(
     target: str, *, actor: str = "operator", reason: str = "", **fields: Any
 ) -> dict[str, Any]:

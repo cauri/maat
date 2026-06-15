@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 import asyncpg
 from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from maat import config, events, prompts
@@ -161,6 +161,84 @@ async def audit(limit: int = 200, ok: str = "") -> str:
         limit,
     )
     return _doc(_audit_page(rows), "audit", "audit", flash=ok)
+
+
+@app.get("/acquisition", response_class=HTMLResponse)
+async def acquisition(ok: str = "") -> str:
+    """The maat.press acquisition funnel (event-sourced): page views, store clicks (which show
+    'coming soon'), and the launch list — folded from acquisition.* events by the kernel."""
+    pool = app.state.pool
+    try:
+        counts = {
+            r["kind"]: r["n"]
+            for r in await pool.fetch("select kind, count(*) n from acquisition_signals group by kind")
+        }
+        funnel = {
+            "views": counts.get("view", 0),
+            "clicks": counts.get("click", 0),
+            "notifies": counts.get("notify", 0),
+            "signups": await pool.fetchval("select count(*) from acquisition_signups"),
+        }
+        by_platform = [
+            dict(r)
+            for r in await pool.fetch(
+                "select platform, count(*) clicks from acquisition_signals "
+                "where kind = 'click' group by platform order by clicks desc"
+            )
+        ]
+        referrers = [
+            dict(r)
+            for r in await pool.fetch(
+                "select coalesce(nullif(referrer, ''), 'direct') referrer, count(*) clicks "
+                "from acquisition_signals where kind = 'click' group by 1 order by clicks desc limit 10"
+            )
+        ]
+        daily = [
+            dict(r)
+            for r in await pool.fetch(
+                "select date_trunc('day', created_at)::date as \"day\", "
+                "count(*) filter (where kind = 'view') views, "
+                "count(*) filter (where kind = 'click') clicks "
+                "from acquisition_signals where created_at > now() - interval '14 days' "
+                "group by 1 order by 1"
+            )
+        ]
+        signups = [
+            dict(r)
+            for r in await pool.fetch(
+                "select email, platform, first_seen, hits from acquisition_signups "
+                "order by first_seen desc limit 500"
+            )
+        ]
+        ready = True
+    except asyncpg.UndefinedTableError:  # migration 0008 not applied yet — degrade, don't 500
+        funnel = {"views": 0, "clicks": 0, "notifies": 0, "signups": 0}
+        by_platform, referrers, daily, signups, ready = [], [], [], [], False
+    return _doc(
+        _acquisition_page(funnel, by_platform, referrers, daily, signups, ready),
+        "acquisition", "acquisition", flash=ok,
+    )
+
+
+@app.get("/acquisition/signups.csv")
+async def acquisition_signups_csv():
+    """Export the launch list (the only PII this funnel holds) as CSV for the operator."""
+    pool = app.state.pool
+    try:
+        rows = await pool.fetch(
+            "select email, platform, first_seen, hits from acquisition_signups order by first_seen"
+        )
+    except asyncpg.UndefinedTableError:
+        rows = []
+    out = ["email,platform,first_seen,hits"]
+    for r in rows:
+        email = (r["email"] or "").replace('"', '""')
+        out.append(f'"{email}",{r["platform"] or ""},{r["first_seen"]:%Y-%m-%dT%H:%M:%S},{r["hits"]}')
+    return Response(
+        "\n".join(out) + "\n",
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=maat-launch-list.csv"},
+    )
 
 
 @app.get("/eval", response_class=HTMLResponse)
@@ -1643,6 +1721,74 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     )
 
 
+def _acquisition_page(funnel, by_platform, referrers, daily, signups, ready: bool = True) -> str:
+    """The maat.press funnel for the operator (pure): KPIs, platform split, referrers, the
+    14-day trend, and the launch list. Degrades to a note when the projection isn't migrated."""
+    back = '<div class="ins"><a class="back" href="/">← back to feed</a>'
+    head = '<h3 class="ih">Acquisition — the maat.press funnel</h3>'
+    if not ready:
+        return (
+            f'{back}{head}<p class="empty">Not set up yet — restart the kernel (maat-kerneld) to '
+            'apply the latest updates. Visitors to maat.press will show up here.</p></div>'
+        )
+    views = funnel.get("views", 0) or 0
+    clicks = funnel.get("clicks", 0) or 0
+    conv = f"{round(clicks / views * 100)}%" if views else "—"
+    kpis = {
+        "page views": views,
+        "store clicks": clicks,
+        "view → click": conv,
+        "launch sign-ups": funnel.get("signups", 0) or 0,
+    }
+    kcells = "".join(
+        f'<div class="mcell"><div class="mk">{html.escape(k)}</div><div class="mv">{v}</div></div>'
+        for k, v in kpis.items()
+    )
+    plabel = {"ios": "iPhone · App Store", "mac": "Mac"}
+    prows = "".join(
+        f'<tr><td>{html.escape(plabel.get(r["platform"], r["platform"] or "unknown"))}</td>'
+        f'<td class="mono">{r["clicks"]}</td></tr>'
+        for r in by_platform
+    ) or '<tr><td class="mut" colspan="2">No store clicks yet.</td></tr>'
+    rrows = "".join(
+        f'<tr><td>{html.escape(r["referrer"] or "direct")}</td><td class="mono">{r["clicks"]}</td></tr>'
+        for r in referrers
+    ) or '<tr><td class="mut" colspan="2">No referrers yet.</td></tr>'
+    maxc = max((d.get("clicks", 0) for d in daily), default=0) or 1
+    drows = "".join(
+        f'<tr><td class="mut">{d["day"]:%b %d}</td><td class="mono">{d.get("views", 0)}</td>'
+        f'<td class="mono">{d.get("clicks", 0)}</td>'
+        f'<td><span style="display:block;height:7px;border-radius:5px;background:var(--acc);'
+        f'min-width:2px;width:{round((d.get("clicks", 0) / maxc) * 100)}%"></span></td></tr>'
+        for d in daily
+    ) or '<tr><td class="mut" colspan="4">No activity in the last 14 days.</td></tr>'
+    srows = "".join(
+        f'<tr><td class="mono">{html.escape(s["email"])}</td>'
+        f'<td>{html.escape(s.get("platform") or "—")}</td>'
+        f'<td class="mut">{s["first_seen"]:%Y-%m-%d %H:%M}</td>'
+        f'<td class="mono">{s.get("hits", 1)}</td></tr>'
+        for s in signups
+    ) or '<tr><td class="mut" colspan="4">No sign-ups yet.</td></tr>'
+    csv = (
+        ' <a href="/acquisition/signups.csv" style="font-weight:600;color:var(--acc)">CSV ↓</a>'
+        if signups else ""
+    )
+    return (
+        f'{back}{head}'
+        f'<div class="mgrid">{kcells}</div>'
+        '<div class="bl mt">Store clicks by platform</div>'
+        f'<table class="aud"><tr><th>platform</th><th>clicks</th></tr>{prows}</table>'
+        '<div class="bl mt">Where clicks come from</div>'
+        f'<table class="aud"><tr><th>referrer</th><th>clicks</th></tr>{rrows}</table>'
+        '<div class="bl mt">Last 14 days</div>'
+        '<table class="aud"><tr><th>day</th><th>views</th><th>clicks</th><th></th></tr>'
+        f'{drows}</table>'
+        f'<div class="bl mt">Launch list — asked to be told at launch{csv}</div>'
+        '<table class="aud"><tr><th>email</th><th>platform</th><th>first asked</th><th>times</th></tr>'
+        f'{srows}</table></div>'
+    )
+
+
 def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
     """Sources collapsed as wire/cascade — present in a multi-article originator group (§5.5). Pure."""
     out: set = set()
@@ -2446,6 +2592,8 @@ def _nav(active: str) -> str:
         ("/calibration", "Calibration", "calibration", "Is the confidence read right? Plus de-US-centering & health"),
         ("/eval", "Quality", "eval", "Automatic checks that Maat is still judging correctly"),
         ("/audit", "History", "audit", "A log of every change made in this console"),
+        ("/acquisition", "Acquisition", "acquisition",
+         "The maat.press marketing funnel — page views, App Store clicks, and the launch list"),
     ]
     links = [
         f'<a class="{"on" if key == active else ""}" href="{href}" title="{html.escape(tip)}">{label}</a>'

@@ -264,5 +264,57 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .await?;
     }
 
+    // --- Acquisition funnel (maat.press → console /acquisition) ---------------------------
+    // The public marketing site publishes these (tenant_id="public"): a page view, a
+    // "Download on the App Store" tap, and an optional launch-notify email. Fold view / click /
+    // notify into acquisition_signals; dedupe emails into acquisition_signups. Funnel telemetry
+    // rides the same append-only log as everything else (D5/D20).
+    if ev.typ == "acquisition.page_viewed"
+        || ev.typ == "acquisition.cta_clicked"
+        || ev.typ == "acquisition.notify_requested"
+    {
+        let d = &ev.data;
+        let kind = match ev.typ.as_str() {
+            "acquisition.page_viewed" => "view",
+            "acquisition.cta_clicked" => "click",
+            _ => "notify",
+        };
+        sqlx::query(
+            "insert into acquisition_signals \
+             (tenant_id, kind, platform, path, referrer, utm_source, utm_medium, utm_campaign, \
+              ua_family, visitor) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(&ev.tenant_id)
+        .bind(kind)
+        .bind(d.get("platform").and_then(|v| v.as_str()))
+        .bind(d.get("path").and_then(|v| v.as_str()))
+        .bind(d.get("referrer").and_then(|v| v.as_str()))
+        .bind(d.get("utm_source").and_then(|v| v.as_str()))
+        .bind(d.get("utm_medium").and_then(|v| v.as_str()))
+        .bind(d.get("utm_campaign").and_then(|v| v.as_str()))
+        .bind(d.get("ua_family").and_then(|v| v.as_str()))
+        .bind(d.get("visitor").and_then(|v| v.as_str()))
+        .execute(pool)
+        .await?;
+
+        if ev.typ == "acquisition.notify_requested" {
+            if let Some(email) = d.get("email").and_then(|v| v.as_str()) {
+                sqlx::query(
+                    "insert into acquisition_signups (email, platform, referrer, utm_source) \
+                     values ($1, $2, $3, $4) \
+                     on conflict (email) do update set last_seen = now(), \
+                       hits = acquisition_signups.hits + 1",
+                )
+                .bind(email)
+                .bind(d.get("platform").and_then(|v| v.as_str()))
+                .bind(d.get("referrer").and_then(|v| v.as_str()))
+                .bind(d.get("utm_source").and_then(|v| v.as_str()))
+                .execute(pool)
+                .await?;
+            }
+        }
+    }
+
     Ok(())
 }
