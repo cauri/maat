@@ -210,3 +210,41 @@ in Settings; the feed store falls back to the fixture if the server is unreachab
 continuously-running acquisition loop — the prod feed is currently the **seed corpus, not live news**.
 Apple distribution (TestFlight/App Store) is blocked on a dev-account admin issue; cabled dev signing
 used meanwhile.
+
+### D28 — P8: an operator console; admin actions are events; propose-don't-apply for the core
+**Decision (cauri):** add a web **operator console** (the reader evolves into it; epic #66) for running,
+observing, and **correcting** the veracity engine — for the operator, not end-users. **Shape:** every
+admin mutation is a **typed event** on the same append-only log the agents write to (extends D5/D20), so
+corrections, config proposals, source flags, clock pauses and prompt edits are audited + replayable for
+~free; the kernel stays the single writer. Operator corrections double as the golden corpus (§7) + RL
+signal (§5). **Guardrail (mirrors D18):** writes to the **veracity core** (gate floor, scoring, prompts)
+are **propose-don't-apply** — recorded + shown, never auto-applied; promotion needs sign-off +
+A/B-on-replay. Ops-level changes (pausing the ingestion clock) apply live. **Why (cauri):** the thesis is
+*don't let the core drift unsupervised* — a human-in-the-loop console, auditable by construction.
+Behind-the-box, no auth yet (rides P5; D27 secures the edge). Copy is plain-language with tooltips +
+after-action confirmations. Built F1–F5, A1, A2, A4a; A3/A4b/A5/A6 gated on their upstream phases.
+
+### D29 — Editable agent prompts: code-canonical seed + event-sourced operator override (Option B)
+**Decision (cauri chose B):** the operator edits agent prompts **directly** in the console and the edit
+goes **live on the next run**. **Shape:** each stage's prompt (extract / classify / extremity) stays
+**canonical in code** (the seed/fallback); an edit is an `admin.prompt.updated` event → a `prompts`
+projection (one active row per key) the agents **read at run time**, falling back to the seed. Versioned
+(append-only) with **one-click rollback**; a **placeholder guard** refuses a save that drops a required
+`{token}`; **eval-on-change** (`make eval-prompt` + a "Test on goldens" button) runs the golden corpus
+through the pipeline with a candidate *in memory* (no live writes) and reports pass/fail before you rely
+on it. **Options:** view-only / propose-then-promote (gated) / **direct + versioned + rollback + eval
+(B)**. **Why (cauri):** single operator; the safety net is *undo + the report card*, not a gate.
+**Relaxes** the "prompts live in code" convention (the `claude-review` note): code stays the **canonical
+seed**, the store holds **audited operator overrides** — not arbitrary external prompts. Prompt CONTENT
+is still co-designed with cauri (the console only plumbs storage/resolution), and edits are
+**operator-driven, never agent self-modification**.
+
+### D30 — Deterministic DB integration tests on the merge gate
+**Decision:** the console's DB-backed routes are covered by a **Postgres-backed integration harness**
+(httpx ASGITransport over a throwaway pgvector DB — migrations applied, seeded), run on the CI **python**
+job via a `services: postgres` container. **Why:** a database is deterministic, so this fits the bright
+line — D16's "no non-determinism on the merge button" is about **live LLMs, not infra**, and PLAN §7
+asks for integration coverage on CI. It reaches the route SQL the pure-function tests can't (joins,
+`any($1::uuid[])`, distinct-on, the correction-recompute path) and **raises rather than silently skips**
+when CI is set but no DB is reachable. LLM-touching paths (e.g. eval-on-change) stay **off** the gate
+(cost + non-determinism). Refines D16.

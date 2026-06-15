@@ -234,6 +234,18 @@ discipline start in Phase 1 and run forever.
 - **P7 — Feedback loop, de-slant validation & hardening.** Feedback intake → triage agent →
   auto-fix-PR / review-queue (guardrails below, to confirm); de-US-centering metrics; calibration-
   in-production; observability; red-team the laundering guards.
+- **P8 — Admin / operator console** (epic #66; a *horizontal* workstream — started at v0.1, not after
+  P7). A web console (the reader evolved into it) for the operator — not end-users — to run, observe,
+  and **correct** the veracity engine. Every admin action is a **typed event on the same log** (audit +
+  replay for free, D5/D20); operator corrections double as the golden corpus (§7) + RL signal (§5).
+  **Built:** claim/cluster inspectors + corrections (override classification, flag §5.2 laundering,
+  split/merge/move clusters); run/activity + dead-letters; ingestion-clock pause; source registry +
+  allow/deny/ownership; config + eval (cat-cafe) surfacing; and a **direct prompt editor** (versioned,
+  rollback, placeholder-guard, eval-on-change). **Guardrail:** veracity-core writes (gate floor,
+  scoring, prompts) are *propose-don't-apply* / operator-gated (see D28–D29). Behind-the-box, no auth
+  yet (rides P5; the prod edge keeps `/api/*` public and tunnels the console, D27). **Remaining:**
+  entity/reputation console, calibration/de-US dashboards, review-queue, RL policy — each gated on its
+  upstream phase.
 
 ---
 
@@ -271,13 +283,20 @@ discipline start in Phase 1 and run forever.
   which entities get spines). Spike in P4.
 - **Storage schema** — kept thin; let real data shape it.
 - **Prompts** — the veracity-stage prompts are product-critical; drafted *with cauri*, eval-gated.
+  **Resolved (D29):** prompts stay **canonical in code** (the seed); the operator console adds an
+  event-sourced **override** layer the agents read at run time (live on next run), with versioning,
+  rollback, a placeholder guard, and **eval-on-change** (`make eval-prompt`) — operator-edited, never
+  agent-self-modified.
 - **Feedback auto-fix guardrails** — proposed, **to confirm**: "fix immediately" = open a green PR
   (not auto-deploy); the veracity core (reward, gate, scoring, prompts) is **never** auto-fixed;
   feedback is **untrusted input** (coordinated feedback = an attack vector).
 - **What engagement signals actually indicate** — open empirical question for later regression; no
   pre-imposed routing.
 - **Tier-3 PCC developer surface** and the **on-device↔server MCP direction** — verify at P6.
-- **Task tracker** — `ba` vs GitHub issues (decide once the repo exists).
+- **Task tracker** — `ba` vs GitHub issues (decide once the repo exists). **Resolved: GitHub issues.**
+  Scheme: epics = workstreams (`P1`–`P8`, `epic` label, native sub-issues, no milestone); milestones =
+  functional releases (`v0.1`→`v1.0`); cross-cutting theme labels. New task → sub-issue of its phase
+  epic, milestone by the value it delivers.
 
 ---
 
