@@ -208,10 +208,11 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     status and a source so cauri can review them all in the console."""
     from maat import prompts
 
-    # All eight prompts are present.
+    # Every runtime + console prompt is present (incl. the prompt-chat helper's own draft, #159).
     assert set(prompts.PROMPTS_BY_KEY) == {
         "extract", "classify", "extremity",          # active backend
-        "topics_enrich", "curation_geotag", "triage_llm",  # draft backend
+        "topics_enrich", "curation_geotag", "triage_llm",  # draft backend (gated)
+        "prompt_chat_agent",                         # draft: the console chat helper's own prompt
         "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
     }
     # Every entry carries a non-empty status, source, and prompt text.
@@ -224,7 +225,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     for p in prompts.PROMPTS:
         by_status.setdefault(p["status"], set()).add(p["key"])
     assert by_status["active"] == {"extract", "classify", "extremity"}
-    assert by_status["draft"] == {"topics_enrich", "curation_geotag", "triage_llm"}
+    assert by_status["draft"] == {"topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent"}
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
     # Only the active prompts are editable; draft/on-device are read-only.
     assert prompts.EDITABLE_KEYS == frozenset({"extract", "classify", "extremity"})
@@ -726,3 +727,142 @@ def test_feed_router_is_mounted_on_app():
     assert feed_router is not None  # the router built (FastAPI available)
     paths = _all_route_paths(app.routes)
     assert "/api/v2/feed" in paths and "/api/v2/story/{cluster_id}" in paths
+
+
+# ---------------------------------------------------------------------------
+# Prompt-chat agent (#158/#159): the raw-Claude "Improve with chat" helper on editable prompts.
+# ---------------------------------------------------------------------------
+
+def _chat_post(body: dict):
+    """POST JSON to /prompts/chat through the real ASGI app; return (status, json)."""
+    import asyncio
+
+    import httpx
+
+    from maat.web.app import app
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            r = await ac.post("/prompts/chat", json=body)
+            return r.status_code, r.json()
+
+    return asyncio.run(go())
+
+
+def test_prompt_chat_returns_reply_with_claude_monkeypatched(monkeypatch):
+    """Happy path: /prompts/chat formats the conversation, calls claude_complete, returns its text."""
+    from maat.providers import seam
+
+    seen = {}
+
+    def fake_complete(prompt, *, model="m", max_tokens=256):
+        seen["prompt"] = prompt
+        return seam.Reply(text="Try: rate {claim} on a 1-5 scale.\n```\nrate {claim}\n```", model=model)
+
+    monkeypatch.setattr(seam, "claude_complete", fake_complete)
+    status, data = _chat_post(
+        {"key": "extremity", "current": "rate {claim}",
+         "messages": [{"role": "user", "content": "make it stricter"}]}
+    )
+    assert status == 200
+    assert "reply" in data and "rate {claim}" in data["reply"]
+    # The agent saw the prompt under discussion, its current text, and the conversation.
+    assert "Extraordinary-claim rater" in seen["prompt"]  # the label
+    assert "rate {claim}" in seen["prompt"]                # the current editor text, verbatim
+    assert "make it stricter" in seen["prompt"]            # the running conversation
+
+
+def test_prompt_chat_graceful_when_no_api_key(monkeypatch):
+    """No ANTHROPIC_API_KEY -> claude_complete raises KeyError; the route returns a clear
+    'unavailable' message at HTTP 200, never a 500 (the box runs without the reader's key)."""
+    from maat.providers import seam
+
+    def no_key(prompt, *, model="m", max_tokens=256):
+        raise KeyError("ANTHROPIC_API_KEY")  # exactly what os.environ[...] raises when unset
+
+    monkeypatch.setattr(seam, "claude_complete", no_key)
+    status, data = _chat_post({"key": "extremity", "current": "rate {claim}", "messages": []})
+    assert status == 200  # graceful, not a crash
+    assert "reply" not in data
+    assert "unavailable" in data["error"].lower()
+    assert "ANTHROPIC_API_KEY" in data["error"]
+
+
+def test_prompt_chat_graceful_when_provider_errors(monkeypatch):
+    """Any provider/network error is caught: HTTP 200 with an error field, page keeps working."""
+    from maat.providers import seam
+
+    def boom(prompt, *, model="m", max_tokens=256):
+        raise RuntimeError("upstream 529 overloaded")
+
+    monkeypatch.setattr(seam, "claude_complete", boom)
+    status, data = _chat_post({"key": "classify", "current": "{article_text} {claims_json}",
+                               "messages": []})
+    assert status == 200
+    assert "unavailable" in data["error"].lower() and "529" in data["error"]
+
+
+def test_prompt_chat_rejects_non_editable_keys(monkeypatch):
+    """Draft / on-device prompts are read-only — chat refuses them and never calls the model."""
+    from maat.providers import seam
+
+    def must_not_run(prompt, *, model="m", max_tokens=256):  # pragma: no cover
+        raise AssertionError("claude_complete must not be called for a read-only key")
+
+    monkeypatch.setattr(seam, "claude_complete", must_not_run)
+    for key in ("triage_llm", "summarizer_ondevice", "prompt_chat_agent", "nonexistent"):
+        status, data = _chat_post({"key": key, "current": "x", "messages": []})
+        assert status == 200, key
+        assert "error" in data and "editable" in data["error"].lower(), key
+
+
+def test_prompt_chat_builder_preserves_placeholders_verbatim():
+    """The chat prompt inserts {placeholders} via replace, not str.format — so a current prompt
+    full of {claim}/{article_text} tokens survives intact (a format() would KeyError/mangle them)."""
+    from maat.web.app import PromptChatMsg, _prompt_chat_prompt
+
+    current = "Extract from {article_text} using {source_metadata} in {detected_language}."
+    built = _prompt_chat_prompt(
+        "Claim extraction", "Pulls atomic claims.", current,
+        [PromptChatMsg(role="user", content="be more precise"),
+         PromptChatMsg(role="assistant", content="ok")],
+    )
+    assert "{article_text}" in built and "{source_metadata}" in built and "{detected_language}" in built
+    assert "Claim extraction" in built and "be more precise" in built
+    # The agent's own template tokens are all consumed (none leak into the final prompt).
+    for tok in ("{prompt_label}", "{prompt_purpose}", "{current_prompt}"):
+        assert tok not in built
+
+
+def test_prompts_page_renders_chat_panel_on_editable_prompts_only():
+    """Each editable prompt gets an 'Improve with chat' panel wired to its own textarea; the
+    read-only draft/on-device prompts do not. The shared chat JS is present once."""
+    from maat.web.app import _doc, _prompts_page
+
+    page = _doc(_prompts_page({}), "prompts", "prompts")
+    assert "Improve with chat" in page
+    assert "maatPromptChat" in page  # the inline handler shipped
+    for key in ("extract", "classify", "extremity"):  # editable -> panel + targeted textarea id
+        assert f'id="ta-{key}"' in page, key
+        assert f"maatPromptChat('{key}')" in page, key
+        assert f'id="log-{key}"' in page and f'id="in-{key}"' in page, key
+    # No chat panel/textarea is wired for a read-only prompt.
+    assert 'id="ta-triage_llm"' not in page
+    assert "maatPromptChat('triage_llm')" not in page
+
+
+def test_prompt_chat_agent_prompt_in_registry_as_reviewable_draft():
+    """#159: the chat helper's own instructions are surfaced in the registry as a draft with a
+    description, so cauri can review them — and they are not part of the editable/live set."""
+    from maat import prompts
+
+    entry = prompts.PROMPTS_BY_KEY["prompt_chat_agent"]
+    assert entry["status"] == "draft"
+    assert entry["source"]
+    assert len(entry["description"]) > 30
+    assert entry["default"].strip()  # the actual instructions are surfaced for review
+    assert "prompt_chat_agent" not in prompts.EDITABLE_KEYS  # never a live/editable override
+    # The instructions keep the substitution points the console fills at chat time.
+    for tok in ("{prompt_label}", "{prompt_purpose}", "{current_prompt}"):
+        assert tok in prompts.PROMPT_CHAT_AGENT
