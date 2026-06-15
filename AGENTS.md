@@ -16,6 +16,9 @@ config gap). Until the Agent Mail MCP is connected (see below), follow this conv
    and `gh pr list` first; prefer adding new modules over editing shared ones.
 3. **Rebase on `origin/main` before pushing.** Keep PRs small, resolve conflicts, merge promptly —
    a long-lived branch against this fast-moving main will conflict.
+   - **Run the CI checks locally first** — `ruff check` + `pytest` (python), and for any Rust change
+     `cargo clippy --all-targets -- -D warnings` + `cargo test`. CI fails the PR on clippy warnings, not
+     just test failures, so `cargo test` alone is not enough. Don't `--admin`-merge past a red run.
 4. **Migrations:** take the next free number (`ls rust/crates/maat-kerneld/migrations/`); never reuse one.
 5. **Shared deploy:** merge to `main` push-deploys to the box. Don't break `deploy/docker-compose.prod.yml`
    (the reader needs `NATS_URL`); verify the box (`curl http://167.233.109.64:8000`) after a deploy.
