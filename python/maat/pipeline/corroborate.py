@@ -259,9 +259,17 @@ def effective_originators(
     return round(total, 2)
 
 
-# How much doubt each independent originator leaves, by the claim's prior (§5.6): an
-# extraordinary claim earns less from the same corroboration than an ordinary one.
-_DECAY = {"ordinary": 0.40, "notable": 0.50, "extraordinary": 0.68}
+# How much doubt each independent originator leaves, by the claim's prior (§5.6): a more
+# extraordinary claim earns less from the same corroboration. Five-point scale; the bar was
+# raised (cauri) so it takes a bit more corroboration to clear 0.80. ~originators to reach 0.80:
+# routine ~2, ordinary ~2-3, notable ~3, significant ~4, extraordinary ~6. DRAFT — knobs to tune.
+_DECAY = {
+    "routine": 0.35,
+    "ordinary": 0.45,
+    "notable": 0.55,
+    "significant": 0.66,
+    "extraordinary": 0.76,
+}
 
 
 def confidence_read(
@@ -274,7 +282,7 @@ def confidence_read(
     doubt is scaled by the claim's prior — an extraordinary claim needs more independent
     originators to reach the same confidence. Capped below certainty.
     """
-    decay = _DECAY.get(extremity, 0.50)
+    decay = _DECAY.get(extremity, 0.55)  # default to "notable" if unrecognised
     base = 1.0 - decay ** max(0, independent_originators)
     if has_primary:
         base += (1.0 - base) * 0.5

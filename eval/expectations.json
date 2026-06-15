@@ -3,7 +3,7 @@
   "resignation": {
     "match": "Reyes",
     "independent_originators": 3,
-    "extremity": "ordinary",
+    "extremity": "significant",
     "has_primary": true,
     "label": "Well corroborated"
   },
