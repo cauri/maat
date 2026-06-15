@@ -138,6 +138,9 @@ final class FeedStore {
     private(set) var stories: [Story] = []
     private(set) var isLoading = false
     private(set) var usingFallback = false
+    /// True when showing the last-good on-device cache because the server was unreachable (#150).
+    private(set) var servingCache = false
+    private(set) var cacheDate: Date?
     var error: String?
 
     /// Set by the rerank pass (#53); nil means "server order".
@@ -170,8 +173,13 @@ final class FeedStore {
     func refreshSources() async {
         do {
             sources = try await primary.loadSources()
+            FeedCache.update(sources: sources)
         } catch {
-            sources = (try? await fallback.loadSources()) ?? []
+            if let cached = FeedCache.load(), !cached.sources.isEmpty {
+                sources = cached.sources
+            } else {
+                sources = (try? await fallback.loadSources()) ?? []
+            }
         }
     }
 
@@ -212,13 +220,24 @@ final class FeedStore {
         do {
             stories = try await primary.loadFeed()
             usingFallback = false
+            servingCache = false
+            cacheDate = nil
+            FeedCache.update(stories: stories)
         } catch {
-            // The reader is unreachable — fall back to the bundled sample rather than an empty feed.
-            do {
-                stories = try await fallback.loadFeed()
+            // Server unreachable. Prefer the last-good cache (real data from the last connection);
+            // only a cold first run with no cache falls back to the bundled fixture.
+            if let cached = FeedCache.load(), !cached.stories.isEmpty {
+                stories = cached.stories
+                servingCache = true
+                usingFallback = false
+                cacheDate = cached.savedAt
+                self.error = nil
+            } else if let bundled = try? await fallback.loadFeed() {
+                stories = bundled
                 usingFallback = true
+                servingCache = false
                 self.error = "Showing the bundled sample — \(error.localizedDescription)"
-            } catch {
+            } else {
                 self.error = error.localizedDescription
             }
         }
