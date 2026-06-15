@@ -14,7 +14,14 @@ from the live code so the view never drifts from what the pipeline actually uses
 from __future__ import annotations
 
 from maat.pipeline.classify import CLASSIFY_MODEL
-from maat.pipeline.corroborate import _DECAY
+from maat.pipeline.corroborate import (
+    _CONFIDENCE_CAP,
+    _DECAY,
+    _PRIMARY_LIFT,
+    _W_ANONYMOUS,
+    _W_BALD,
+    _W_NAMED,
+)
 from maat.pipeline.extremity import EXTREMITY_MODEL
 from maat.providers.seam import CLAUDE_JUDGE, MISTRAL_BULK, MISTRAL_EMBED
 
@@ -38,13 +45,29 @@ KNOBS: list[dict] = [
      "default": "0.60", "core": True, "source": "corroborate.py:confidence_label"},
     {"key": "tier.well", "label": "'Well corroborated' at", "group": "Veracity thresholds (§5.7)",
      "default": "0.85", "core": True, "source": "corroborate.py:confidence_label"},
+    {"key": "decay.routine", "label": "Per-originator doubt · routine", "group": "Extremity (§5.6)",
+     "default": str(_DECAY["routine"]), "core": True, "source": "corroborate.py:_DECAY"},
     {"key": "decay.ordinary", "label": "Per-originator doubt · ordinary", "group": "Extremity (§5.6)",
      "default": str(_DECAY["ordinary"]), "core": True, "source": "corroborate.py:_DECAY"},
     {"key": "decay.notable", "label": "Per-originator doubt · notable", "group": "Extremity (§5.6)",
      "default": str(_DECAY["notable"]), "core": True, "source": "corroborate.py:_DECAY"},
+    {"key": "decay.significant", "label": "Per-originator doubt · significant", "group": "Extremity (§5.6)",
+     "default": str(_DECAY["significant"]), "core": True, "source": "corroborate.py:_DECAY"},
     {"key": "decay.extraordinary", "label": "Per-originator doubt · extraordinary",
      "group": "Extremity (§5.6)", "default": str(_DECAY["extraordinary"]), "core": True,
      "source": "corroborate.py:_DECAY"},
+    {"key": "weight.named", "label": "Originator weight · named source", "group": "Attribution (§5.2)",
+     "default": str(_W_NAMED), "core": True, "source": "corroborate.py:_W_NAMED"},
+    {"key": "weight.anonymous", "label": "Originator weight · anonymous source",
+     "group": "Attribution (§5.2)", "default": str(_W_ANONYMOUS), "core": True,
+     "source": "corroborate.py:_W_ANONYMOUS"},
+    {"key": "weight.bald", "label": "Originator weight · no attribution", "group": "Attribution (§5.2)",
+     "default": str(_W_BALD), "core": True, "source": "corroborate.py:_W_BALD"},
+    {"key": "confidence.primary_lift", "label": "Primary-source lift (fraction of the gap closed)",
+     "group": "Confidence (§5.7)", "default": str(_PRIMARY_LIFT), "core": True,
+     "source": "corroborate.py:_PRIMARY_LIFT"},
+    {"key": "confidence.cap", "label": "Confidence cap (never certain)", "group": "Confidence (§5.7)",
+     "default": str(_CONFIDENCE_CAP), "core": True, "source": "corroborate.py:_CONFIDENCE_CAP"},
     {"key": "cluster.same_fact", "label": "Same-fact threshold", "group": "Clustering (§5.4-5.5)",
      "default": "0.82", "core": True, "source": "corroborate.py:same_fact_threshold"},
     {"key": "cluster.duplicate_source", "label": "Originator-collapse threshold",
