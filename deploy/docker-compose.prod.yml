@@ -1,5 +1,6 @@
-# Maat deploy-test stack: the infra baseline (Postgres+pgvector + NATS JetStream).
-# No public ports — services talk over the compose network; we verify from on-box.
+# Maat prod stack: Postgres+pgvector + NATS JetStream + the reader API, fronted by Caddy for TLS.
+# The public edge is Caddy (80/443); it exposes ONLY /api/* (see Caddyfile). The reader is bound to
+# 127.0.0.1, so the operator/admin console is reachable only via an SSH tunnel — never the open net.
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -36,14 +37,34 @@ services:
       # The admin console (P8, #82) publishes corrections to NATS; without this the reader
       # hit localhost:4222 and crash-looped. Point it at the compose nats service.
       NATS_URL: "nats://nats:4222"
+    # Loopback only: Caddy reaches it as reader:8000 on the compose network; the host port is bound
+    # to 127.0.0.1 for SSH-tunnel admin access. NOT published to the internet (closes the open :8000).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       nats:
         condition: service_healthy
 
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      # Public hostname — e.g. <box-ip>.sslip.io (free) or a real domain pointed at this box.
+      MAAT_HOST: ${MAAT_HOST:?set MAAT_HOST to the public hostname (e.g. <box-ip>.sslip.io)}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - reader
+
 volumes:
   pgdata:
   natsdata:
+  caddydata:
+  caddyconfig:

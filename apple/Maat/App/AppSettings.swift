@@ -7,7 +7,13 @@ import Observation
 @MainActor
 @Observable
 final class AppSettings {
-    /// Empty → use the bundled fixture. Otherwise the base URL of a Maat reader (e.g. the Hetzner box).
+    /// The deployed Maat reader the app talks to by default (the Hetzner box, over HTTPS). Overridable
+    /// in Settings; cleared → the bundled fixture (offline fallback). The feed store also falls back to
+    /// the fixture automatically if the server is unreachable.
+    /// TODO: move to a per-build-config value (xcconfig) once a real domain replaces the sslip.io host.
+    static let defaultAPIBaseURL = "https://167.233.109.64.sslip.io"
+
+    /// Base URL of the Maat reader. Empty → bundled fixture. Defaults to `defaultAPIBaseURL`.
     var apiBaseURL: String {
         didSet { defaults.set(apiBaseURL, forKey: Keys.api) }
     }
@@ -26,7 +32,7 @@ final class AppSettings {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        apiBaseURL = defaults.string(forKey: Keys.api) ?? ""
+        apiBaseURL = defaults.string(forKey: Keys.api) ?? Self.defaultAPIBaseURL
         preferOnDeviceTranslation = defaults.object(forKey: Keys.onDevice) as? Bool ?? true
         displayLanguageCode = defaults.string(forKey: Keys.lang)
             ?? Locale.current.language.languageCode?.identifier ?? "en"
