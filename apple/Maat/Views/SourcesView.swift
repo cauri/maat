@@ -45,12 +45,7 @@ struct SourceRow: View {
             }
             Spacer(minLength: 8)
             Sparkline(values: rating.trajectory, color: rating.band.color)
-                .frame(width: 44, height: 18)
-            Text(rating.coldStart ? "—" : "\(rating.score)")
-                .font(.headline)
-                .monospacedDigit()
-                .foregroundStyle(rating.coldStart ? Palette.muted : rating.band.color)
-                .frame(minWidth: 30, alignment: .trailing)
+                .frame(width: 56, height: 18)
         }
         .padding(.vertical, 4)
     }
@@ -67,26 +62,19 @@ struct SourceDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 SectionCard {
-                    HStack(alignment: .firstTextBaseline, spacing: 14) {
-                        Text(r.coldStart ? "—" : "\(r.score)")
-                            .font(.system(size: 46, weight: .semibold))
-                            .monospacedDigit()
-                            .foregroundStyle(r.coldStart ? Palette.muted : r.band.color)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(r.tier).font(.subheadline.weight(.medium)).foregroundStyle(r.band.color)
-                            Text(r.isPrimary
-                                 ? "primary source · highest standing"
-                                 : "reputation = truthfulness, one scalar")
-                                .font(.caption).foregroundStyle(Palette.muted)
-                            if !r.languages.isEmpty {
-                                Text(r.languages.map { $0.uppercased() }.joined(separator: " · "))
-                                    .font(.caption2).foregroundStyle(Palette.muted)
-                            }
-                        }
-                        Spacer(minLength: 0)
+                    Text(r.displayTier)
+                        .font(.title.weight(.semibold))
+                        .foregroundStyle(r.coldStart ? Palette.muted : r.band.color)
+                    Text(r.isPrimary
+                         ? "Primary source · highest standing"
+                         : "How truthfully this source has reported over time")
+                        .font(.caption).foregroundStyle(Palette.muted)
+                    if !r.languages.isEmpty {
+                        Text(r.languages.map { $0.uppercased() }.joined(separator: " · "))
+                            .font(.caption2).foregroundStyle(Palette.muted)
                     }
                     Sparkline(values: r.trajectory, color: r.band.color).frame(height: 40)
-                    Text("Provisional — until truth-over-time scoring lands.")
+                    Text("Shown as a trend over time, not a score — provisional until truth-over-time scoring lands.")
                         .font(.caption2).foregroundStyle(Palette.muted)
                 }
 
@@ -102,9 +90,9 @@ struct SourceDetailView: View {
                             HStack(alignment: .firstTextBaseline) {
                                 Text(ref.fact).font(.subheadline).foregroundStyle(Palette.ink)
                                 Spacer(minLength: 8)
-                                Text("\(ref.confidencePercent)%")
-                                    .font(.caption.weight(.semibold)).monospacedDigit()
-                                    .foregroundStyle(Palette.muted)
+                                Text(Story.ConfidenceLevel.of(ref.confidence).word)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Story.ConfidenceLevel.of(ref.confidence).color)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())

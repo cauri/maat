@@ -107,14 +107,27 @@ enum Extremity: String, Codable, Sendable {
 // MARK: - Presentation-facing derivations (pure; no UIKit/SwiftUI here)
 
 extension Story {
-    enum ConfidenceLevel { case low, medium, high }
+    enum ConfidenceLevel {
+        case low, medium, high
 
-    var confidenceLevel: ConfidenceLevel {
-        if confidence >= 0.8 { return .high }
-        if confidence >= 0.5 { return .medium }
-        return .low
+        static func of(_ confidence: Double) -> ConfidenceLevel {
+            if confidence >= 0.8 { return .high }
+            if confidence >= 0.5 { return .medium }
+            return .low
+        }
+
+        /// Plain-language confidence — the read is conveyed in words, not a percentage.
+        var word: String {
+            switch self {
+            case .high: return "Well corroborated"
+            case .medium: return "Partly corroborated"
+            case .low: return "Unverified"
+            }
+        }
     }
 
+    var confidenceLevel: ConfidenceLevel { .of(confidence) }
+    var confidenceWord: String { confidenceLevel.word }
     var confidencePercent: Int { Int((confidence * 100).rounded()) }
 
     /// The corroboration headline shown under the confidence bar.

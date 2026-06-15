@@ -23,7 +23,7 @@ struct SearchView: View {
                         NavigationLink(value: story) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(story.fact).font(.subheadline.weight(.medium))
-                                Text("\(story.confidencePercent)% confidence · \(story.corroborationSummary)")
+                                Text("\(story.confidenceWord) · \(story.corroborationSummary)")
                                     .font(.caption2).foregroundStyle(Palette.muted)
                             }
                         }

@@ -32,6 +32,12 @@ struct SourceRating: Codable, Sendable, Identifiable, Hashable {
 
     var id: String { name }
     var score: Int { Int((reputation * 100).rounded()) }
+
+    /// The tier, sentence-cased for a headline ("Well-corroborated", "Primary source").
+    var displayTier: String {
+        guard let first = tier.first else { return tier }
+        return String(first).uppercased() + String(tier.dropFirst())
+    }
 }
 
 extension SourceRating {
