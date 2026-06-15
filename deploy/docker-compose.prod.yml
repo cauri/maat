@@ -146,8 +146,17 @@ services:
       MISTRAL_API_KEY: "${MISTRAL_API_KEY:-}"
       # So translate + prompt-chat spans export, and /eval shows "receiving traces" + cat-cafe link.
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://cat-cafe:4318"
-    # Loopback only: Caddy reaches it as reader:8000 on the compose network; the host port is bound
-    # to 127.0.0.1 for SSH-tunnel admin access. NOT published to the internet (closes the open :8000).
+      # Admin-console auth (P8, #163; D31/D32) — Google OIDC + allowlist, SEPARATE from user auth.
+      # All empty by default → admin auth stays DISABLED (console unauthenticated) until these land
+      # in the box .env. Set them there (never in the repo); MAAT_ADMIN_SESSION_SECRET=$(openssl rand -hex 32).
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      MAAT_ADMIN_EMAILS: "${MAAT_ADMIN_EMAILS:-}"
+      MAAT_ADMIN_SESSION_SECRET: "${MAAT_ADMIN_SESSION_SECRET:-}"
+      MAAT_ADMIN_REDIRECT_URI: "${MAAT_ADMIN_REDIRECT_URI:-https://admin.maat.press/admin/callback}"
+      MAAT_ADMIN_HD: "${MAAT_ADMIN_HD:-}"
+    # Loopback only: host-network Caddy reaches it at 127.0.0.1:8000; the host port is bound to
+    # 127.0.0.1 for SSH-tunnel break-glass. NOT published to the internet (closes the open :8000).
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -169,12 +178,17 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    # HOST networking (not published ports): so the admin vhost's `remote_ip` matcher sees the
+    # real WireGuard source IP (a bridge + port-map would masquerade it to the docker gateway).
+    # Caddy binds the host's :80/:443 directly — including on the wg0 interface (10.8.0.1).
+    network_mode: host
     environment:
-      # Public hostname — e.g. <box-ip>.sslip.io (free) or a real domain pointed at this box.
-      MAAT_HOST: ${MAAT_HOST:?set MAAT_HOST to the public hostname (e.g. <box-ip>.sslip.io)}
-    ports:
-      - "80:80"
-      - "443:443"
+      # Public API hostname — a real domain whose A-record points at this box (api.maat.press).
+      MAAT_HOST: ${MAAT_HOST:?set MAAT_HOST to the public API hostname (e.g. api.maat.press)}
+      # Operator-console hostname (public A-record + WG-gated serving, D32) and the WG subnet
+      # the console is served to. Defaults match deploy/wireguard.sh.
+      MAAT_ADMIN_HOST: ${MAAT_ADMIN_HOST:-admin.maat.press}
+      MAAT_WG_SUBNET: ${MAAT_WG_SUBNET:-10.8.0.0/24}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data

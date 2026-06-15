@@ -6,6 +6,32 @@ point. Newest at top.
 
 ---
 
+## 2026-06-15 (later) — Admin auth: WireGuard + Google OIDC, on a real URL
+
+Gave the operator console its **own** auth (#163; D31/D32), separate from the user auth (Sign in
+with Apple). Two layers: **WireGuard** at the network (served only to your devices) + **Google
+OIDC with an email allow-list** at identity. The console gets a real URL — **`admin.maat.press`**
+(public A-record → the box, added in OVH; `api.maat.press` already served the API). cauri chose
+the **Workspace identity** (`cauri@rhbrb.com`) with an **Internal** Google app — most locked-down
+(only `rhbrb.com` accounts can even reach the consent screen), no verification, no test-user cap.
+
+- **Course-decision worth remembering — public name + WG-gated serving (D32).** The privacy fork
+  was: public DNS record + WireGuard-gated serving, *or* no public record + ACME **DNS-01**. Chose
+  the former — the only leak is "a host named admin.maat.press exists", while reachability (WG) and
+  login (Google allow-list) are both gated, and it avoids putting an OVH API token on the box. So
+  the cert is a normal Let's Encrypt **HTTP-01** on the already-public `:80`.
+- **Built (inert until secrets land):** `serving/admin_auth.py` (pure: allow-list, HMAC session +
+  state cookies, id_token claim checks, code→token exchange), `/admin/login|callback|logout`, an
+  HTTP-middleware gate over every console route (`/api/*` untouched), `admin.session.*` audit
+  events, 24 tests. The session is a **stateless signed cookie** so the gate survives a DB/bus
+  outage (break-glass). ID-token signature isn't re-verified — it's read over Google's TLS token
+  endpoint (their OIDC guidance) — but iss/aud/exp/nonce/hd/allow-list are.
+- **Edge (D32):** Caddy now serves `admin.maat.press` to **WireGuard source IPs only**
+  (`remote_ip`), on the **host network** so it sees the true peer IP; `deploy/wireguard.sh` mints
+  peer configs; setup/break-glass in `deploy/ADMIN_AUTH.md`. Not yet exercised on the box.
+- **Why a US IdP in the admin path is acceptable:** it's the operator's login only, never user
+  data, and consistent with Apple-for-users (D9). DRAFT — security review before production.
+
 ## 2026-06-15 — P8 operator console + prompt governance
 
 Built the **admin/operator console** (epic #66) — the reader evolved into an operator surface to run,
