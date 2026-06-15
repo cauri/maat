@@ -27,9 +27,17 @@ private extension Story.ConfidenceLevel {
 /// The featured lead story at the top of Today.
 struct LeadStoryCard: View {
     var story: Story
+    @Environment(AppSettings.self) private var settings
+
+    private var heroURL: URL? {
+        story.heroImageArticleId.flatMap { settings.imageURL(articleID: $0) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let heroURL {
+                StoryThumbnail(url: heroURL, height: 188, corner: 12)
+            }
             HStack(spacing: 6) {
                 Chip(text: story.confidenceWord, style: story.confidenceLevel.chip)
                 if story.hasPrimary { Chip(text: "primary-source backed", style: .attributed) }
@@ -53,28 +61,38 @@ struct LeadStoryCard: View {
 /// A standard story cell in the Today list.
 struct StoryRow: View {
     var story: Story
+    @Environment(AppSettings.self) private var settings
+
+    private var thumbURL: URL? {
+        story.heroImageArticleId.flatMap { settings.imageURL(articleID: $0) }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(story.fact)
-                .font(.system(.headline, design: .serif))
-                .foregroundStyle(Palette.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(sourceLine(story))
-                .font(.caption)
-                .foregroundStyle(Palette.muted)
-                .lineLimit(2)
-            HStack(spacing: 6) {
-                Text(story.confidenceWord)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(story.confidenceLevel.color)
-                if story.extremity == .extraordinary {
-                    Chip(text: "extraordinary claim", style: .extraordinary)
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(story.fact)
+                    .font(.system(.headline, design: .serif))
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(sourceLine(story))
+                    .font(.caption)
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(story.confidenceWord)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(story.confidenceLevel.color)
+                    if story.extremity == .extraordinary {
+                        Chip(text: "extraordinary claim", style: .extraordinary)
+                    }
+                    if story.primaryLanguage != "en" {
+                        Chip(text: "original: \(story.primaryLanguage.uppercased())", style: .neutral)
+                    }
+                    Spacer(minLength: 0)
                 }
-                if story.primaryLanguage != "en" {
-                    Chip(text: "original: \(story.primaryLanguage.uppercased())", style: .neutral)
-                }
-                Spacer(minLength: 0)
+            }
+            if let thumbURL {
+                StoryThumbnail(url: thumbURL, width: 84, height: 84, corner: 8)
             }
         }
         .padding(.vertical, 11)

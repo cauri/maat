@@ -1,6 +1,18 @@
-# Maat prod stack: Postgres+pgvector + NATS JetStream + the reader API, fronted by Caddy for TLS.
-# The public edge is Caddy (80/443); it exposes ONLY /api/* (see Caddyfile). The reader is bound to
-# 127.0.0.1, so the operator/admin console is reachable only via an SSH tunnel — never the open net.
+# Maat prod stack: the full live pipeline + serving, fronted by Caddy for TLS.
+#
+#   postgres + nats        — canonical store + bus
+#   kerneld                — the deterministic spine (single writer): folds events → projections,
+#                            and applies the embedded migrations on startup
+#   agents                 — extract + classify (long-running NATS subscribers; LLM judgement)
+#   acquisition-clock      — scheduled tick: acquire new articles → drain → corroborate (recompute
+#                            clusters). Cadence is operator-chosen via MAAT_TICK_INTERVAL.
+#   reader                 — the FastAPI app: public /api/* (incl. /api/v2 feed + image proxy) and
+#                            the loopback-only admin console
+#   caddy                  — the public edge (80/443); exposes ONLY /api/* (see Caddyfile)
+#
+# The reader is bound to 127.0.0.1, so the operator/admin console is reachable only via an SSH
+# tunnel — never the open net. Secrets (ANTHROPIC_API_KEY, MISTRAL_API_KEY, APIFY_API_KEY) live in
+# .env next to this file and are loaded into the pipeline services via env_file.
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -29,8 +41,94 @@ services:
       timeout: 3s
       retries: 10
 
+  # The deterministic spine (D20): the single writer over Postgres. Consumes maat.events.>,
+  # appends to the events log, folds projections (articles/claims/clusters), and runs the
+  # embedded sqlx migrations on startup — including 0008 (articles.image_url).
+  kerneld:
+    build: ./rust
+    image: maat-kerneld:local
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  # Extract + classify: long-running bus subscribers that call the LLM (BRIEF §5.1-5.3).
+  # Reuses the reader image (maat-app:local, built by the reader service); only the command differs.
+  agents:
+    image: maat-app:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
+      NATS_URL: "nats://nats:4222"
+    command: ["uv", "run", "--no-dev", "python", "-m", "maat.agents"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      kerneld:
+        condition: service_started
+
+  # Ingestion clock (#34): one tick = acquire new articles (GDELT, free) → wait for extract+classify
+  # to drain → corroborate (recompute clusters). clock.py is intentionally single-pass; this service
+  # is the scheduler wrapper. Cadence is the operator's choice via MAAT_TICK_INTERVAL. A paused clock
+  # (admin.clock.set) skips the acquire step. MAAT_PRIMARY_PASS=0 keeps the recurring job free
+  # (GDELT only); set it to 1 to add Apify primary-source enrichment per tick (costs credits).
+  acquisition-clock:
+    image: maat-app:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
+      NATS_URL: "nats://nats:4222"
+      # Operator-tunable. Topics drive what gets acquired; cadence drives cost.
+      MAAT_TOPICS: ${MAAT_TOPICS:-global politics,artificial intelligence,new technology emerging,scientific discovery,art,worldwide entertainment,fun and laughter}
+      MAAT_TICK_INTERVAL: ${MAAT_TICK_INTERVAL:-10800}   # 3h between ticks
+      MAAT_TICK_DRAIN: ${MAAT_TICK_DRAIN:-180}           # let extract+classify catch up before corroborate
+      # Apify primary-source enrichment ON (cauri): each tick adds an Apify pass for issuers' own
+      # releases the GDELT news stream misses. Costs credits per call. Spend is reported to the
+      # operator and (follow-up) surfaced in the admin console. Set to 0 to pause.
+      MAAT_PRIMARY_PASS: ${MAAT_PRIMARY_PASS:-1}
+    # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
+    # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
+    # by compose against the host env (unset → blank), breaking `sleep ""`.
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          echo "[clock] tick: acquire (topics: $${MAAT_TOPICS})";
+          uv run --no-dev python scripts/clock.py || echo "[clock] acquire error";
+          echo "[clock] draining $${MAAT_TICK_DRAIN}s for extract+classify";
+          sleep "$${MAAT_TICK_DRAIN}";
+          echo "[clock] corroborate (recompute clusters)";
+          uv run --no-dev python -m maat.agents.corroborate_agent || echo "[clock] corroborate error";
+          echo "[clock] tick done; sleeping $${MAAT_TICK_INTERVAL}s";
+          sleep "$${MAAT_TICK_INTERVAL}";
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      kerneld:
+        condition: service_started
+      agents:
+        condition: service_started
+
   reader:
     build: ./python
+    image: maat-app:local
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"

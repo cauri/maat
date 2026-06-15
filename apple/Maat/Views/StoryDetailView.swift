@@ -86,6 +86,18 @@ struct StoryDetailView: View {
         }
     }
 
+    /// Lead image for the reader (#1): the selected outlet's image when it has one, else the story
+    /// hero. Always loaded through the proxy by article id; nil in fixture mode or with no image.
+    private var heroURL: URL? {
+        if let article = selectedArticle, article.imageUrl != nil {
+            return settings.imageURL(articleID: article.id)
+        }
+        if let heroID = s.heroImageArticleId {
+            return settings.imageURL(articleID: heroID)
+        }
+        return nil
+    }
+
     // MARK: Body
 
     var body: some View {
@@ -97,9 +109,11 @@ struct StoryDetailView: View {
                     .foregroundStyle(Palette.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 byline
+                if let heroURL { StoryThumbnail(url: heroURL, height: 220, corner: 12) }
                 if needsTranslation { translateButton }
                 Divider().overlay(Palette.line)
                 articleBody
+                readOriginal
                 contextSections
             }
             .padding()
@@ -217,6 +231,18 @@ struct StoryDetailView: View {
                 Text("Full article text isn't available for this story yet.")
                     .font(.caption2).foregroundStyle(Palette.muted)
             }
+        }
+    }
+
+    /// Link back to the original article (#2) — courtesy attribution to the publisher.
+    @ViewBuilder private var readOriginal: some View {
+        if let article = selectedArticle, let link = article.url.flatMap({ URL(string: $0) }) {
+            ReadOriginalButton(url: link, source: article.source)
+                .padding(.vertical, 12)
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Palette.card, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.line, lineWidth: 1))
         }
     }
 

@@ -22,6 +22,9 @@ struct Story: Codable, Sendable, Identifiable, Hashable {
     var languages: [String]
     var originatorGroups: [OriginatorGroup]
     var claims: [Claim]
+    /// The article whose lead image represents the story (#1). The client loads it through the
+    /// reader's image proxy (`/api/v2/image?article=<id>`), never the origin — privacy-preserving.
+    var heroImageArticleId: String?
     /// The full articles behind the story — what the reader reads. Present on the detail payload.
     var articles: [Article]?
     var deeper: Deeper?
@@ -38,6 +41,8 @@ struct Article: Codable, Sendable, Identifiable, Hashable {
     var body: String
     var url: String?
     var language: String
+    /// The article's lead image (og:image), loaded via the reader's proxy by `id` — never directly.
+    var imageUrl: String?
     var ingestedAt: String?
 }
 

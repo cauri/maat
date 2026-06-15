@@ -73,6 +73,11 @@ jobs:
           rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
             --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.ruff_cache' \
             python/ "root@$DEPLOY_HOST:/root/python/"
+          # rust/ too: the prod compose builds maat-kerneld from ./rust (build: ./rust), so the box
+          # needs the workspace source. Without this the kerneld image build fails on the box.
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            --exclude 'target' \
+            rust/ "root@$DEPLOY_HOST:/root/rust/"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             deploy/docker-compose.prod.yml "root@$DEPLOY_HOST:/root/docker-compose.yml"
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "root@$DEPLOY_HOST" \

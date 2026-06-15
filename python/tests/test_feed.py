@@ -14,9 +14,14 @@ Coverage:
 
 from __future__ import annotations
 
+import asyncio
+import socket
+
 import pytest
 
 from maat.serving.feed import (
+    _hero_image_article_id,
+    _host_is_public,
     _infer_country,
     _jload,
     _primary_source,
@@ -614,3 +619,77 @@ def test_confidence_label_via_build_story(
         f"conf={conf}, ind={ind}, primary={primary}, extremity={extremity}"
     )
     assert story["tier"] == expected_tier
+
+
+# ---------------------------------------------------------------------------
+# _hero_image_article_id (#1) — which article's og:image represents the story
+# ---------------------------------------------------------------------------
+
+
+def _art_with_image(id: str, image_url: str | None) -> dict:
+    a = _article(id)
+    a["image_url"] = image_url
+    return a
+
+
+def test_hero_image_prefers_originator():
+    """The first originator article with an image wins."""
+    meta = {"a1": _art_with_image("a1", "https://cdn.x/1.jpg"),
+            "a2": _art_with_image("a2", "https://cdn.x/2.jpg")}
+    cl = _cluster(originators=[["a1"], ["a2"]], claim_ids=["c1"])
+    claims = [{"article_id": "a2"}]
+    assert _hero_image_article_id(cl, claims, meta) == "a1"
+
+
+def test_hero_image_falls_back_to_claim_article():
+    """No originator image → first claim article that has one."""
+    meta = {"a1": _art_with_image("a1", None),
+            "a9": _art_with_image("a9", "https://cdn.x/9.jpg")}
+    cl = _cluster(originators=[["a1"]], claim_ids=["c1"])
+    claims = [{"article_id": "a1"}, {"article_id": "a9"}]
+    assert _hero_image_article_id(cl, claims, meta) == "a9"
+
+
+def test_hero_image_none_when_no_images():
+    meta = {"a1": _art_with_image("a1", None)}
+    cl = _cluster(originators=[["a1"]], claim_ids=["c1"])
+    assert _hero_image_article_id(cl, [{"article_id": "a1"}], meta) is None
+
+
+def test_build_story_exposes_hero_image_article_id():
+    meta = {"a1": _art_with_image("a1", "https://cdn.x/1.jpg")}
+    cl = _cluster(originators=[["a1"]], claim_ids=["c1"])
+    claims = {"c1": _claim("c1", "a1")}
+    story = build_story(cl, claims, meta)
+    assert story["hero_image_article_id"] == "a1"
+
+
+# ---------------------------------------------------------------------------
+# _host_is_public (#1) — SSRF guard for the image proxy
+# ---------------------------------------------------------------------------
+
+
+def _patch_resolve(monkeypatch, ip: str) -> None:
+    """Force socket.getaddrinfo (used by loop.getaddrinfo) to resolve to one IP."""
+    def fake(host, port, *a, **k):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))]
+    monkeypatch.setattr(socket, "getaddrinfo", fake)
+
+
+def test_host_is_public_allows_public(monkeypatch):
+    _patch_resolve(monkeypatch, "93.184.216.34")
+    assert asyncio.run(_host_is_public("example.com", 443)) is True
+
+
+@pytest.mark.parametrize("ip", ["10.0.0.5", "127.0.0.1", "169.254.169.254", "192.168.1.10"])
+def test_host_is_public_blocks_private_and_metadata(monkeypatch, ip):
+    """RFC-1918, loopback, and the cloud-metadata link-local address are all refused."""
+    _patch_resolve(monkeypatch, ip)
+    assert asyncio.run(_host_is_public("evil.example", 80)) is False
+
+
+def test_host_is_public_blocks_unresolvable(monkeypatch):
+    def boom(host, port, *a, **k):
+        raise OSError("no such host")
+    monkeypatch.setattr(socket, "getaddrinfo", boom)
+    assert asyncio.run(_host_is_public("nope.invalid", 443)) is False
