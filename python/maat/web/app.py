@@ -24,15 +24,19 @@ from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from maat import events
+from maat import config, events
 from maat.bus import connect as nats_connect
+from maat.evals import evaluate, load_expectations
 from maat.pipeline.corroborate import (
     ClaimRow,
     cluster_id,
     confidence_label as _confidence_label,
     confidence_read,
     corroborate_fixed,
+    is_primary_source,
 )
+
+CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
 
 DB = os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
 
@@ -128,6 +132,131 @@ async def audit(limit: int = 200) -> str:
         limit,
     )
     return _doc(_audit_page(rows), "audit", "audit")
+
+
+@app.get("/eval", response_class=HTMLResponse)
+async def eval_view() -> str:
+    """A4a — surface the eval harness (#32) over the live projections. Includes, never rebuilds:
+    the same `evaluate()` the CLI runs, rendered for the operator. Golden regression + metrics."""
+    pool = app.state.pool
+    clusters = [
+        dict(r)
+        for r in await pool.fetch(
+            "select fact, sources, originators, independent_originators, has_primary, "
+            "confidence, extremity from clusters"
+        )
+    ]
+    claims = [dict(r) for r in await pool.fetch("select kind from claims")]
+    try:
+        report = evaluate(clusters, claims, load_expectations())
+        err = ""
+    except FileNotFoundError as exc:  # no fixtures checked out
+        report, err = None, f"eval fixtures not found: {exc}"
+    otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    return _doc(_eval_page(report, err, otlp), "eval", "eval")
+
+
+@app.get("/runs", response_class=HTMLResponse)
+async def runs() -> str:
+    """F4 — run console: pipeline activity off the event log, dead-letters, run-intent."""
+    pool = app.state.pool
+    agg = await pool.fetch("select type, count(*) n, max(created_at) last from events group by type")
+    counts = {r["type"]: {"n": r["n"], "last": r["last"]} for r in agg}
+    proj = {
+        "articles": await pool.fetchval("select count(*) from articles"),
+        "claims": await pool.fetchval("select count(*) from claims"),
+        "clusters": await pool.fetchval("select count(*) from clusters"),
+        "events": await pool.fetchval("select count(*) from events"),
+    }
+    recent = await pool.fetch("select type, stream_id, created_at from events order by id desc limit 25")
+    dead = await pool.fetch(
+        "select type, stream_id, error, created_at from dead_letters order by id desc limit 25"
+    )
+    return _doc(_runs_page(stage_summary(counts), proj, recent, dead), "runs", "runs")
+
+
+@app.post("/runs/trigger")
+async def trigger_run(stage: str = Form(...), reason: str = Form("")):
+    # Record operator intent in the audit log. Execution stays a deliberate CLI/cron step until a
+    # job runner with budget guardrails (D22) is wired — the console must not silently spend API $.
+    await _publish(
+        events.ADMIN_RUN_TRIGGERED, "pipeline", events.admin_event("pipeline", reason=reason, stage=stage)
+    )
+    return RedirectResponse("/runs", status_code=303)
+
+
+@app.get("/config", response_class=HTMLResponse)
+async def config_view() -> str:
+    """F5 — show every tunable knob with its live default + any proposed (pending) override."""
+    rows = await app.state.pool.fetch(
+        "select distinct on (data->>'key') data->>'key' k, data->>'value' v, "
+        "data->>'reason' r, created_at from events where type = $1 "
+        "order by data->>'key', id desc",
+        events.ADMIN_THRESHOLD_CHANGED,
+    )
+    overrides = {r["k"]: {"value": r["v"], "reason": r["r"], "at": r["created_at"]} for r in rows}
+    return _doc(_config_page(overrides), "config", "config")
+
+
+@app.post("/config/set")
+async def config_set(key: str = Form(...), value: str = Form(...), reason: str = Form("")):
+    # A proposal only — recorded + audited, never auto-applied. Promotion to live (esp. core
+    # knobs: gate floor, scoring, judge model) needs sign-off + A/B-on-replay (D18 / §5).
+    if key in config.KNOBS_BY_KEY and value.strip():
+        await _publish(
+            events.ADMIN_THRESHOLD_CHANGED,
+            key,
+            events.admin_event(key, reason=reason, key=key, value=value.strip()),
+        )
+    return RedirectResponse("/config", status_code=303)
+
+
+@app.get("/sources", response_class=HTMLResponse)
+async def sources_view() -> str:
+    """A2 — source registry off ingested articles + operator allow/deny + ownership grouping."""
+    pool = app.state.pool
+    srcs = await pool.fetch(
+        "select source, count(*) n, max(ingested_at) last, array_agg(distinct language) langs "
+        "from articles where source is not null group by source order by n desc"
+    )
+    id_to_source = {a["id"]: a["source"] for a in await pool.fetch("select id, source from articles")}
+    clusters = [dict(c) for c in await pool.fetch("select originators from clusters")]
+    wire = wire_collapsed_sources(clusters, id_to_source)
+    flags = await pool.fetch(
+        "select distinct on (data->>'source') data->>'source' s, data->>'status' st, "
+        "data->>'reason' r from events where type = $1 order by data->>'source', id desc",
+        events.ADMIN_SOURCE_FLAGGED,
+    )
+    grps = await pool.fetch(
+        "select distinct on (data->>'source') data->>'source' s, data->>'group' g "
+        "from events where type = $1 order by data->>'source', id desc",
+        events.ADMIN_SOURCE_GROUPED,
+    )
+    flag_by = {r["s"]: {"status": r["st"], "reason": r["r"]} for r in flags}
+    group_by = {r["s"]: r["g"] for r in grps}
+    return _doc(_sources_page(srcs, wire, flag_by, group_by), "sources", "sources")
+
+
+@app.post("/sources/flag")
+async def source_flag(source: str = Form(...), status: str = Form(...), reason: str = Form("")):
+    if status in ("allow", "deny"):
+        await _publish(
+            events.ADMIN_SOURCE_FLAGGED,
+            source,
+            events.admin_event(source, reason=reason, source=source, status=status),
+        )
+    return RedirectResponse("/sources", status_code=303)
+
+
+@app.post("/sources/group")
+async def source_group(source: str = Form(...), group: str = Form(...), reason: str = Form("")):
+    if group.strip():
+        await _publish(
+            events.ADMIN_SOURCE_GROUPED,
+            source,
+            events.admin_event(source, reason=reason, source=source, group=group.strip()),
+        )
+    return RedirectResponse("/sources", status_code=303)
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -772,15 +901,240 @@ def _audit_page(rows) -> str:
     )
 
 
+_STAGES = [
+    ("Acquire / ingest", "article.ingested", "make acquire QUERY=… N=12  ·  make ingest-corpus"),
+    ("Extract", "claims.extracted", "make agents"),
+    ("Classify", "claims.classified", "make agents"),
+    ("Corroborate", "cluster.corroborated", "make corroborate"),
+]
+
+
+def stage_summary(counts: dict) -> list[dict]:
+    """Map event-type aggregates {type: {n, last}} to the pipeline stages (F4). Pure."""
+    rows = []
+    for label, etype, cmd in _STAGES:
+        c = counts.get(etype) or {}
+        rows.append(
+            {"label": label, "type": etype, "cmd": cmd, "count": c.get("n", 0), "last": c.get("last")}
+        )
+    return rows
+
+
+def _runs_page(stages, proj, recent, dead) -> str:
+    pcells = "".join(
+        f'<div class="mcell"><div class="mk">{html.escape(k)}</div><div class="mv">{v}</div></div>'
+        for k, v in proj.items()
+    )
+    srows = []
+    for s in stages:
+        last = f'{s["last"]:%Y-%m-%d %H:%M}' if s["last"] else "—"
+        srows.append(
+            '<div class="srow"><div class="sname">'
+            f'{html.escape(s["label"])}<span class="mut sm"> · {html.escape(s["type"])}</span></div>'
+            f'<div class="snum">{s["count"]}<span class="mut sm"> events · last {last}</span></div>'
+            f'<div class="scmd mono">{html.escape(s["cmd"])}</div>'
+            '<form class="inline" method="post" action="/runs/trigger">'
+            f'<input type="hidden" name="stage" value="{html.escape(s["label"])}">'
+            '<button title="record intent in the audit log">log run</button></form></div>'
+        )
+    dead_html = ""
+    if dead:
+        drows = "".join(
+            f'<tr><td class="mut">{r["created_at"]:%m-%d %H:%M}</td>'
+            f'<td class="mono" style="color:#b3402e">{html.escape(r["type"])}</td>'
+            f'<td class="mono">{html.escape(str(r["stream_id"] or ""))}</td>'
+            f'<td class="mono">{html.escape((r["error"] or "")[:160])}</td></tr>'
+            for r in dead
+        )
+        dead_html = (
+            f'<div class="bl mt">Dead-letter — projection failures ({len(dead)})</div>'
+            '<table class="aud"><tr><th>when</th><th>type</th><th>stream</th><th>error</th></tr>'
+            f"{drows}</table>"
+        )
+    rrows = "".join(
+        f'<tr><td class="mut">{r["created_at"]:%m-%d %H:%M}</td>'
+        f'<td><span class="atype">{html.escape(r["type"])}</span></td>'
+        f'<td class="mono">{html.escape(str(r["stream_id"] or ""))}</td></tr>'
+        for r in recent
+    )
+    note = (
+        '<div class="mut sm">Token spend + timing are traced per LLM call to cat-cafe (see Eval). '
+        "Per-run cost against the budget (D22), and projection replay (rebuild from the log, a kernel "
+        "feature), are not wired yet — flagged, not faked.</div>"
+    )
+    return (
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Runs — pipeline activity off the event log (F4)</h3>'
+        f'<div class="mgrid">{pcells}</div><div class="bl mt">Stages</div>{"".join(srows)}'
+        f'{dead_html}<div class="bl mt">Recent events</div>'
+        f'<table class="aud"><tr><th>when</th><th>type</th><th>stream</th></tr>{rrows}</table>{note}</div>'
+    )
+
+
+def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
+    """Sources collapsed as wire/cascade — present in a multi-article originator group (§5.5). Pure."""
+    out: set = set()
+    for cl in clusters:
+        for grp in _jload(cl["originators"]):
+            if len(grp) > 1:
+                for art in grp:
+                    out.add(id_to_source.get(art, art))
+    return out
+
+
+def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
+    note = (
+        '<div class="deriv">Registry from ingested articles. Allow/deny + ownership grouping are '
+        "recorded, audited <b>proposals</b> — enforcement (deny → acquisition; the ownership graph "
+        "→ §5.5 originator-collapse) is the follow-up wiring, not faked here. The ownership graph is "
+        "a learned first-class asset (§5); this is where the operator seeds and corrects it.</div>"
+    )
+    rows = []
+    for s in srcs:
+        name = s["source"] or ""
+        esc = html.escape(name)
+        langs = ", ".join(x for x in (s["langs"] or []) if x) or "—"
+        last = f'{s["last"]:%Y-%m-%d}' if s["last"] else "—"
+        badges = []
+        if is_primary_source(name):
+            badges.append(_badge("primary", "fact"))
+        if name in wire:
+            badges.append(_badge("wire-collapsed", "proj"))
+        fl = flag_by.get(name) or {}
+        if fl.get("status") == "deny":
+            badges.append(_badge("denied", "laun"))
+        elif fl.get("status") == "allow":
+            badges.append(_badge("allowed", "own"))
+        if group_by.get(name):
+            badges.append(_badge(f"group · {group_by[name]}", "syn"))
+        rows.append(
+            f'<div class="srow2"><div><div class="sname">{esc} '
+            f'<span class="bs">{"".join(badges)}</span></div>'
+            f'<div class="mut sm">{s["n"]} articles · {html.escape(langs)} · last {last}</div></div>'
+            '<form class="inline" method="post" action="/sources/flag">'
+            f'<input type="hidden" name="source" value="{esc}">'
+            '<select name="status"><option value="deny">deny</option>'
+            '<option value="allow">allow</option></select><button>flag</button></form>'
+            '<form class="inline" method="post" action="/sources/group">'
+            f'<input type="hidden" name="source" value="{esc}">'
+            '<input name="group" placeholder="owner / wire group"><button>group</button></form></div>'
+        )
+    body = "".join(rows) or '<p class="empty">No sources yet — run acquisition (make acquire QUERY=… N=12).</p>'
+    return (
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Sources — registry, allow/deny, ownership graph (A2)</h3>'
+        f"{note}{body}</div>"
+    )
+
+
+def _config_page(overrides: dict) -> str:
+    """F5 — render the knob registry grouped, with live defaults + pending proposals."""
+    out = [
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Config — model routing + veracity thresholds (F5)</h3>'
+        '<div class="deriv">Changes are recorded as audited, versioned events — they are '
+        '<b>not auto-applied</b>. Core knobs (gate floor, scoring, judge/classifier models) need '
+        'explicit sign-off + an A/B-on-replay pass before going live (D18 / §5); that promotion '
+        "path is not wired yet.</div>"
+    ]
+    for g in config.groups():
+        out.append(f'<div class="bl mt">{html.escape(g)}</div>')
+        for k in (kn for kn in config.KNOBS if kn["group"] == g):
+            badge = _badge("core · sign-off", "laun") if k["core"] else _badge("ops", "own")
+            ov = overrides.get(k["key"])
+            ov_html = ""
+            if ov:
+                extra = f' · {html.escape(ov["reason"])}' if ov.get("reason") else ""
+                ov_html = (
+                    f'<div class="ovr">proposed → <b>{html.escape(ov["value"])}</b> '
+                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · pending sign-off</span></div>'
+                )
+            out.append(
+                '<div class="crow"><div class="cinfo">'
+                f'<div class="cname">{html.escape(k["label"])} {badge}</div>'
+                f'<div class="mut sm">default <span class="mono">{html.escape(str(k["default"]))}</span> '
+                f'· <span class="mono">{html.escape(k["source"])}</span></div>{ov_html}</div>'
+                '<form class="inline" method="post" action="/config/set">'
+                f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
+                '<input name="value" placeholder="new value">'
+                '<input class="reason" name="reason" placeholder="why">'
+                '<button>Propose</button></form></div>'
+            )
+    out.append("</div>")
+    return "".join(out)
+
+
+def _eval_page(report, err: str, otlp: str) -> str:
+    """A4a — render the eval harness output (#32). `report` is `maat.evals.evaluate(...)`."""
+    obs = (
+        f'<div class="deriv">Tracing → cat-cafe · OTLP <span class="mono">{html.escape(otlp)}</span> · '
+        f'<a class="clink" href="{html.escape(CATCAFE_URL)}">open trace UI ↗</a></div>'
+        if otlp
+        else '<div class="mut sm">OTLP tracing off — set OTEL_EXPORTER_OTLP_ENDPOINT and run '
+        "<span class=\"mono\">make obs-up</span> to stream LLM spans to cat-cafe.</div>"
+    )
+    head = (
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Eval — golden regression + metrics (surfacing #32, not rebuilt)</h3>'
+    )
+    if report is None:
+        return f'{head}<div class="empty">{html.escape(err)}</div>{obs}</div>'
+    m = report["metrics"]
+    n_ok = sum(1 for s in report["stories"] if s.ok)
+    banner = (
+        f'<div class="evbanner {"ok" if report["passed"] else "bad"}">'
+        f'{"PASS" if report["passed"] else "FAIL"} · {n_ok}/{len(report["stories"])} golden stories</div>'
+    )
+    kinds = ", ".join(f"{k}: {v}" for k, v in m["claim_kinds"].items()) or "—"
+    labels = ", ".join(f"{k}: {v}" for k, v in m["labels"].items()) or "—"
+    cells = [
+        ("claims", f'{m["claims"]} <span class="mut">({html.escape(kinds)})</span>'),
+        ("clusters",
+         f'{m["clusters"]} <span class="mut">· primary {m["with_primary"]} '
+         f'· extraordinary {m["extraordinary"]}</span>'),
+        ("confidence mean", str(m["confidence_mean"])),
+        ("labels", html.escape(labels)),
+    ]
+    mgrid = "".join(
+        f'<div class="mcell"><div class="mk">{k}</div><div class="mv">{v}</div></div>' for k, v in cells
+    )
+    stories = []
+    for s in report["stories"]:
+        checks = "".join(
+            f'<li>{"✓" if c.ok else "✗"} <b>{html.escape(c.field)}</b> '
+            f'<span class="mono">{html.escape(c.detail)}</span></li>'
+            for c in s.checks
+        )
+        stories.append(
+            f'<div class="estory {"ok" if s.ok else "bad"}">'
+            f'<div class="eh">{"✓" if s.ok else "✗"} {html.escape(s.name)}'
+            f'<span class="mut"> — {html.escape((s.fact or "")[:70])}</span></div>'
+            f'<ul class="prov">{checks or "<li class=mut>matched (no field checks)</li>"}</ul></div>'
+        )
+    return (
+        f'{head}{banner}<div class="mgrid">{mgrid}</div>'
+        f'<div class="bl mt">Golden stories</div>{"".join(stories)}{obs}</div>'
+    )
+
+
 # ============================ chrome ========================================================
 
 
 def _nav(active: str) -> str:
-    links = []
-    for href, label, key in (("/", "Content", "content"), ("/audit", "Audit", "audit")):
-        cls = "on" if key == active else ""
-        links.append(f'<a class="{cls}" href="{href}">{label}</a>')
-    links.append('<span class="dim" title="F4">Runs</span><span class="dim" title="F5">Config</span>')
+    tabs = [
+        ("/", "Content", "content"),
+        ("/runs", "Runs", "runs"),
+        ("/config", "Config", "config"),
+        ("/sources", "Sources", "sources"),
+        ("/eval", "Eval", "eval"),
+        ("/audit", "Audit", "audit"),
+    ]
+    dimmed: list = []
+    links = [
+        f'<a class="{"on" if key == active else ""}" href="{href}">{label}</a>'
+        for href, label, key in tabs
+    ]
+    links += [f'<span class="dim" title="{t}">{lbl}</span>' for lbl, t in dimmed]
     return f'<nav class="nav">{"".join(links)}</nav>'
 
 
@@ -878,6 +1232,23 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .aud th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border-bottom:1px solid var(--line);padding:6px 8px}
 .aud td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 .atype{font-weight:600;color:var(--acc)}
+.evbanner{display:inline-block;font-weight:700;font-size:13px;padding:4px 12px;border-radius:8px;margin:4px 0 12px}
+.evbanner.ok{background:#eaf3de;color:#3b6d11}.evbanner.bad{background:#fbe4df;color:#b3402e}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:8px 0}
+.mcell{background:#f6f5f2;border-radius:9px;padding:9px 11px}
+.mk{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);font-weight:700}
+.mv{font-size:15px;margin-top:2px}
+.estory{border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin:7px 0}
+.estory.ok{border-color:#cfe3b6;background:#f6faef}
+.estory.bad{border-color:#e9b8ae;background:#fdf4f1}
+.eh{font-weight:600;font-size:14px}
+.srow{display:grid;grid-template-columns:1.1fr 1.3fr 1.8fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+.sname{font-weight:600}
+.scmd{color:var(--mut);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crow{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.cname{font-weight:600;font-size:14px}
+.ovr{font-size:13px;color:#0b6b86;margin-top:3px}
+.srow2{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
 </style></head><body>
 <header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
 {{nav}}<p>{{subtitle}}</p></header>

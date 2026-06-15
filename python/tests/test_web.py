@@ -79,3 +79,115 @@ def test_audit_page_strips_prefix_shows_reason_and_extras_and_handles_empty():
 def test_nav_marks_active_tab():
     assert 'class="on"' in _nav("content")
     assert "Audit" in _nav("audit")
+    assert "Eval" in _nav("content")  # A4a tab present
+
+
+def test_eval_page_surfaces_pass_fail_and_metrics():
+    # A4a renders the REAL eval harness output (no rebuild). evaluate() is pure over dicts.
+    from maat.evals import evaluate
+    from maat.web.app import _eval_page
+
+    clusters = [
+        {
+            "fact": "Minister X resigned", "sources": ["AFP", "Daily"], "originators": [["a", "b"]],
+            "independent_originators": 2, "has_primary": False, "confidence": 0.75,
+            "extremity": "notable",
+        }
+    ]
+    claims = [{"kind": "fact"}, {"kind": "projection"}]
+    ok = evaluate(clusters, claims, {"resign": {"match": "resigned", "independent_originators": 2}})
+    out = _eval_page(ok, "", "")
+    assert "PASS" in out and "1/1 golden stories" in out
+    assert "2 (want 2)" in out  # the golden check detail is surfaced verbatim
+
+    bad = evaluate(clusters, claims, {"resign": {"match": "resigned", "independent_originators": 9}})
+    assert "FAIL" in _eval_page(bad, "", "")
+
+
+def test_eval_page_otlp_note_and_missing_fixtures():
+    from maat.web.app import _eval_page
+
+    assert "OTLP tracing off" in _eval_page(None, "no fixtures", "")
+    assert "no fixtures" in _eval_page(None, "no fixtures", "")
+    assert "open trace UI" in _eval_page(None, "x", "http://localhost:4318")
+
+
+def test_stage_summary_maps_event_types_to_stages():
+    from maat.web.app import stage_summary
+
+    rows = stage_summary(
+        {"claims.extracted": {"n": 5, "last": None}, "cluster.corroborated": {"n": 2, "last": None}}
+    )
+    by = {r["label"]: r for r in rows}
+    assert by["Extract"]["count"] == 5
+    assert by["Corroborate"]["count"] == 2
+    assert by["Classify"]["count"] == 0  # an absent event type reads as zero, not missing
+    assert all("make" in r["cmd"] for r in rows)
+
+
+def test_runs_page_shows_stages_dead_letters_and_recent():
+    from maat.web.app import _runs_page, stage_summary
+
+    stages = stage_summary({"article.ingested": {"n": 3, "last": dt.datetime(2026, 6, 15, 9, 0)}})
+    proj = {"articles": 3, "claims": 0, "clusters": 0, "events": 3}
+    recent = [{"type": "article.ingested", "stream_id": "a1", "created_at": dt.datetime(2026, 6, 15, 9, 0)}]
+    dead = [
+        {"type": "cluster.corroborated", "stream_id": "c1", "error": "boom",
+         "created_at": dt.datetime(2026, 6, 15, 9, 1)}
+    ]
+    out = _runs_page(stages, proj, recent, dead)
+    assert "Acquire / ingest" in out
+    assert "Dead-letter" in out and "boom" in out
+    assert "Recent events" in out
+
+
+def test_config_knobs_sourced_from_live_code():
+    from maat.config import KNOBS_BY_KEY, groups
+    from maat.providers.seam import CLAUDE_JUDGE
+
+    assert {"model.judge", "gate.floor", "cluster.same_fact"} <= set(KNOBS_BY_KEY)
+    assert KNOBS_BY_KEY["model.judge"]["core"] is True
+    assert KNOBS_BY_KEY["model.bulk"]["core"] is False
+    assert KNOBS_BY_KEY["model.judge"]["default"] == CLAUDE_JUDGE  # not invented
+    assert "Model routing" in groups()
+
+
+def test_config_page_shows_default_override_and_signoff_guard():
+    from maat.web.app import _config_page
+
+    out = _config_page(
+        {"gate.floor": {"value": "0.35", "reason": "too strict", "at": dt.datetime(2026, 6, 15, 10, 0)}}
+    )
+    assert "Config" in out
+    assert "0.35" in out and "pending sign-off" in out  # the proposal is shown, marked pending
+    assert "not auto-applied" in out  # the guardrail is surfaced to the operator
+    assert "core · sign-off" in out  # core knobs flagged
+
+
+def test_wire_collapsed_sources_flags_only_multi_article_groups():
+    from maat.web.app import wire_collapsed_sources
+
+    id_to_source = {"a1": "AFP", "a2": "Daily News", "a3": "Indie Times"}
+    clusters = [{"originators": [["a1", "a2"], ["a3"]]}]  # a1+a2 are one wire node; a3 independent
+    assert wire_collapsed_sources(clusters, id_to_source) == {"AFP", "Daily News"}
+
+
+def test_sources_page_registry_badges_and_proposal_note():
+    from maat.web.app import _sources_page
+
+    srcs = [
+        {"source": "European Central Bank", "n": 3, "last": dt.datetime(2026, 6, 15), "langs": ["en"]},
+        {"source": "AFP", "n": 9, "last": dt.datetime(2026, 6, 15), "langs": ["en", "fr"]},
+    ]
+    out = _sources_page(srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}}, {"AFP": "Wire"})
+    assert "European Central Bank" in out and "primary" in out  # primary-source role detected
+    assert "wire-collapsed" in out and "denied" in out and "group · Wire" in out
+    assert "proposals" in out  # enforcement-deferred guardrail surfaced
+
+
+def test_nav_includes_all_p8_tabs():
+    from maat.web.app import _nav
+
+    n = _nav("content")
+    for label in ("Content", "Runs", "Config", "Sources", "Eval", "Audit"):
+        assert label in n

@@ -20,8 +20,10 @@ ADMIN_LAUNDERING_FLAGGED = "admin.laundering.flagged"  # F3: §5.2 abuse the cla
 ADMIN_CLUSTER_SPLIT = "admin.cluster.split"  # F3: an over-merged cluster, pulled apart (#20)
 ADMIN_CLUSTER_MERGED = "admin.cluster.merged"  # F3: distinct clusters that are one fact
 ADMIN_CLAIM_MOVED = "admin.claim.moved"  # F3: a claim moved between clusters
-ADMIN_THRESHOLD_CHANGED = "admin.threshold.changed"  # F5 (reserved)
-ADMIN_RUN_TRIGGERED = "admin.run.triggered"  # F4 (reserved)
+ADMIN_THRESHOLD_CHANGED = "admin.threshold.changed"  # F5: a proposed config change
+ADMIN_RUN_TRIGGERED = "admin.run.triggered"  # F4: operator kicked a pipeline stage
+ADMIN_SOURCE_FLAGGED = "admin.source.flagged"  # A2: allow / deny a source
+ADMIN_SOURCE_GROUPED = "admin.source.grouped"  # A2: ownership / wire / copy-network grouping
 
 ADMIN_EVENT_TYPES = frozenset(
     {
@@ -32,6 +34,8 @@ ADMIN_EVENT_TYPES = frozenset(
         ADMIN_CLAIM_MOVED,
         ADMIN_THRESHOLD_CHANGED,
         ADMIN_RUN_TRIGGERED,
+        ADMIN_SOURCE_FLAGGED,
+        ADMIN_SOURCE_GROUPED,
     }
 )
 
