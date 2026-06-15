@@ -93,3 +93,25 @@ def test_tune_proposals_target_config_keys_with_rationale():
 
 def test_tune_proposals_empty_when_nothing_resolved():
     assert tune_proposals([]) == []
+
+
+def test_tune_decay_never_proposes_worse_than_current_with_sparse_grid():
+    # a sparse grid can miss the current weight; the tuner must still never raise Brier.
+    # (regression: it used to adopt the first grid point unconditionally, ignoring the base.)
+    obs = [Observation(1, False, "notable", "confirmed"), Observation(1, False, "notable", "refuted")]
+    base_b = brier_score(obs)
+    _, tuned_b = tune_decay(obs, grid=(0.30, 0.82))
+    assert base_b is not None and tuned_b is not None
+    assert tuned_b <= base_b
+
+
+def test_tune_decay_brier_never_increases_on_mixed_outcomes():
+    obs = (
+        [Observation(2, False, "extraordinary", "confirmed")] * 4
+        + [Observation(5, False, "routine", "refuted")] * 3
+        + [Observation(3, True, "notable", "confirmed")] * 3
+    )
+    base_b = brier_score(obs)
+    _, tuned_b = tune_decay(obs)
+    assert base_b is not None and tuned_b is not None
+    assert tuned_b <= base_b

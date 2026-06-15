@@ -164,11 +164,13 @@ def tune_decay(
         facts = [o for o in scored if o.extremity == level]
         if not facts:
             continue  # no evidence at this level — leave the starting point untouched
-        best_v, best_b = base.decay[level], None
+        # Seed with the CURRENT weight's score, so a grid that misses the base value can never
+        # make things worse — only a strictly-better grid point is adopted (no churn on ties).
+        best_v = base.decay[level]
+        best_b = brier_score(facts, replace(base, decay={**tuned_decay, level: best_v}))
         for v in grid:
-            candidate = replace(base, decay={**tuned_decay, level: v})
-            b = brier_score(facts, candidate)
-            if b is not None and (best_b is None or b < best_b):
+            b = brier_score(facts, replace(base, decay={**tuned_decay, level: v}))
+            if b is not None and best_b is not None and b < best_b:
                 best_v, best_b = v, b
         tuned_decay[level] = best_v
     tuned = replace(base, decay=tuned_decay)
