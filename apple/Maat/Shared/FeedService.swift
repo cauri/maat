@@ -41,14 +41,15 @@ struct APIFeedService: FeedService {
     var session: URLSession = .shared
 
     func loadFeed() async throws -> [Story] {
-        let (data, resp) = try await session.data(from: baseURL.appending(path: "api/feed"))
+        // Canonical Feed API (#48, serving/feed.py): de-US ordered, confidence-labelled.
+        let (data, resp) = try await session.data(from: baseURL.appending(path: "api/v2/feed"))
         try Self.check(resp)
         return try FeedJSON.decoder.decode(Feed.self, from: data).stories
     }
 
     func loadStory(id: String, deeper: Bool) async throws -> Story {
-        var url = baseURL.appending(path: "api/story/\(id)")
-        if deeper { url.append(queryItems: [URLQueryItem(name: "deeper", value: "1")]) }
+        // /api/v2/story attaches the full article bodies the reader opens (deeper is implicit now).
+        let url = baseURL.appending(path: "api/v2/story/\(id)")
         let (data, resp) = try await session.data(from: url)
         try Self.check(resp)
         return try FeedJSON.decoder.decode(Story.self, from: data)

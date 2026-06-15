@@ -978,64 +978,9 @@ def _story_json(cluster, claims_by_id: dict, meta: dict[str, dict]) -> dict:
     }
 
 
-@app.get("/api/feed")
-async def api_feed() -> JSONResponse:
-    pool = app.state.pool
-    clusters = await pool.fetch(
-        "select id, fact, sources, originators, independent_originators, has_primary, "
-        "claim_ids, confidence, extremity from clusters "
-        "order by confidence desc, independent_originators desc"
-    )
-    meta = await _article_meta(pool)
-    claims_by_id = await _claims_by_id(pool)
-    stories = [_story_json(c, claims_by_id, meta) for c in clusters]
-    return JSONResponse(
-        {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "count": len(stories),
-            "stories": stories,
-        }
-    )
-
-
-@app.get("/api/story/{cluster_id}")
-async def api_story(cluster_id: str, deeper: int = 0) -> JSONResponse:
-    pool = app.state.pool
-    row = await pool.fetchrow(
-        "select id, fact, sources, originators, independent_originators, has_primary, "
-        "claim_ids, confidence, extremity from clusters where id = $1",
-        cluster_id,
-    )
-    if row is None:
-        raise HTTPException(status_code=404, detail="no such story")
-    meta = await _article_meta(pool)
-    claims_by_id = await _claims_by_id(pool)
-    story = _story_json(row, claims_by_id, meta)
-    # The full articles behind the story — this is what the reader actually reads.
-    full = await _article_full_map(pool)
-    story["articles"] = [
-        _article_json(full[aid]) for aid in _cluster_article_ids(row, claims_by_id) if aid in full
-    ]
-    if deeper:
-        # Tier-3 "go deeper" (§2.1, §11): the PCC / server middle tier expands provenance,
-        # fetches-and-verifies primary sources, and runs cross-language corroboration. Stubbed
-        # here as the per-claim provenance the deeper pass would assemble — the PCC developer
-        # surface is verified at P6 and slots in behind this boundary.
-        story["deeper"] = {
-            "note": "Tier-3 expansion (server/PCC stub): primary-source fetch-and-verify and "
-            "cross-language corroboration would run here.",
-            "provenance": [
-                {
-                    "claim_id": c["id"],
-                    "voice": c["voice"],
-                    "speaker": c["speaker"],
-                    "evidence_span": c["evidence_span"],
-                    "source": c["source"],
-                }
-                for c in story["claims"]
-            ],
-        }
-    return JSONResponse(story)
+# Feed + story are served by serving/feed.py's feed_router at /api/v2 (mounted at startup) — the
+# canonical Feed API (#48, de-US ordered + confidence-labelled + article bodies) supersedes the
+# earlier /api/feed and /api/story stubs that lived here.
 
 
 class TranslateReq(BaseModel):
