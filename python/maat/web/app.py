@@ -495,8 +495,10 @@ async def source_group(source: str = Form(...), group: str = Form(...), reason: 
 
 
 @app.get("/prompts", response_class=HTMLResponse)
-async def prompts_view(ok: str = "") -> str:
-    """P8 — edit the agent prompts directly. Edits go live on the next run; versioned + rollback."""
+async def prompts_view(key: str = "", ok: str = "") -> str:
+    """P8 — edit the agent prompts directly. Edits go live on the next run; versioned + rollback.
+    Three-panel layout: agents on the left, the selected agent's editor in the middle, the
+    always-open Claude chat on the right. ``key`` selects the agent (defaults to the first editable)."""
     try:
         rows = await app.state.pool.fetch(
             "select key, version, text, active, reason, created_at from prompts order by key, version desc"
@@ -507,7 +509,10 @@ async def prompts_view(ok: str = "") -> str:
     by_key: dict[str, list] = {}
     for r in rows:
         by_key.setdefault(r["key"], []).append(r)
-    return _doc(_prompts_page(by_key, store_ready), "prompts", "prompts", flash=ok)
+    selected = key if key in prompts.PROMPTS_BY_KEY else next(
+        (p["key"] for p in prompts.PROMPTS if p["status"] == "active"), prompts.PROMPTS[0]["key"]
+    )
+    return _doc(_prompts_page(by_key, store_ready, selected), "prompts", "prompts", flash=ok)
 
 
 @app.post("/prompts/save")
@@ -1943,29 +1948,37 @@ def _prompt_active_block(p: dict, by_key: dict) -> str:
         '<button title="Saves a new version, live on the next run">Save new version</button> '
         '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
         'built-in version">Restore original</button>'
-        f'</form>{_prompt_chat_panel(key)}{hist}</div>'
+        f'</form>{hist}</div>'
     )
 
 
 def _prompt_chat_panel(key: str) -> str:
-    """Collapsible 'Improve with chat' helper under an editable prompt (#158). Raw-Claude chat:
-    cauri discusses the prompt, a proposed revision drops into THIS textarea on 'Apply to editor',
-    and cauri still clicks the existing Save new version. Vanilla inline JS, no auto-save."""
+    """Always-open 'Improve with Claude' helper for the selected editable prompt (#158), shown in
+    the right column. Raw-Claude chat: cauri discusses the prompt, a proposed revision drops into
+    the editor on 'Apply to editor', and cauri still clicks Save new version. No auto-save."""
     k = html.escape(key)
     return (
-        f'<details class="chat" data-key="{k}">'
-        '<summary title="Talk it through with Claude and shape a revision — you still review '
-        'and Save new version">Improve with chat</summary>'
-        '<div class="chat-help mut sm">Discuss this prompt with Claude. When it proposes a revision '
-        'you\'ll get an <b>Apply to editor</b> button — it fills the box above; you review and click '
-        '<b>Save new version</b>. The chat never saves.</div>'
+        f'<div class="chat3" data-key="{k}">'
+        '<div class="chat3-head">💬 Improve with Claude</div>'
+        '<div class="chat-help mut sm">Talk through this prompt. When Claude proposes a revision '
+        'you\'ll get an <b>Apply to editor</b> button — it fills the editor; you review and click '
+        '<b>Save new version</b>. The chat never saves on its own.</div>'
         f'<div class="chat-log" id="log-{k}"></div>'
         '<div class="chat-row">'
         f'<textarea class="chat-in" id="in-{k}" rows="2" '
         'placeholder="e.g. make it stricter about attributed claims"></textarea>'
         f'<button type="button" class="chat-send" id="send-{k}" '
         f'onclick="maatPromptChat(\'{k}\')">Send</button>'
-        '</div></details>'
+        '</div></div>'
+    )
+
+
+def _prompt_chat_unavailable() -> str:
+    """Right-column placeholder for draft / on-device prompts (read-only, no chat)."""
+    return (
+        '<div class="chat3"><div class="chat3-head">💬 Improve with Claude</div>'
+        '<div class="chat-help mut sm">Chat is available on the editable (Active) prompts. '
+        'This one is read-only — surfaced for review.</div></div>'
     )
 
 
@@ -1985,46 +1998,65 @@ def _prompt_readonly_block(p: dict) -> str:
     )
 
 
-# Display order + heading for each status group on the Prompts page.
+# Display order + short heading for each status group in the Prompts left-nav.
 _PROMPT_GROUPS = [
-    ("active", "Active — editable, live on the next run"),
-    ("draft", "Draft — pending cauri review"),
-    ("on-device", "On-device (Apple)"),
+    ("active", "Editable"),
+    ("draft", "Draft"),
+    ("on-device", "On-device"),
 ]
 
 
-def _prompts_page(by_key: dict, store_ready: bool = True) -> str:
-    """P8 — every prompt the platform runs, grouped by status. Active prompts are editable
-    (text, version history, rollback, restore-default); draft and on-device prompts are read-only.
-    """
-    intro = (
-        '<div class="deriv">Every prompt the platform runs, so you can review them all. '
-        '<b>Active</b> prompts are editable — saving makes it live on the next run (the built-in '
-        'version is the fallback), every version is kept, and you can roll back in one click; keep '
-        'the <span class="mono">{placeholders}</span> or the save is refused. <b>Draft</b> prompts '
-        'are in code but gated off, awaiting your review. <b>On-device</b> prompts run on the '
-        "reader's phone (Apple) and are mirrored here for review. Draft and on-device are read-only."
-        '</div>'
-    )
-    if not store_ready:
-        intro += (
-            '<div class="note">The prompt store isn\'t set up yet — restart the kernel '
-            "(maat-kerneld) to enable saving and version history. Showing the built-in prompts.</div>"
-        )
-    sections = []
-    for status, heading in _PROMPT_GROUPS:
+def _prompt_nav(selected: str) -> str:
+    """Left column: every prompt as a selectable link to ``/prompts?key=…``, grouped by status."""
+    out = []
+    for status, short in _PROMPT_GROUPS:
         entries = [p for p in prompts.PROMPTS if p["status"] == status]
         if not entries:
             continue
-        if status == "active":
-            blocks = "".join(_prompt_active_block(p, by_key) for p in entries)
-        else:
-            blocks = "".join(_prompt_readonly_block(p) for p in entries)
-        sections.append(f'<div class="bl mt">{html.escape(heading)}</div>{blocks}')
+        items = "".join(
+            f'<a class="p3-item{" on" if p["key"] == selected else ""}" '
+            f'href="/prompts?key={quote(p["key"])}" title="{html.escape(p.get("description", ""))}">'
+            f'{html.escape(p["label"])}</a>'
+            for p in entries
+        )
+        out.append(f'<div class="p3-group">{html.escape(short)}</div>{items}')
+    return "".join(out)
+
+
+def _prompts_page(by_key: dict, store_ready: bool = True, selected: str = "") -> str:
+    """P8 — three panels: agents (left), the selected agent's editor (middle), the always-open
+    Claude chat (right). Active prompts are editable + versioned; draft/on-device are read-only."""
+    store_note = ""
+    if not store_ready:
+        store_note = (
+            '<div class="note">The prompt store isn\'t set up yet — restart the kernel '
+            "(maat-kerneld) to enable saving and version history. Showing the built-in prompts.</div>"
+        )
+    p = prompts.PROMPTS_BY_KEY.get(selected)
+    if p is None:  # no/invalid selection — default to the first editable agent
+        p = next((x for x in prompts.PROMPTS if x["status"] == "active"),
+                 prompts.PROMPTS[0] if prompts.PROMPTS else None)
+        selected = p["key"] if p else ""
+    if p is None:
+        middle, right = '<p class="empty">No prompts registered.</p>', ""
+    elif p["status"] == "active":
+        middle, right = _prompt_active_block(p, by_key), _prompt_chat_panel(selected)
+    else:
+        middle, right = _prompt_readonly_block(p), _prompt_chat_unavailable()
     return (
         '<div class="ins"><a class="back" href="/">← back to feed</a>'
         '<h3 class="ih">Prompts — the instructions each AI step runs on</h3>'
-        f'{intro}{"".join(sections)}</div>'
+        '<div class="deriv">Pick an agent on the left to see and edit the exact instructions it runs '
+        'on. <b>Active</b> prompts are editable — saving makes it live on the next run, every version '
+        'is kept, and you can roll back; keep the <span class="mono">{placeholders}</span> or the save '
+        'is refused. <b>Draft</b> and <b>on-device</b> prompts are read-only (shown for review). Use '
+        'the chat on the right to shape a revision with Claude.</div>'
+        f'{store_note}'
+        '<div class="prompts3">'
+        f'<aside class="p3-col p3-left">{_prompt_nav(selected)}</aside>'
+        f'<section class="p3-col p3-mid">{middle}</section>'
+        f'<aside class="p3-col p3-right">{right}</aside>'
+        '</div></div>'
     )
 
 
@@ -2630,6 +2662,20 @@ header.top p{margin:4px 0 0;color:var(--mut);font-size:13px}
 .nav a.on{color:var(--ink);border-bottom-color:var(--ink)}
 .nav .dim{color:#c3bfb6;cursor:not-allowed}
 main{max-width:820px;margin:0 auto;padding:12px 20px 60px}
+/* Prompts page — 3-panel: agents (left) · editor (middle) · Claude chat (right) */
+main:has(.prompts3){max-width:1180px}
+.prompts3{display:grid;grid-template-columns:200px minmax(0,1fr) 360px;gap:16px;align-items:start;margin-top:14px}
+.p3-col{min-width:0}
+.p3-left,.p3-right{position:sticky;top:14px}
+.p3-group{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:14px 0 5px}
+.p3-group:first-child{margin-top:0}
+.p3-item{display:block;text-decoration:none;color:var(--ink);font-size:14px;line-height:1.3;padding:7px 10px;border-radius:8px;border:1px solid transparent}
+.p3-item:hover{background:#f0efe9}
+.p3-item.on{background:#eaf3de;border-color:#cfe3b6;font-weight:600}
+.chat3{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:12px;background:#f6f5f2;max-height:80vh}
+.chat3-head{font-size:13px;font-weight:600;color:var(--acc);padding:10px 12px;border-bottom:1px solid var(--line)}
+.chat3 .chat-log{flex:1 1 auto;overflow-y:auto;min-height:0}
+@media (max-width:1000px){main:has(.prompts3){max-width:820px}.prompts3{grid-template-columns:1fr}.p3-left,.p3-right{position:static}.chat3{max-height:none}}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:14px 0}
 .panel h3,.ih{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
 .story{padding:15px 0;border-top:1px solid var(--line)}
