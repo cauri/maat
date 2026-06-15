@@ -52,6 +52,27 @@ CATEGORIES = (
 ROUTES = ("review", "auto-fix")
 
 
+# DRAFT prompt — flag for cauri review.
+# Defined as a real constant so it is surfaced READ-ONLY in the operator console, but it is
+# intentionally NOT used by live code: the rule-based classifier below stays the default. Do not
+# wire this into the pipeline without cauri review.
+TRIAGE_LLM_PROMPT = """
+You are a feedback triage assistant for Maat, a veracity-weighted news feed.
+Given this user feedback:
+
+  {text}
+
+Classify it into exactly one of these categories:
+  - veracity-dispute  (challenges a confidence score or claim accuracy)
+  - source-quality    (concern about a specific outlet's reliability)
+  - bug               (technical breakage in the UI or pipeline)
+  - ui                (cosmetic / layout issue, not a correctness problem)
+  - topic-request     (wants a new topic, region, or language added)
+
+Return ONLY a JSON object: {{"category": "<category>", "reason": "<one sentence>"}}.
+"""
+
+
 @dataclass(frozen=True)
 class TriageResult:
     item_id: str
@@ -201,24 +222,11 @@ def classify(text: str, category_hint: str = "") -> TriageResult:
     # Placeholder for LLM refinement (DISABLED — flag for cauri review before enabling)
     # DRAFT prompt — flag for cauri review
     # -------------------------------------------------------------------------
-    # TRIAGE_LLM_PROMPT = """
-    # You are a feedback triage assistant for Maat, a veracity-weighted news feed.
-    # Given this user feedback:
-    #
-    #   {text}
-    #
-    # Classify it into exactly one of these categories:
-    #   - veracity-dispute  (challenges a confidence score or claim accuracy)
-    #   - source-quality    (concern about a specific outlet's reliability)
-    #   - bug               (technical breakage in the UI or pipeline)
-    #   - ui                (cosmetic / layout issue, not a correctness problem)
-    #   - topic-request     (wants a new topic, region, or language added)
-    #
-    # Return ONLY a JSON object: {{"category": "<category>", "reason": "<one sentence>"}}.
-    # """
+    # The DRAFT text lives in the module-level ``TRIAGE_LLM_PROMPT`` constant (surfaced read-only
+    # in the operator console). It is intentionally unused here.
     # -------------------------------------------------------------------------
-    # To enable: import and call your LLM provider, parse the JSON response,
-    # then replace best_cat/best_conf/best_reason with the LLM output.
+    # To enable: import and call your LLM provider with ``TRIAGE_LLM_PROMPT``, parse the JSON
+    # response, then replace best_cat/best_conf/best_reason with the LLM output.
     # Keep the rule-based pass as a fallback when the LLM is unavailable.
     # -------------------------------------------------------------------------
 

@@ -48,6 +48,7 @@ from maat.pipeline.corroborate import (
     corroborate_fixed,
     is_primary_source,
 )
+from maat.providers import seam
 from maat.serving.feed import feed_router
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import routed_queue
@@ -371,7 +372,7 @@ async def prompts_view(ok: str = "") -> str:
 
 @app.post("/prompts/save")
 async def prompts_save(key: str = Form(...), text: str = Form(...), reason: str = Form("")):
-    if key not in prompts.PROMPTS_BY_KEY:
+    if key not in prompts.EDITABLE_KEYS:  # draft / on-device prompts are read-only
         return _redirect("/prompts", "Unknown prompt.")
     missing = prompts.missing_placeholders(key, text)
     if missing:  # safety: dropping a placeholder would break the run — refuse the save
@@ -385,7 +386,7 @@ async def prompts_save(key: str = Form(...), text: str = Form(...), reason: str 
 
 @app.post("/prompts/restore")
 async def prompts_restore(key: str = Form(...), reason: str = Form(""), text: str = Form("")):
-    if key not in prompts.PROMPTS_BY_KEY:
+    if key not in prompts.EDITABLE_KEYS:  # draft / on-device prompts are read-only
         return _redirect("/prompts", "Unknown prompt.")
     pub = await _publish(
         events.ADMIN_PROMPT_UPDATED,
@@ -399,6 +400,8 @@ async def prompts_restore(key: str = Form(...), reason: str = Form(""), text: st
 
 @app.post("/prompts/rollback")
 async def prompts_rollback(key: str = Form(...), version: int = Form(...)):
+    if key not in prompts.EDITABLE_KEYS:  # draft / on-device prompts are read-only
+        return _redirect("/prompts", "Unknown prompt.")
     row = await app.state.pool.fetchrow(
         "select text from prompts where key = $1 and version = $2", key, version
     )
@@ -417,7 +420,7 @@ async def prompts_rollback(key: str = Form(...), version: int = Form(...)):
 async def prompts_test(key: str = Form(...), text: str = Form(...)):
     """Eval-on-change: run the golden corpus with this candidate text (other stages stay on their
     active prompts) and report pass/fail — before the operator relies on it. Live LLM calls."""
-    if key not in prompts.PROMPTS_BY_KEY:
+    if key not in prompts.EDITABLE_KEYS:  # only the editable backend prompts can be golden-tested
         return _redirect("/prompts", "Unknown prompt.")
     three = {}
     for k in ("extract", "classify", "extremity"):
@@ -436,6 +439,58 @@ async def prompts_test(key: str = Form(...), text: str = Form(...)):
     except Exception as exc:  # noqa: BLE001 - surface any pipeline failure to the operator
         return _redirect("/prompts", f"Test failed: {exc}")
     return _redirect("/prompts", f"Tested '{key}' on the goldens — {eval_prompt_summary(report)}")
+
+
+class PromptChatMsg(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class PromptChatReq(BaseModel):
+    key: str
+    current: str  # the live editor text for THIS prompt (may be unsaved)
+    messages: list[PromptChatMsg] = []  # the running conversation, oldest first
+
+
+def _prompt_chat_prompt(label: str, purpose: str, current: str, messages: list[PromptChatMsg]) -> str:
+    """Format the chat-agent instructions + the prompt under discussion + the conversation into the
+    single string ``claude_complete`` takes. The prompt's own ``{placeholders}`` are inserted via
+    ``replace`` (never ``str.format``) so tokens like ``{claim}`` survive verbatim. Pure."""
+    head = (
+        prompts.PROMPT_CHAT_AGENT
+        .replace("{prompt_label}", label)
+        .replace("{prompt_purpose}", purpose or "(no description on file)")
+        .replace("{current_prompt}", current)
+    )
+    convo = "\n\n".join(
+        f"{'cauri' if m.role == 'user' else 'You'}: {m.content}" for m in messages
+    )
+    return f"{head}\n\n--- Conversation so far ---\n{convo}\n\nYou:" if convo else head
+
+
+@app.post("/prompts/chat")
+async def prompts_chat(req: PromptChatReq) -> JSONResponse:
+    """Raw-Claude chat helper for improving a prompt WITH cauri (#158). Sees the chat-agent
+    instructions + the prompt's current editor text + the conversation; returns the assistant's
+    reply as JSON. Degrades gracefully: a missing ANTHROPIC_API_KEY or any provider error returns
+    HTTP 200 with an ``error`` field — the page keeps working, nothing 500s. Editable keys only.
+    """
+    p = prompts.PROMPTS_BY_KEY.get(req.key)
+    if req.key not in prompts.EDITABLE_KEYS or p is None:  # draft / on-device are read-only here
+        return JSONResponse({"error": "Chat is available on the editable prompts only."}, status_code=200)
+    prompt = _prompt_chat_prompt(p["label"], p.get("description", ""), req.current, req.messages)
+    try:
+        reply = await asyncio.to_thread(
+            seam.claude_complete, prompt, model=seam.CLAUDE_JUDGE, max_tokens=1500
+        )
+    except KeyError:  # ANTHROPIC_API_KEY not set (e.g. the box without the reader's key)
+        return JSONResponse(
+            {"error": "Chat unavailable — set ANTHROPIC_API_KEY in the reader's env to enable it."},
+            status_code=200,
+        )
+    except Exception as exc:  # noqa: BLE001 - any provider/network error stays graceful, never 500
+        return JSONResponse({"error": f"Chat unavailable — {exc}"}, status_code=200)
+    return JSONResponse({"reply": reply.text})
 
 
 # ============================ routes: P8 dashboards (read-only, over real backends) ==========
@@ -1702,59 +1757,134 @@ def _plain_group(g: str) -> str:
     return _GROUP_LABELS.get(base, base)
 
 
+# How each prompt status is presented on the Prompts page.
+_PROMPT_STATUS_BADGE = {  # status -> (badge text, badge css class, tooltip)
+    "active": ("active", "fact", "Editable — saving makes it live on the next run"),
+    "draft": ("draft", "proj", "In code but gated off — surfaced for review, not live or editable"),
+    "on-device": ("on-device", "attr", "Runs on the reader's phone (Apple) — display-only mirror"),
+}
+
+
+def _prompt_active_block(p: dict, by_key: dict) -> str:
+    """An editable backend prompt: active text, version history, rollback, restore-default."""
+    key = p["key"]
+    versions = by_key.get(key, [])
+    active = next((v for v in versions if v["active"]), None)
+    text = active["text"] if active else p["default"]
+    ver = f'version {active["version"]}' if active else "built-in (no edits yet)"
+    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE["active"]
+    past = [v for v in versions if not v["active"]]
+    hist = ""
+    if past:
+        items = "".join(
+            '<form class="inline" method="post" action="/prompts/rollback">'
+            f'<input type="hidden" name="key" value="{key}">'
+            f'<input type="hidden" name="version" value="{v["version"]}">'
+            f'<span class="mut sm">v{v["version"]} · {v["created_at"]:%Y-%m-%d %H:%M}'
+            + (f' · {html.escape(v["reason"])}' if v["reason"] else "")
+            + '</span><button title="Make this version active again">Roll back</button></form>'
+            for v in past
+        )
+        hist = f'<div class="bl mt">Earlier versions</div>{items}'
+    return (
+        '<div class="box" style="display:block">'
+        f'<div class="cname">{html.escape(p["label"])} {_badge(badge, badge_cls, badge_tip)} '
+        f'<span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
+        f'<div class="deriv">{html.escape(p.get("description", ""))}</div>'
+        f'<div class="mut sm" title="Where the built-in text lives">source '
+        f'<span class="mono">{html.escape(p["source"])}</span></div>'
+        '<form method="post" action="/prompts/save">'
+        f'<input type="hidden" name="key" value="{key}">'
+        f'<textarea id="ta-{key}" class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
+        f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
+        '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
+        '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
+        'this text first — live AI calls, takes a moment">Test on goldens</button> '
+        '<button title="Saves a new version, live on the next run">Save new version</button> '
+        '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
+        'built-in version">Restore original</button>'
+        f'</form>{_prompt_chat_panel(key)}{hist}</div>'
+    )
+
+
+def _prompt_chat_panel(key: str) -> str:
+    """Collapsible 'Improve with chat' helper under an editable prompt (#158). Raw-Claude chat:
+    cauri discusses the prompt, a proposed revision drops into THIS textarea on 'Apply to editor',
+    and cauri still clicks the existing Save new version. Vanilla inline JS, no auto-save."""
+    k = html.escape(key)
+    return (
+        f'<details class="chat" data-key="{k}">'
+        '<summary title="Talk it through with Claude and shape a revision — you still review '
+        'and Save new version">Improve with chat</summary>'
+        '<div class="chat-help mut sm">Discuss this prompt with Claude. When it proposes a revision '
+        'you\'ll get an <b>Apply to editor</b> button — it fills the box above; you review and click '
+        '<b>Save new version</b>. The chat never saves.</div>'
+        f'<div class="chat-log" id="log-{k}"></div>'
+        '<div class="chat-row">'
+        f'<textarea class="chat-in" id="in-{k}" rows="2" '
+        'placeholder="e.g. make it stricter about attributed claims"></textarea>'
+        f'<button type="button" class="chat-send" id="send-{k}" '
+        f'onclick="maatPromptChat(\'{k}\')">Send</button>'
+        '</div></details>'
+    )
+
+
+def _prompt_readonly_block(p: dict) -> str:
+    """A draft or on-device prompt: label, status, source, and the full text — display-only."""
+    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE[p["status"]]
+    return (
+        '<div class="box" style="display:block">'
+        f'<div class="cname">{html.escape(p["label"])} {_badge(badge, badge_cls, badge_tip)} '
+        f'<span class="mut sm">— {html.escape(p["key"])}</span></div>'
+        f'<div class="deriv">{html.escape(p.get("description", ""))}</div>'
+        f'<div class="mut sm" title="Where the canonical text lives">source '
+        f'<span class="mono">{html.escape(p["source"])}</span></div>'
+        f'<textarea class="prompt" rows="14" readonly>{html.escape(p["default"])}</textarea>'
+        '<div class="mut sm">Read-only — surfaced for review, not edited here.</div>'
+        '</div>'
+    )
+
+
+# Display order + heading for each status group on the Prompts page.
+_PROMPT_GROUPS = [
+    ("active", "Active — editable, live on the next run"),
+    ("draft", "Draft — pending cauri review"),
+    ("on-device", "On-device (Apple)"),
+]
+
+
 def _prompts_page(by_key: dict, store_ready: bool = True) -> str:
-    """P8 — editable agent prompts: active text, version history, rollback, restore-default."""
+    """P8 — every prompt the platform runs, grouped by status. Active prompts are editable
+    (text, version history, rollback, restore-default); draft and on-device prompts are read-only.
+    """
     intro = (
-        '<div class="deriv">Edit an AI step\'s instructions. <b>Saving makes it live on the next '
-        'run</b> (the built-in version is the fallback). Every version is kept — roll back in one '
-        'click — and run the checks on the Quality tab afterwards. Keep the '
-        '<span class="mono">{placeholders}</span> or the save is refused.</div>'
+        '<div class="deriv">Every prompt the platform runs, so you can review them all. '
+        '<b>Active</b> prompts are editable — saving makes it live on the next run (the built-in '
+        'version is the fallback), every version is kept, and you can roll back in one click; keep '
+        'the <span class="mono">{placeholders}</span> or the save is refused. <b>Draft</b> prompts '
+        'are in code but gated off, awaiting your review. <b>On-device</b> prompts run on the '
+        "reader's phone (Apple) and are mirrored here for review. Draft and on-device are read-only."
+        '</div>'
     )
     if not store_ready:
         intro += (
             '<div class="note">The prompt store isn\'t set up yet — restart the kernel '
             "(maat-kerneld) to enable saving and version history. Showing the built-in prompts.</div>"
         )
-    blocks = []
-    for p in prompts.PROMPTS:
-        key = p["key"]
-        versions = by_key.get(key, [])
-        active = next((v for v in versions if v["active"]), None)
-        text = active["text"] if active else p["default"]
-        ver = f'version {active["version"]}' if active else "built-in (no edits yet)"
-        past = [v for v in versions if not v["active"]]
-        hist = ""
-        if past:
-            items = "".join(
-                '<form class="inline" method="post" action="/prompts/rollback">'
-                f'<input type="hidden" name="key" value="{key}">'
-                f'<input type="hidden" name="version" value="{v["version"]}">'
-                f'<span class="mut sm">v{v["version"]} · {v["created_at"]:%Y-%m-%d %H:%M}'
-                + (f' · {html.escape(v["reason"])}' if v["reason"] else "")
-                + '</span><button title="Make this version active again">Roll back</button></form>'
-                for v in past
-            )
-            hist = f'<div class="bl mt">Earlier versions</div>{items}'
-        blocks.append(
-            '<div class="box" style="display:block">'
-            f'<div class="cname">{html.escape(p["label"])} '
-            f'<span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
-            '<form method="post" action="/prompts/save">'
-            f'<input type="hidden" name="key" value="{key}">'
-            f'<textarea class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
-            f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
-            '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
-            '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
-            'this text first — live AI calls, takes a moment">Test on goldens</button> '
-            '<button title="Saves a new version, live on the next run">Save new version</button> '
-            '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
-            'built-in version">Restore original</button>'
-            f'</form>{hist}</div>'
-        )
+    sections = []
+    for status, heading in _PROMPT_GROUPS:
+        entries = [p for p in prompts.PROMPTS if p["status"] == status]
+        if not entries:
+            continue
+        if status == "active":
+            blocks = "".join(_prompt_active_block(p, by_key) for p in entries)
+        else:
+            blocks = "".join(_prompt_readonly_block(p) for p in entries)
+        sections.append(f'<div class="bl mt">{html.escape(heading)}</div>{blocks}')
     return (
         '<div class="ins"><a class="back" href="/">← back to feed</a>'
         '<h3 class="ih">Prompts — the instructions each AI step runs on</h3>'
-        f'{intro}{"".join(blocks)}</div>'
+        f'{intro}{"".join(sections)}</div>'
     )
 
 
@@ -2338,7 +2468,7 @@ def _redirect(path: str, msg: str = ""):
     return RedirectResponse(f"{path}?ok={quote(msg)}" if msg else path, status_code=303)
 
 
-_DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+_DOC = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Maat console</title><style>
 :root{--bg:#faf9f7;--card:#fff;--ink:#1c1b19;--mut:#7a7770;--line:#ece9e3;--acc:#175fa5}
@@ -2450,10 +2580,91 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .dv{min-width:38px;text-align:right}
 .prompt{width:100%;min-height:230px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical;margin-bottom:6px}
 .note{flex-basis:100%;font-size:12px;color:var(--mut);line-height:1.5;margin:-2px 0 2px}
+.chat{flex-basis:100%;margin:8px 0 2px;border:1px solid var(--line);border-radius:9px;background:#f6f5f2}
+.chat>summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--acc);padding:8px 11px;list-style:none}
+.chat>summary::-webkit-details-marker{display:none}
+.chat>summary::before{content:"💬 ";font-weight:400}
+.chat[open]>summary{border-bottom:1px solid var(--line)}
+.chat-help{padding:8px 11px 0;line-height:1.5}
+.chat-log{padding:6px 11px;display:flex;flex-direction:column;gap:8px}
+.chat-log:empty{display:none}
+.msg{font-size:13px;line-height:1.5;padding:7px 10px;border-radius:9px;max-width:92%;white-space:pre-wrap;word-wrap:break-word}
+.msg.you{background:#e6f1fb;align-self:flex-end}
+.msg.bot{background:#fff;border:1px solid var(--line);align-self:flex-start}
+.msg.err{background:#fbe4df;color:#8a2a1e;align-self:stretch;max-width:100%}
+.msg pre{background:#1c1b19;color:#f3f1ec;border-radius:7px;padding:9px 11px;margin:6px 0 0;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.45;white-space:pre-wrap;word-wrap:break-word}
+.msg .apply{margin-top:7px;font-size:12px;padding:4px 10px}
+.chat-row{display:flex;gap:7px;align-items:flex-end;padding:4px 11px 11px}
+.chat-in{flex:1;font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical;min-height:38px}
+.chat-send{white-space:nowrap}
+.chat-send[disabled]{opacity:.55;cursor:progress}
 .flash{max-width:820px;margin:10px auto 0;padding:9px 14px;border-radius:var(--border-radius-md,8px);background:#eaf3de;color:#3b6d11;font-size:13px;font-weight:500;border:1px solid #cfe3b6}
 [title]{cursor:help}
 .nav a[title],button[title]{cursor:pointer}
 </style></head><body>
 <header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
 {{nav}}<p>{{subtitle}}</p></header>
-<main>{{main}}</main></body></html>"""
+<main>{{main}}</main>
+<script>
+// "Improve with chat" (#158): raw-Claude helper on each editable prompt. Per-key conversation,
+// POST to /prompts/chat, render the reply; a fenced block becomes an "Apply to editor" button
+// that fills THIS prompt's textarea. Never auto-saves — cauri reviews and clicks Save new version.
+window.maatChats = window.maatChats || {};
+function maatEsc(s){return String(s).replace(/[&<>"']/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+// Split a reply into the prose around the FIRST fenced ``` block and the code inside it.
+function maatSplit(text){
+  var m=text.match(/```[^\n]*\n([\s\S]*?)```/);
+  if(!m){return {html:maatEsc(text),code:null};}
+  var before=text.slice(0,m.index), after=text.slice(m.index+m[0].length);
+  var html=maatEsc(before.trim())+'<pre>'+maatEsc(m[1].replace(/\n$/,''))+'</pre>';
+  if(after.trim()) html+='<div style="margin-top:6px">'+maatEsc(after.trim())+'</div>';
+  return {html:html,code:m[1].replace(/\n$/,'')};
+}
+function maatBubble(log,cls,html){
+  var d=document.createElement('div'); d.className='msg '+cls; d.innerHTML=html;
+  log.appendChild(d); return d;
+}
+async function maatPromptChat(key){
+  var input=document.getElementById('in-'+key);
+  var log=document.getElementById('log-'+key);
+  var btn=document.getElementById('send-'+key);
+  var editor=document.getElementById('ta-'+key);
+  if(!input||!log||!editor) return;
+  var text=input.value.trim();
+  if(!text) return;
+  var convo=window.maatChats[key]||(window.maatChats[key]=[]);
+  convo.push({role:'user',content:text});
+  maatBubble(log,'you',maatEsc(text));
+  input.value=''; btn.disabled=true; var label=btn.textContent; btn.textContent='…';
+  log.scrollTop=log.scrollHeight;
+  try{
+    var resp=await fetch('/prompts/chat',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:key,current:editor.value,messages:convo})});
+    var data=await resp.json();
+    if(data.error){
+      maatBubble(log,'err',maatEsc(data.error));
+    }else{
+      convo.push({role:'assistant',content:data.reply});
+      var parts=maatSplit(data.reply);
+      var bubble=maatBubble(log,'bot',parts.html);
+      if(parts.code!==null){
+        var apply=document.createElement('button');
+        apply.type='button'; apply.className='apply'; apply.textContent='Apply to editor';
+        apply.title='Fill the prompt box above with this proposal — then review and Save new version';
+        apply.onclick=function(){
+          editor.value=parts.code; editor.focus();
+          editor.scrollIntoView({block:'center'});
+          apply.textContent='Applied ✓'; apply.disabled=true;
+        };
+        bubble.appendChild(apply);
+      }
+    }
+  }catch(e){
+    maatBubble(log,'err','Chat unavailable — '+maatEsc(e.message||e));
+  }
+  btn.disabled=false; btn.textContent=label; log.scrollTop=log.scrollHeight;
+}
+</script>
+</body></html>"""

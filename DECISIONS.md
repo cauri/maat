@@ -248,3 +248,21 @@ asks for integration coverage on CI. It reaches the route SQL the pure-function 
 `any($1::uuid[])`, distinct-on, the correction-recompute path) and **raises rather than silently skips**
 when CI is set but no DB is reachable. LLM-touching paths (e.g. eval-on-change) stay **off** the gate
 (cost + non-determinism). Refines D16.
+
+### D31 — Admin auth: WireGuard network + Google OIDC (allowlist), separate from user auth
+**Decision (cauri):** the operator console gets its **own** auth, **separate from the user auth** (Sign
+in with Apple, #51). **Two layers:** (1) **network — self-hosted WireGuard**: the console stays off the
+public internet, reachable only from cauri's devices over the WG mesh (Caddy serves it with TLS on the
+WG interface; ufw opens the WG port; `/api/*` stays the only public surface; the **SSH tunnel is kept as
+break-glass**). (2) **identity — Google OIDC with a strict email allowlist**: `/admin/login` → Google →
+`/admin/callback`, accept only allowlisted email(s), mint a signed admin **session cookie**, gate every
+console route; admin identities are their **own events**, never the `serving/auth.py` user store.
+**Why (cauri):** users = Apple, admin = Google makes the "never share identity" rule *structural*
+(different IdPs); Google inherits the operator's account 2FA (a passkey/security key → phishing-resistant)
+with far less to build than rolling WebAuthn; WireGuard keeps it private + sovereign and means Google is
+never a single point of failure (break-glass over WG/SSH). **Options:** SSH-tunnel-only (status quo,
+clunky) / self-hosted passkey (more build) / **WireGuard + Google OIDC (chosen)** / reverse-proxy SSO
+(US SaaS, overkill). **Tradeoff accepted:** a US IdP in the admin path — but it's only the operator's
+login, not user data, and consistent with Apple-for-users (D9's honest limit). **Open at build:**
+redirect-flow (WG hostname + cert) vs Google device-flow (no redirect); console as its own service vs
+gated routes (gate now, split later). Tracked: #163. DRAFT — security review before production.
