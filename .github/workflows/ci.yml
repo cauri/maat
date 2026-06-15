@@ -26,6 +26,23 @@ jobs:
     defaults:
       run:
         working-directory: python
+    # Postgres (pgvector) so the route integration harness runs on the gate, not just locally.
+    # A DB is deterministic — D16's "no non-determinism on the merge button" is about live LLMs,
+    # not infra — so this belongs on the gate (PLAN §7 wants integration coverage on CI).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: maat
+          POSTGRES_PASSWORD: maat
+          POSTGRES_DB: maat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U maat"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

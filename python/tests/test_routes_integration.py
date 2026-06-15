@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -42,6 +43,10 @@ def _pg_up() -> bool:
         asyncio.run(asyncio.wait_for(ping(), 3))
         return True
     except Exception:
+        # In CI the Postgres service must be reachable — a silent skip there would defeat the
+        # whole point of gating on it. Locally (no CI), skip gracefully when there's no DB.
+        if os.environ.get("CI"):
+            raise
         return False
 
 
