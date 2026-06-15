@@ -20,6 +20,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from maat.pipeline.extremity import rate_extremity
 from maat.providers.seam import mistral_embed
 
@@ -71,8 +73,8 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def _agglomerate(sim: list[list[float]], threshold: float) -> list[list[int]]:
-    """Average-linkage agglomerative clustering over a similarity matrix (§5.4).
+def _agglomerate(sim, threshold: float) -> list[list[int]]:
+    """Average-linkage (UPGMA) agglomerative clustering over a similarity matrix (§5.4).
 
     Repeatedly merge the two clusters with the highest MEAN cross-similarity, while that
     mean clears `threshold`. This is the fix for #20: single-linkage / connected components
@@ -80,37 +82,51 @@ def _agglomerate(sim: list[list[float]], threshold: float) -> list[list[int]]:
     stories into a single cluster — whereas a mean requirement won't merge groups joined by
     a lone bridge. DRAFT choice of linkage (average vs complete); revisit with cauri.
 
-    O(n^3)-ish; fine at current corpus scale, revisit (Lance-Williams) for P2 volume.
+    Lance-Williams group-average update: when two clusters merge, the merged cluster's
+    similarity to every other cluster is the size-weighted mean of the two — which is EXACTLY
+    the mean of all cross pairs, so this is the same average linkage as before, but it never
+    recomputes a cross-product. The merge step is O(n) (a vectorised row update) instead of the
+    old O(|a|·|b|) cross-product, which is what made the previous version O(n^3) — it HUNG at
+    ~1k claims, so corroborate deleted the clusters and never re-emitted them (the empty-feed
+    bug). The per-merge global argmax is still ~O(n^2), but on numpy it clears the whole claim
+    corpus (thousands of claims) in under a second. `sim` is a nested list (tests) or an ndarray
+    (the live path); we copy it and never mutate the caller's.
     """
-    n = len(sim)
+    s = np.array(sim, dtype=np.float64)  # copy — merges mutate this in place
+    n = s.shape[0]
     if n <= 1:
         return [[0]] if n else []
-    clusters = [[i] for i in range(n)]
-    while len(clusters) > 1:
-        best, bi, bj = threshold, -1, -1
-        for a in range(len(clusters)):
-            for b in range(a + 1, len(clusters)):
-                pairs = [sim[i][j] for i in clusters[a] for j in clusters[b]]
-                avg = sum(pairs) / len(pairs)
-                if avg >= best:
-                    best, bi, bj = avg, a, b
-        if bi == -1:
-            break
-        clusters[bi].extend(clusters[bj])
-        del clusters[bj]
-    return clusters
+    members: list[list[int] | None] = [[i] for i in range(n)]
+    sizes = np.ones(n, dtype=np.float64)
+    np.fill_diagonal(s, -np.inf)  # a cluster is never its own most-similar neighbour
+    while True:
+        flat = int(np.argmax(s))  # most-similar active pair (retired rows/cols are -inf)
+        a, b = divmod(flat, n)
+        if s[a, b] < threshold:
+            break  # the best remaining mean is below the bar — done merging
+        i, j = (a, b) if a < b else (b, a)  # fold the higher index into the lower (deterministic)
+        # group-average recurrence: sim(i∪j, k) = (|i|·sim(i,k) + |j|·sim(j,k)) / (|i|+|j|)
+        merged = (sizes[i] * s[i] + sizes[j] * s[j]) / (sizes[i] + sizes[j])
+        s[i] = merged
+        s[:, i] = merged  # keep the matrix symmetric
+        s[i, i] = -np.inf
+        sizes[i] += sizes[j]
+        members[i].extend(members[j])  # type: ignore[union-attr]
+        members[j] = None  # retire j
+        s[j] = -np.inf
+        s[:, j] = -np.inf
+    return [m for m in members if m is not None]
 
 
 def group_by_similarity(texts: list[str], threshold: float) -> list[list[int]]:
     """Cluster same-fact claims by embedding cosine, average-linkage (§5.4, fixes #20)."""
     if len(texts) <= 1:
         return [[0]] if texts else []
-    embs = mistral_embed(texts)
-    n = len(texts)
-    sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            sim[i][j] = sim[j][i] = _cosine(embs[i], embs[j])
+    x = np.asarray(mistral_embed(texts), dtype=np.float64)
+    norms = np.linalg.norm(x, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0  # a missing embedding (zero vector) must not divide by zero
+    x /= norms
+    sim = x @ x.T  # the full cosine matrix in one BLAS call (was an O(n^2·d) Python loop)
     return _agglomerate(sim, threshold)
 
 

@@ -238,6 +238,28 @@ def test_agglomerate_separates_distinct_groups():
     assert sorted(sorted(g) for g in _agglomerate(sim, 0.82)) == [[0, 1], [2, 3]]
 
 
+def test_group_by_similarity_scales_to_a_large_corpus(monkeypatch):
+    # Regression for the empty-feed hang (#sources): the old O(n^3) recompute-every-pair
+    # agglomeration spun forever at ~1k claims, so corroborate (which deletes clusters FIRST)
+    # left the feed empty. 1000 claims in 500 tight pairs must cluster fast and correctly.
+    import maat.pipeline.corroborate as corro
+
+    n_pairs = 500
+    texts = [f"claim {i}" for i in range(2 * n_pairs)]
+
+    def fake_embed(ts, **_):
+        # one-hot: a pair's two members share an axis (cosine 1.0); different pairs are
+        # orthogonal (cosine 0.0) — so each pair clusters, and none chain together.
+        return [[1.0 if k == i // 2 else 0.0 for k in range(n_pairs)] for i in range(len(ts))]
+
+    monkeypatch.setattr(corro, "mistral_embed", fake_embed)
+
+    groups = corro.group_by_similarity(texts, 0.82)
+    assert len(groups) == n_pairs
+    assert all(len(g) == 2 for g in groups)
+    assert sorted(i for g in groups for i in g) == list(range(2 * n_pairs))  # each claim once
+
+
 def test_confidence_read_scales_with_extremity():
     from maat.pipeline.corroborate import confidence_read
 
