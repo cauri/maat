@@ -6,17 +6,17 @@ struct RootView: View {
     var body: some View {
         @Bindable var router = router
         TabView(selection: $router.selectedTab) {
-            Tab("Feed", systemImage: "newspaper", value: AppTab.feed) {
+            Tab("Today", systemImage: "newspaper", value: AppTab.feed) {
                 FeedView()
+            }
+            Tab("Sources", systemImage: "building.columns", value: AppTab.sources) {
+                SourcesView()
             }
             Tab("Search", systemImage: "magnifyingglass", value: AppTab.search) {
                 SearchView()
             }
-            Tab("Topics", systemImage: "tag", value: AppTab.topics) {
-                TopicsView()
-            }
-            Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
-                SettingsView()
+            Tab("Following", systemImage: "bookmark", value: AppTab.following) {
+                FollowingView()
             }
         }
         .task {

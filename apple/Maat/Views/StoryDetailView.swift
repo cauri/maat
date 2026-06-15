@@ -4,12 +4,17 @@ import SwiftUI
 import Translation
 #endif
 
+// Read-first story detail (BRIEF §1). The fact + on-device summary lead; the confidence read and the
+// per-source reputation sit beneath; the claim-level veracity machinery (§5.2–5.6) tucks behind a
+// "Why this confidence" disclosure so reading comes first. Translate / go deeper / comment / pin stay.
+
 struct StoryDetailView: View {
     let story: Story
 
     @Environment(AppSettings.self) private var settings
     @Environment(FeedStore.self) private var feed
     @Environment(Analytics.self) private var analytics
+    @Environment(PinStore.self) private var pins
 
     @State private var summary: String?
     @State private var summarizing = false
@@ -29,15 +34,24 @@ struct StoryDetailView: View {
     private var needsTranslation: Bool { story.primaryLanguage != settings.displayLanguageCode }
     private var displayFact: String { (showTranslated ? translatedFact : nil) ?? story.fact }
 
+    private var orderedSources: [String] {
+        var seen = Set<String>()
+        return story.originatorGroups
+            .sorted { !$0.collapsed && $1.collapsed }  // independent originators first (§5.5)
+            .flatMap(\.sources)
+            .filter { seen.insert($0).inserted }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 summarySection
+                confidenceSection
+                sourcesSection
                 actionsSection
-                originatorsSection
-                claimsSection
                 deeperSection
+                whySection
                 commentsLink
             }
             .padding()
@@ -63,22 +77,30 @@ struct StoryDetailView: View {
     // MARK: Sections
 
     private var header: some View {
-        card {
+        SectionCard {
             HStack {
                 ExtremityChip(extremity: story.extremity)
                 Spacer(minLength: 8)
-                if story.hasPrimary { Chip(text: "primary source", style: .fact) }
+                Button {
+                    pins.toggle(story.id)
+                } label: {
+                    Image(systemName: pins.isPinned(story.id) ? "bookmark.fill" : "bookmark")
+                }
+                .tint(pins.isPinned(story.id) ? Palette.confHigh : Palette.muted)
+                .accessibilityLabel(pins.isPinned(story.id) ? "Unpin story" : "Pin story")
             }
             Text(displayFact)
-                .font(.title3.weight(.semibold))
+                .font(.system(.title3, design: .serif).weight(.semibold))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
-            ConfidenceBar(story: story)
+            Text(orderedSources.joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(Palette.muted)
         }
     }
 
     private var summarySection: some View {
-        card(title: "Summary") {
+        SectionCard(title: "Summary") {
             if summarizing {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -89,15 +111,47 @@ struct StoryDetailView: View {
                     .foregroundStyle(Palette.ink)
             }
             if !Intelligence.isAvailable {
-                Text(Intelligence.statusDescription)
-                    .font(.caption2)
-                    .foregroundStyle(Palette.muted)
+                Text(Intelligence.statusDescription).font(.caption2).foregroundStyle(Palette.muted)
+            }
+        }
+    }
+
+    private var confidenceSection: some View {
+        SectionCard(title: "Confidence") {
+            ConfidenceBar(story: story)
+            HStack(spacing: 6) {
+                ExtremityChip(extremity: story.extremity)
+                if story.hasPrimary { Chip(text: "primary source", style: .fact) }
+            }
+        }
+    }
+
+    private var sourcesSection: some View {
+        SectionCard(title: "Sources & reputation") {
+            ForEach(orderedSources, id: \.self) { name in
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(name).font(.subheadline).foregroundStyle(Palette.ink)
+                        if let rating = feed.rating(for: name) {
+                            Text(rating.tier).font(.caption2).foregroundStyle(rating.band.color)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    if let rating = feed.rating(for: name) {
+                        Text(rating.coldStart ? "—" : "\(rating.score)")
+                            .font(.subheadline.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(rating.coldStart ? Palette.muted : rating.band.color)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+                if name != orderedSources.last { Divider().overlay(Palette.line) }
             }
         }
     }
 
     private var actionsSection: some View {
-        card(title: "This story") {
+        SectionCard(title: "This story") {
             if needsTranslation {
                 Button {
                     Task { await toggleTranslate() }
@@ -121,40 +175,13 @@ struct StoryDetailView: View {
         }
     }
 
-    private var originatorsSection: some View {
-        card(title: "Corroboration · independent originators") {
-            OriginatorList(groups: story.originatorGroups)
-        }
-    }
-
-    private var claimsSection: some View {
-        card(title: "Claims") {
-            ForEach(story.claims) { claim in
-                VStack(alignment: .leading, spacing: 6) {
-                    ClaimBadges(claim: claim)
-                    Text((showTranslated ? translatedClaims[claim.id] : nil) ?? claim.text)
-                        .foregroundStyle(Palette.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let source = claim.source {
-                        Text(source).font(.caption2).foregroundStyle(Palette.muted)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 8)
-                if claim.id != story.claims.last?.id {
-                    Divider().overlay(Palette.line)
-                }
-            }
-        }
-    }
-
     private var deeperSection: some View {
-        card(title: "Go deeper") {
+        SectionCard(title: "Go deeper") {
             if let deeper {
                 Text(deeper.note).font(.footnote).foregroundStyle(Palette.muted)
                 ForEach(deeper.provenance) { p in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(p.source ?? "—").font(.subheadline.weight(.semibold))
+                        Text(p.source ?? "—").font(.subheadline.weight(.medium))
                         HStack(spacing: 6) {
                             Chip(text: p.voice.label, style: p.voice.chip)
                             if let span = p.evidenceSpan {
@@ -183,11 +210,40 @@ struct StoryDetailView: View {
         }
     }
 
+    private var whySection: some View {
+        SectionCard {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Independent originators, not spread")
+                        .font(.caption).foregroundStyle(Palette.muted)
+                    OriginatorList(groups: story.originatorGroups)
+                    Text("Claims").font(.caption).foregroundStyle(Palette.muted).padding(.top, 4)
+                    ForEach(story.claims) { claim in
+                        VStack(alignment: .leading, spacing: 6) {
+                            ClaimBadges(claim: claim)
+                            Text((showTranslated ? translatedClaims[claim.id] : nil) ?? claim.text)
+                                .font(.subheadline)
+                                .foregroundStyle(Palette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                        if claim.id != story.claims.last?.id { Divider().overlay(Palette.line) }
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                Text("Why this confidence").font(.subheadline.weight(.medium)).foregroundStyle(Palette.ink)
+            }
+            .tint(Palette.muted)
+        }
+    }
+
     private var commentsLink: some View {
         NavigationLink {
             CommentsView(story: story)
         } label: {
-            card(title: "Comments") {
+            SectionCard(title: "Comments") {
                 HStack {
                     Text("Your notes on this story").foregroundStyle(Palette.ink)
                     Spacer()
@@ -210,25 +266,6 @@ struct StoryDetailView: View {
         .tint(feedback == signal ? Palette.confHigh : Palette.muted)
     }
 
-    // MARK: Card chrome
-
-    @ViewBuilder
-    private func card<Content: View>(title: String? = nil, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let title {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .textCase(.uppercase)
-                    .foregroundStyle(Palette.muted)
-            }
-            content()
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.card, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.line, lineWidth: 1))
-    }
-
     // MARK: Actions
 
     private func summarize() async {
@@ -240,10 +277,7 @@ struct StoryDetailView: View {
     }
 
     private func toggleTranslate() async {
-        if showTranslated {
-            showTranslated = false
-            return
-        }
+        if showTranslated { showTranslated = false; return }
         if translatedFact == nil {
             translating = true
             defer { translating = false }

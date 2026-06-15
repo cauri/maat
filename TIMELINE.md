@@ -6,6 +6,26 @@ point. Newest at top.
 
 ---
 
+## 2026-06-15 — Client UX reframe: Apple-News reading model + Sources reputation
+
+The P6 client first shipped veracity-dashboard-first; cauri reframed it to the brief's intent (§1:
+"closer to Apple News in feel") — a reading app, with news-organisation reputation (§6) as a co-equal
+surface. Re-grounded in `BRIEF.md` before redesigning (D25).
+
+- **Today** now reads like Apple News: featured lead + scrollable list, the corroborated fact as the
+  headline, a *quiet* confidence cue, independent originators surfaced first (§5.5). Claim-level
+  veracity moved behind a "Why this confidence" disclosure.
+- **Sources** (new hero): newsrooms ranked by reputation (truthfulness, one scalar §6.2) with a
+  trajectory sparkline (§6.4); cold-start shown neutrally (§6.6). Reputation also shows inline per
+  source while reading.
+- IA: tabs Today · Sources · Search · Following (pins + topics); Settings → gear in Today.
+- **Reputation is a provisional proxy** — the §6 truth-over-time fold is P3 (#37), not built; the
+  reader's `/api/sources` approximates it from corroboration + primary standing, clearly labelled.
+- **Not a reversal of the engine** — only the client's presentation changed. The veracity core stands.
+
+**Next:** real reputation when #37 lands; a source-reputation App Intent; lead-story imagery once
+acquisition pulls media.
+
 ## 2026-06-14 (later) — P0 shipped + deploy path proven
 
 - **P0 foundations** committed/pushed to github.com/cauri/maat; first CI run green (17s).

@@ -172,3 +172,17 @@ them via `requestValueDialog`. **Shared state:** intents and UI share one `@Main
 route through a small `AppRouter`. Intents live in the app target (no separate extension yet — follow-
 up for launch-free execution + `IndexedEntity` Spotlight donation). Verified: the four actions surface
 under "Maat" in the iOS 27 Shortcuts app. Part of #6.
+
+### D25 — Client UX: Apple-News reading model + reputation as a co-equal surface
+**Decision (cauri):** the client is a *reading app* (BRIEF §1 — "closer to Apple News in feel"), not a
+veracity inspector, with **news-organisation reputation** (§6) as a second first-class surface.
+**Shape:** tabs Today · Sources · Search · Following (pins + topics); Settings → gear in Today. Today =
+featured lead + editorial list (the corroborated fact as headline, a *quiet* confidence cue,
+independent originators surfaced first §5.5). Story detail reads first: fact + on-device summary lead,
+per-source reputation inline, and the claim-level veracity (§5.2–5.6) tucked behind a "Why this
+confidence" disclosure. Sources ranks newsrooms by truthfulness (one scalar §6.2) with a trajectory
+sparkline (§6.4); cold-start shown neutrally (§6.6). **Data:** reputation is a **provisional proxy**
+from the corroboration projections (avg cluster confidence + primary-source standing), stubbed on the
+reader (`/api/sources`, `/api/source/{name}`) + a bundled fixture; the real §6 truth-over-time fold is
+P3 (#37). Refines D23 — the veracity engine is untouched, only the client's presentation. Verified on
+the iOS 27 simulator (Today + Sources).

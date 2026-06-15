@@ -13,6 +13,7 @@ struct MaatApp: App {
                 .environment(core.analytics)
                 .environment(core.feed)
                 .environment(core.router)
+                .environment(core.pins)
         }
         .modelContainer(for: Comment.self)
     }

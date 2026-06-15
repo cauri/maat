@@ -8,6 +8,8 @@ import Observation
 protocol FeedService: Sendable {
     func loadFeed() async throws -> [Story]
     func loadStory(id: String, deeper: Bool) async throws -> Story
+    func loadSources() async throws -> [SourceRating]
+    func loadSource(name: String) async throws -> SourceRating
 }
 
 enum FeedError: LocalizedError {
@@ -52,6 +54,18 @@ struct APIFeedService: FeedService {
         return try FeedJSON.decoder.decode(Story.self, from: data)
     }
 
+    func loadSources() async throws -> [SourceRating] {
+        let (data, resp) = try await session.data(from: baseURL.appending(path: "api/sources"))
+        try Self.check(resp)
+        return try FeedJSON.decoder.decode(SourcesResponse.self, from: data).sources
+    }
+
+    func loadSource(name: String) async throws -> SourceRating {
+        let (data, resp) = try await session.data(from: baseURL.appending(path: "api/source/\(name)"))
+        try Self.check(resp)
+        return try FeedJSON.decoder.decode(SourceRating.self, from: data)
+    }
+
     private static func check(_ resp: URLResponse) throws {
         guard let http = resp as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else { throw FeedError.badResponse(http.statusCode) }
@@ -71,6 +85,29 @@ struct FixtureFeedService: FeedService {
         }
         if deeper { story.deeper = Self.synthesizeDeeper(for: story) }
         return story
+    }
+
+    func loadSources() async throws -> [SourceRating] {
+        try Self.sources()
+    }
+
+    func loadSource(name: String) async throws -> SourceRating {
+        guard var rating = try Self.sources().first(where: { $0.name == name }) else {
+            throw FeedError.notFound(name)
+        }
+        // Derive the stories this source originated from the bundled feed, so the offline detail links up.
+        let stories = (try? Self.feed().stories) ?? []
+        rating.stories = stories
+            .filter { story in story.originatorGroups.contains { $0.sources.contains(name) } }
+            .map { SourceStoryRef(id: $0.id, fact: $0.fact, confidence: $0.confidence) }
+        return rating
+    }
+
+    static func sources() throws -> [SourceRating] {
+        guard let url = Bundle.main.url(forResource: "sources.fixture", withExtension: "json") else {
+            throw FeedError.missingFixture
+        }
+        return try FeedJSON.decoder.decode(SourcesResponse.self, from: Data(contentsOf: url)).sources
     }
 
     static func feed() throws -> Feed {
@@ -106,6 +143,9 @@ final class FeedStore {
     /// Set by the rerank pass (#53); nil means "server order".
     var rerankedOrder: [String]?
 
+    /// News-organisation reputation ratings (BRIEF §6) — the Sources surface.
+    private(set) var sources: [SourceRating] = []
+
     private var primary: FeedService
     private let fallback: FeedService
 
@@ -124,6 +164,28 @@ final class FeedStore {
     func applyRerank(_ reranker: Reranker, topics: [String]) async {
         guard !stories.isEmpty else { return }
         rerankedOrder = await reranker.rerank(stories, topics: topics)
+    }
+
+    /// Load the news-organisation reputation ratings (BRIEF §6), falling back to the bundled sample.
+    func refreshSources() async {
+        do {
+            sources = try await primary.loadSources()
+        } catch {
+            sources = (try? await fallback.loadSources()) ?? []
+        }
+    }
+
+    func loadSource(name: String) async throws -> SourceRating {
+        do {
+            return try await primary.loadSource(name: name)
+        } catch {
+            return try await fallback.loadSource(name: name)
+        }
+    }
+
+    /// The reputation for a source name, if loaded — used to show ratings inline while reading.
+    func rating(for name: String) -> SourceRating? {
+        sources.first { $0.name == name }
     }
 
     /// Stories in display order — reranked-against-topics when a rerank has run, else server order.

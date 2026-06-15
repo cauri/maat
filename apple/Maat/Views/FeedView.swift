@@ -4,22 +4,35 @@ struct FeedView: View {
     @Environment(FeedStore.self) private var feed
     @Environment(TopicStore.self) private var topics
     @Environment(AppRouter.self) private var router
+    @State private var showSettings = false
 
     var body: some View {
         @Bindable var router = router
-        return NavigationStack(path: $router.feedPath) {
+        NavigationStack(path: $router.feedPath) {
             ScrollView {
-                LazyVStack(spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     if feed.usingFallback, let error = feed.error {
-                        FallbackBanner(message: error)
+                        FallbackBanner(message: error).padding(.bottom, 14)
                     }
-                    ForEach(feed.displayStories) { story in
-                        NavigationLink(value: story) {
-                            StoryRow(story: story)
+
+                    let stories = feed.displayStories
+                    if let lead = stories.first {
+                        NavigationLink(value: lead) { LeadStoryCard(story: lead) }
+                            .buttonStyle(.plain)
+
+                        if stories.count > 1 {
+                            Text("More stories")
+                                .font(.caption.weight(.semibold))
+                                .textCase(.uppercase)
+                                .foregroundStyle(Palette.muted)
+                                .padding(.top, 20)
                         }
-                        .buttonStyle(.plain)
-                    }
-                    if feed.displayStories.isEmpty, !feed.isLoading {
+                        ForEach(stories.dropFirst()) { story in
+                            NavigationLink(value: story) { StoryRow(story: story) }
+                                .buttonStyle(.plain)
+                            Divider().overlay(Palette.line)
+                        }
+                    } else if !feed.isLoading {
                         ContentUnavailableView(
                             "No stories yet",
                             systemImage: "newspaper",
@@ -31,16 +44,24 @@ struct FeedView: View {
                 .padding()
             }
             .background(Palette.bg)
-            .navigationTitle("Maat")
+            .navigationTitle("Today")
             .navigationDestination(for: Story.self) { StoryDetailView(story: $0) }
-            .overlay {
-                if feed.isLoading, feed.stories.isEmpty {
-                    ProgressView()
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
                 }
+            }
+            .sheet(isPresented: $showSettings) { SettingsView() }
+            .overlay {
+                if feed.isLoading, feed.stories.isEmpty { ProgressView() }
             }
             .refreshable {
                 await feed.refresh()
                 await feed.applyRerank(FoundationModelsReranker(), topics: topics.topics)
+                await feed.refreshSources()
             }
         }
     }

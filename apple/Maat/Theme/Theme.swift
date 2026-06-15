@@ -71,3 +71,14 @@ extension Extremity {
         }
     }
 }
+
+extension SourceRating.Band {
+    var color: Color {
+        switch self {
+        case .high: return Palette.confHigh
+        case .medium: return Palette.confMid
+        case .low: return Palette.confLow
+        case .neutral: return Palette.muted
+        }
+    }
+}
