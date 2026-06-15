@@ -289,7 +289,10 @@ _CONFIDENCE_CAP = 0.97
 
 
 def confidence_read(
-    independent_originators: int, has_primary: bool, extremity: str = "notable"
+    independent_originators: int, has_primary: bool, extremity: str = "notable", *,
+    decay: dict[str, float] | None = None,
+    primary_lift: float | None = None,
+    cap: float | None = None,
 ) -> float:
     """The confidence read on a corroborated fact (§5.6-5.7) — DRAFT, review on return.
 
@@ -297,12 +300,16 @@ def confidence_read(
     matters less), a primary source closes half the remaining gap, and the per-originator
     doubt is scaled by the claim's prior — an extraordinary claim needs more independent
     originators to reach the same confidence. Capped below certainty.
+
+    The weights default to the live constants; passing `decay`/`primary_lift`/`cap` overrides
+    them, so the calibration harness can score this exact function under a candidate weight-set
+    (and a future live config-read can feed operator-set weights through the same seam).
     """
-    decay = _DECAY.get(extremity, 0.55)  # default to "notable" if unrecognised
-    base = 1.0 - decay ** max(0, independent_originators)
+    d = (decay or _DECAY).get(extremity, 0.55)  # default to "notable" if unrecognised
+    base = 1.0 - d ** max(0, independent_originators)
     if has_primary:
-        base += (1.0 - base) * _PRIMARY_LIFT
-    return round(min(base, _CONFIDENCE_CAP), 2)
+        base += (1.0 - base) * (_PRIMARY_LIFT if primary_lift is None else primary_lift)
+    return round(min(base, _CONFIDENCE_CAP if cap is None else cap), 2)
 
 
 def confidence_label(
