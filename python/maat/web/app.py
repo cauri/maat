@@ -28,11 +28,18 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from maat import config, events, prompts
+from maat.agents.triage import classify as triage_classify
 from maat.bus import connect as nats_connect
 from maat.clocks import is_paused, read_topics
 from maat.eval_prompt import eval_goldens
 from maat.eval_prompt import summary as eval_prompt_summary
 from maat.evals import evaluate, load_expectations
+from maat.learning.calibration import Weights, replay_ab
+from maat.learning.calibration_prod import production_calibration
+from maat.learning.reputation import fold_reputation
+from maat.learning.rl import policy_step
+from maat.metrics import de_us
+from maat.obs_metrics import pipeline_health
 from maat.pipeline.corroborate import (
     ClaimRow,
     cluster_id,
@@ -41,12 +48,19 @@ from maat.pipeline.corroborate import (
     corroborate_fixed,
     is_primary_source,
 )
+from maat.serving.feed import feed_router
+from maat.serving.feedback import queue as feedback_queue
+from maat.serving.feedback import routed_queue
 
 CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
 ROOT = Path(__file__).resolve().parents[3]  # repo root (for config/topics.txt)
 _BUS_DOWN = "Couldn't reach the event bus — nothing was saved."
 
 DB = os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
+
+# Local admin event type (#123) — kept here, never edited into events.py (the kernel folds it
+# the same way it folds admin.threshold.changed; for the console it is purely an audit marker).
+ADMIN_THRESHOLD_REVERTED = "admin.threshold.reverted"
 
 
 @asynccontextmanager
@@ -64,6 +78,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Maat operator console")
+
+# Mount the served-feed APIRouter (serving/feed.py) so the Apple client reads /api/v2/feed and
+# /api/v2/story/{id} — confidence labels + de-US re-ranking — off the same projections this
+# console reads. The router is None only if FastAPI is unavailable at import (test env guard).
+if feed_router is not None:
+    app.include_router(feed_router)
 
 
 # ============================ routes: content (feed + inspectors) ============================
@@ -236,15 +256,33 @@ async def clock_set(clock: str = Form(...), paused: str = Form(...), reason: str
 
 @app.get("/config", response_class=HTMLResponse)
 async def config_view(ok: str = "") -> str:
-    """F5 — show every tunable knob with its live default + any proposed (pending) override."""
-    rows = await app.state.pool.fetch(
+    """F5 — show every tunable knob with its live default + any proposed (pending) override.
+
+    For a pending weight proposal (#123) we also show the A/B-on-replay impact: Brier before/after
+    and how many resolved facts would change verdict (promoted/demoted) — so a sign-off is informed
+    by the downstream effect, not a raw number. Per-knob change history backs the revert control."""
+    pool = app.state.pool
+    rows = await pool.fetch(
         "select distinct on (data->>'key') data->>'key' k, data->>'value' v, "
         "data->>'reason' r, created_at from events where type = $1 "
         "order by data->>'key', id desc",
         events.ADMIN_THRESHOLD_CHANGED,
     )
     overrides = {r["k"]: {"value": r["v"], "reason": r["r"], "at": r["created_at"]} for r in rows}
-    return _doc(_config_page(overrides), "config", "config", flash=ok)
+    # Per-knob change history (latest first) — both proposals and reverts, for the audit trail.
+    hist_rows = await pool.fetch(
+        "select data->>'key' k, data->>'value' v, data->>'actor' a, type, created_at "
+        "from events where type = any($1::text[]) order by id desc limit 200",
+        [events.ADMIN_THRESHOLD_CHANGED, ADMIN_THRESHOLD_REVERTED],
+    )
+    history: dict[str, list] = {}
+    for r in hist_rows:
+        history.setdefault(r["k"], []).append(
+            {"value": r["v"], "actor": r["a"], "reverted": r["type"] == ADMIN_THRESHOLD_REVERTED,
+             "at": r["created_at"]}
+        )
+    replay = await replay_for_overrides(pool, overrides)
+    return _doc(_config_page(overrides, replay, history), "config", "config", flash=ok)
 
 
 @app.post("/config/set")
@@ -398,6 +436,138 @@ async def prompts_test(key: str = Form(...), text: str = Form(...)):
     except Exception as exc:  # noqa: BLE001 - surface any pipeline failure to the operator
         return _redirect("/prompts", f"Test failed: {exc}")
     return _redirect("/prompts", f"Tested '{key}' on the goldens — {eval_prompt_summary(report)}")
+
+
+# ============================ routes: P8 dashboards (read-only, over real backends) ==========
+
+
+async def _corroboration_history(pool) -> list[dict]:
+    """The `cluster.corroborated` event stream, oldest→newest — the input every learning fold
+    (reputation, calibration, RL) reads. Same query `scripts/calibrate_prod.py` uses."""
+    rows = await pool.fetch(
+        "select data from events where type = 'cluster.corroborated' order by id"
+    )
+    return [_jobj(r["data"]) for r in rows]
+
+
+@app.get("/reputation", response_class=HTMLResponse)
+async def reputation_view(ok: str = "") -> str:
+    """A3 (#74) — source reputation as a time-trajectory fold over the corroboration history.
+
+    Real `learning.reputation.fold_reputation` (NOT the provisional /api/sources proxy): per
+    source, independent-originator rate, attribution quality, solo-extraordinary red flags, and
+    confirmation/refutation outcomes where the trajectory resolved them.
+    """
+    history = await _corroboration_history(app.state.pool)
+    reps = fold_reputation(history)
+    return _doc(_reputation_page(reps, len(history)), "reputation", "reputation", flash=ok)
+
+
+@app.get("/calibration", response_class=HTMLResponse)
+async def calibration_view(ok: str = "") -> str:
+    """A4b (#76) — calibration (Brier/reliability, #60), de-US-centering (#59), pipeline health
+    (#61), as dashboards over the live projections. References the backends; never rebuilds them."""
+    pool = app.state.pool
+    history = await _corroboration_history(pool)
+    status = production_calibration(history)
+    # de-US: build SourceMeta per article (origin country guessed from source domain, language
+    # straight off the article row). This measures the spread of what's been ingested (§8).
+    arts = await pool.fetch("select source, language from articles")
+    breakdown, geo_dist, lang_dist = de_us_breakdown(arts)
+    # pipeline health off the event log + projections (pure rollup, #61)
+    event_rows = [dict(r) for r in await pool.fetch("select type, created_at from events")]
+    try:
+        dead_rows = [
+            dict(r)
+            for r in await pool.fetch(
+                "select type, error, created_at from dead_letters order by id desc"
+            )
+        ]
+    except asyncpg.UndefinedTableError:  # migration not applied — degrade, don't 500
+        dead_rows = []
+    cl_rows = [
+        dict(r)
+        for r in await pool.fetch(
+            "select confidence, independent_originators, has_primary, extremity from clusters"
+        )
+    ]
+    counts = {
+        "articles": await pool.fetchval("select count(*) from articles"),
+        "claims": await pool.fetchval("select count(*) from claims"),
+        "clusters": await pool.fetchval("select count(*) from clusters"),
+    }
+    health = pipeline_health(event_rows, dead_rows, counts, clusters=cl_rows)
+    return _doc(
+        _calibration_page(status, breakdown, geo_dist, lang_dist, health),
+        "calibration",
+        "calibration",
+        flash=ok,
+    )
+
+
+@app.get("/review", response_class=HTMLResponse)
+async def review_view(ok: str = "") -> str:
+    """A5 (#77) — the feedback triage queue (#58). Items routed to `review` need an operator;
+    `auto-fix` items are safe-to-PR. Untriaged items are classified live (pure rules) so the
+    operator sees a working queue even before the batch agent has run. Feedback is UNTRUSTED
+    input — coordinated bursts are flagged as a possible attack vector."""
+    pool = app.state.pool
+    try:
+        review = await routed_queue(pool, route="review")
+        autofix = await routed_queue(pool, route="auto-fix")
+        submitted = await feedback_queue(pool)
+    except asyncpg.UndefinedTableError:  # events table missing entirely
+        review, autofix, submitted = [], [], []
+    triaged_ids = {
+        (it.get("triage") or {}).get("item_id") or it.get("item_id") for it in (review + autofix)
+    }
+    pending = [s for s in submitted if s.get("item_id") not in triaged_ids]
+    fresh = [_triage_preview(s) for s in pending]
+    return _doc(
+        _review_page(review, autofix, fresh, coordinated_signal(submitted)),
+        "review",
+        "review",
+        flash=ok,
+    )
+
+
+@app.get("/policy", response_class=HTMLResponse)
+async def policy_view(ok: str = "") -> str:
+    """A6 (#78) — RL policy control + capability grants. `learning.rl.policy_step` proposes a
+    bounded, sign-off-gated policy improvement (weights via A/B-on-replay + source preferences
+    within the safe envelope); it is NEVER auto-applied. The capability grants below state which
+    knobs an operator must approve vs which may auto-tune — bounded self-modification (§5)."""
+    history = await _corroboration_history(app.state.pool)
+    proposal = policy_step(history)
+    return _doc(_policy_page(proposal, len(history)), "policy", "policy", flash=ok)
+
+
+@app.post("/config/revert")
+async def config_revert(key: str = Form(...), reason: str = Form("")):
+    # Revert a knob to its live code default (#123): re-propose the default value as a normal
+    # admin.threshold.changed proposal AND record an admin.threshold.reverted marker for the
+    # audit trail. Still a proposal — promotion to live keeps the sign-off gate.
+    knob = config.KNOBS_BY_KEY.get(key)
+    if knob is None:
+        return _redirect("/config", "Unknown setting.")
+    default = str(knob["default"])
+    pub = await _publish(
+        ADMIN_THRESHOLD_REVERTED,
+        key,
+        events.admin_event(key, reason=reason or "revert to code default", key=key, value=default),
+    )
+    if pub:
+        await _publish(
+            events.ADMIN_THRESHOLD_CHANGED,
+            key,
+            events.admin_event(
+                key, actor="revert", reason=reason or "revert to code default", key=key, value=default
+            ),
+        )
+        msg = f"Reverted {key} to its built-in {default}. Filed as a suggestion — sign off to apply."
+    else:
+        msg = _BUS_DOWN
+    return _redirect("/config", msg)
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -568,6 +738,119 @@ def _corr_payload(cid: str, corr) -> dict:
         "confidence": corr.confidence,
         "claim_ids": corr.claim_ids,
     }
+
+
+# ============================ P8 dashboard data prep (pure where possible) ====================
+
+
+def de_us_breakdown(articles) -> tuple[de_us.ScoreBreakdown, dict, dict]:
+    """Build the de-US-centering read (§8, #59) from ingested-article rows.
+
+    Each article becomes a `de_us.SourceMeta` — origin country guessed from the source domain
+    (the feed's own best-effort TLD map), language straight off the row. Returns the per-axis
+    score breakdown plus the geographic + language distributions for the dashboard. Pure."""
+    from maat.serving.feed import _source_country  # reuse the TLD→country guess
+
+    metas = [
+        de_us.SourceMeta(
+            source_country=(_source_country(a["source"] or "") or None),
+            language=(a["language"] or None),
+        )
+        for a in articles
+    ]
+    return (
+        de_us.score(metas),
+        de_us.geographic_distribution(metas),
+        de_us.language_distribution(metas),
+    )
+
+
+def coordinated_signal(submitted: list[dict], *, threshold: int = 5) -> dict:
+    """Flag possible coordinated feedback — feedback is UNTRUSTED input (#77), so a burst from
+    one source is a candidate attack vector, not a mandate. Counts items per `source`; any source
+    at/above `threshold` is surfaced as suspicious. Pure (no DB)."""
+    from collections import Counter
+
+    by_source = Counter((s.get("source") or "unknown") for s in submitted)
+    suspicious = {src: n for src, n in by_source.items() if n >= threshold}
+    return {
+        "total": len(submitted),
+        "by_source": dict(by_source.most_common()),
+        "suspicious": suspicious,
+    }
+
+
+def _triage_preview(item: dict) -> dict:
+    """Classify an as-yet-untriaged feedback item with the pure rule-based classifier so the
+    operator sees a working queue before the batch agent runs. No I/O, no LLM."""
+    res = triage_classify(item.get("text", ""), item.get("category_hint", ""))
+    return {
+        "item_id": item.get("item_id", ""),
+        "text": item.get("text", ""),
+        "source": item.get("source", "unknown"),
+        "submitted_at": item.get("submitted_at"),
+        "category": res.category,
+        "route": res.route,
+        "confidence": res.confidence,
+        "reason": res.reason,
+        "auto_fixable": res.auto_fixable,
+    }
+
+
+# Knob keys whose proposals can be replayed through `Weights` (the calibration weight-set).
+_REPLAYABLE = {
+    "decay.routine", "decay.ordinary", "decay.notable", "decay.significant",
+    "decay.extraordinary", "confidence.primary_lift", "confidence.cap",
+}
+
+
+def _weights_with_override(key: str, value: str) -> Weights | None:
+    """Build a candidate `Weights` = defaults with one knob overridden, or None if the key
+    isn't a weight knob / the value won't parse. Pure."""
+    if key not in _REPLAYABLE:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    base = Weights.defaults()
+    if key.startswith("decay."):
+        level = key.split(".", 1)[1]
+        if level not in base.decay:
+            return None
+        decay = dict(base.decay)
+        decay[level] = v
+        from dataclasses import replace
+
+        return replace(base, decay=decay)
+    if key == "confidence.primary_lift":
+        from dataclasses import replace
+
+        return replace(base, primary_lift=v)
+    if key == "confidence.cap":
+        from dataclasses import replace
+
+        return replace(base, cap=v)
+    return None
+
+
+async def replay_for_overrides(pool, overrides: dict) -> dict:
+    """For each pending weight proposal, run A/B-on-replay over the resolved history so the
+    Config sign-off shows Brier before/after + N facts changing verdict (#123). Returns
+    {key: ReplayAB}; skips knobs that aren't weight-replayable or won't parse."""
+    candidates = {
+        k: w
+        for k, ov in overrides.items()
+        if (w := _weights_with_override(k, ov.get("value", ""))) is not None
+    }
+    if not candidates:
+        return {}
+    from maat.learning.calibration import observations_from_history
+
+    history = await _corroboration_history(pool)
+    obs = observations_from_history(history)
+    base = Weights.defaults()
+    return {k: replay_ab(obs, base=base, candidate=w) for k, w in candidates.items()}
 
 
 # ============================ pure helpers (rendering + derivation) ==========================
@@ -1247,6 +1530,7 @@ _ACTION_LABELS = {
     "admin.source.grouped": "grouped sources",
     "admin.clock.set": "paused/resumed updates",
     "admin.prompt.updated": "edited a prompt",
+    "admin.threshold.reverted": "reverted a setting",
 }
 
 
@@ -1529,14 +1813,63 @@ def _prompts_page(by_key: dict, store_ready: bool = True) -> str:
     )
 
 
-def _config_page(overrides: dict) -> str:
-    """F5 — render the knob registry grouped, with live defaults + pending proposals."""
+def _replay_block(ab) -> str:
+    """A/B-on-replay impact for a pending weight proposal (#123) — Brier before/after and how
+    many resolved facts would change verdict. Shown at sign-off so approval is informed."""
+    if ab is None:
+        return ""
+    if ab.n_scored == 0:
+        return (
+            '<div class="ovr" title="No facts have resolved yet, so the replay has nothing to '
+            'score — the impact will appear once the loop accrues history.">A/B-on-replay: '
+            'no resolved facts to test against yet</div>'
+        )
+    base = "—" if ab.brier_base is None else f"{ab.brier_base}"
+    cand = "—" if ab.brier_candidate is None else f"{ab.brier_candidate}"
+    better = (
+        ab.brier_base is not None and ab.brier_candidate is not None
+        and ab.brier_candidate < ab.brier_base
+    )
+    arrow = " ↓ better-calibrated" if better else ""
+    return (
+        '<div class="ovr" title="Replay-before-promote (D18): the candidate scored against every '
+        'fact that has already resolved.">A/B-on-replay over <b>{n}</b> resolved facts · '
+        'Brier <span class="mono">{b}→{c}</span>{arrow} · <b>{flips}</b> would change verdict '
+        '({up} promoted, {down} demoted)</div>'.format(
+            n=ab.n_scored, b=base, c=cand, arrow=arrow,
+            flips=ab.flips, up=ab.promoted, down=ab.demoted,
+        )
+    )
+
+
+def _knob_history_block(key: str, history: dict | None) -> str:
+    """Per-knob change history (#123) — every proposal/revert filed, latest first."""
+    rows = (history or {}).get(key) or []
+    if not rows:
+        return ""
+    items = "".join(
+        f'<span class="mut sm">{"reverted to" if h.get("reverted") else "proposed"} '
+        f'<span class="mono">{html.escape(str(h.get("value", "")))}</span> · '
+        f'{h["at"]:%Y-%m-%d %H:%M}'
+        + (f' · {html.escape(str(h.get("actor")))}' if h.get("actor") else "")
+        + '</span><br>'
+        for h in rows[:6]
+    )
+    return f'<div class="mut sm" style="margin-top:4px">change history:<br>{items}</div>'
+
+
+def _config_page(overrides: dict, replay: dict | None = None, history: dict | None = None) -> str:
+    """F5 — render the knob registry grouped, with live defaults + pending proposals.
+
+    For a pending weight proposal the A/B-on-replay impact (#123) is shown inline, plus a revert
+    control and the per-knob change history."""
     out = [
         '<div class="ins"><a class="back" href="/">← back to feed</a>'
         '<h3 class="ih">Settings — the dials Maat runs on</h3>'
         '<div class="deriv">A change here is saved as a <b>suggestion</b> — it does NOT take effect '
         'until it\'s reviewed and turned on. Settings that affect how truth is scored are marked '
-        '<b>needs sign-off</b>.</div>'
+        '<b>needs sign-off</b>. For a scoring-weight change you\'ll see its <b>A/B-on-replay</b> '
+        'impact (how it would have scored past facts) before you sign off.</div>'
     ]
     for g in config.groups():
         out.append(f'<div class="bl mt">{html.escape(_plain_group(g))}</div>')
@@ -1555,20 +1888,411 @@ def _config_page(overrides: dict) -> str:
                     f'<div class="ovr">suggested → <b>{html.escape(ov["value"])}</b> '
                     f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · not applied yet</span></div>'
                 )
+                ov_html += _replay_block((replay or {}).get(k["key"]))
+            ov_html += _knob_history_block(k["key"], history)
+            revert = (
+                '<form class="inline" method="post" action="/config/revert">'
+                f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
+                '<button title="Re-propose the built-in default for this setting (logged; still '
+                'needs sign-off to go live)">Revert to default</button></form>'
+            )
             out.append(
                 '<div class="crow"><div class="cinfo">'
                 f'<div class="cname">{html.escape(k["label"])} {badge}</div>'
                 f'<div class="mut sm" title="Set in {html.escape(k["source"])}">currently '
                 f'<span class="mono">{html.escape(str(k["default"]))}</span></div>{ov_html}</div>'
+                '<div class="cact">'
                 '<form class="inline" method="post" action="/config/set">'
                 f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
                 '<input name="value" placeholder="new value">'
                 '<input class="reason" name="reason" placeholder="reason (optional)">'
                 '<button title="Records your suggestion. Nothing changes live until reviewed.">'
-                'Suggest change</button></form></div>'
+                f'Suggest change</button></form>{revert}</div></div>'
             )
     out.append("</div>")
     return "".join(out)
+
+
+def _reputation_tier(rep) -> tuple[str, str]:
+    """Plain-language reliability standing from a SourceReputation record (§6.2). Sources with no
+    resolved outcomes are 'not yet rated' (cold-start, §6.6) — never scored on consensus."""
+    if rep.confirmation_rate is None:
+        return "not yet rated", "own"
+    r = rep.confirmation_rate
+    if r >= 0.85:
+        return "highly reliable", "fact"
+    if r >= 0.6:
+        return "generally reliable", "fact"
+    if r >= 0.4:
+        return "mixed reliability", "proj"
+    return "unreliable", "laun"
+
+
+def _reputation_page(reps, n_events: int) -> str:
+    """A3 (#74) — render the reputation fold: per-source standing as a trajectory, not a snapshot.
+
+    `reps` is a list of `learning.reputation.SourceReputation`. Each row surfaces the dimensions
+    separately (cauri: never one magic number): independent-originator rate, attribution quality,
+    solo-extraordinary red flags, and confirmation/refutation outcomes where the trajectory
+    resolved them."""
+    intro = (
+        '<div class="deriv">A source\'s standing is measured against how its facts <b>actually '
+        'resolved over time</b> (§6) — confirmed by independent corroboration or a primary source — '
+        '<b>never</b> by agreeing with the crowd. This reads the real corroboration history; the '
+        'Sources tab\'s reliability badges are a rougher live proxy. Each dimension is shown '
+        'separately — no single score stands in for the others.</div>'
+    )
+    if not reps:
+        body = (
+            '<p class="empty">No reputation yet — it builds as the corroboration history grows '
+            "(nothing has been corroborated to fold over).</p>"
+        )
+        return (
+            '<div class="ins"><a class="back" href="/">← back to feed</a>'
+            '<h3 class="ih">Reputation — how each source has held up over time</h3>'
+            f"{intro}{body}</div>"
+        )
+    rows = []
+    for rep in reps:
+        tier, cls = _reputation_tier(rep)
+        flags = [_badge(tier, cls, "Reliability standing — truthfulness over time, not consensus")]
+        if rep.solo_extraordinary:
+            flags.append(_badge(
+                f"solo extraordinary ×{rep.solo_extraordinary}", "laun",
+                "Stood alone on an extraordinary/significant claim — may be breaking it first, "
+                "or fabricating. Surfaced as tension, not a verdict.",
+            ))
+        if rep.primary_appearances:
+            flags.append(_badge(
+                f"primary ×{rep.primary_appearances}", "fact",
+                "Contributed a first-hand / primary-source signal this many times",
+            ))
+        conf_rate = "—" if rep.confirmation_rate is None else f"{round(rep.confirmation_rate * 100)}%"
+        rows.append(
+            f'<div class="srow2"><div><div class="sname">{html.escape(rep.source)} '
+            f'<span class="bs">{"".join(flags)}</span></div>'
+            f'<div class="mut sm">{rep.appearances} appearances · '
+            f'{round(rep.independent_rate * 100)}% as an independent originator · '
+            f'attribution quality {rep.mean_attribution_weight}</div></div>'
+            f'<div class="rnum" title="Facts from this source that later confirmed vs were '
+            f'refuted (where the trajectory resolved)"><b>{conf_rate}</b> confirmed'
+            f'<div class="mut sm">{rep.facts_confirmed}✓ · {rep.facts_refuted}✗ · '
+            f'{rep.facts_unresolved} in flight</div></div></div>'
+        )
+    return (
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Reputation — how each source has held up over time</h3>'
+        f"{intro}"
+        f'<div class="mut sm">{len(reps)} sources folded over {n_events} corroboration events</div>'
+        f'{"".join(rows)}</div>'
+    )
+
+
+def _dist_bars(dist: dict, *, limit: int = 8) -> str:
+    """Horizontal share bars for a {key: fraction} distribution (de-US dashboard)."""
+    items = list(dist.items())[:limit]
+    if not items:
+        return '<div class="mut sm">no data yet</div>'
+    return "".join(
+        f'<div class="dist"><span class="dk mono">{html.escape(str(k))}</span>'
+        f'<span class="dbar"><span class="dfill" style="width:{round(v * 100)}%"></span></span>'
+        f'<span class="dv mono">{round(v * 100)}%</span></div>'
+        for k, v in items
+    )
+
+
+def _calibration_page(status, breakdown, geo_dist, lang_dist, health) -> str:
+    """A4b (#76) — calibration + de-US-centering + pipeline-health dashboards over the live
+    backends. `status` is a CalibrationStatus, `breakdown` a de_us.ScoreBreakdown, `health` a
+    pipeline_health rollup. References the backends; recomputes nothing here."""
+    # --- calibration (#60) ---
+    if status.brier is None:
+        calib = (
+            '<div class="empty" style="padding:24px 0">Nothing has resolved yet — the calibration '
+            'loop activates as the clock keeps acquiring and facts confirm or are refuted.</div>'
+        )
+    else:
+        bins = "".join(
+            f'<tr><td class="mono">[{b.lo:.2f},{b.hi:.2f})</td><td>{b.n}</td>'
+            f'<td class="mono">{b.predicted}</td><td class="mono">{b.actual}</td>'
+            f'<td class="mut sm">{_bin_flag(b)}</td></tr>'
+            for b in status.bins
+        )
+        caveat = ""
+        if status.refutation_bias:
+            caveat = (
+                '<div class="note" style="color:#8a2a1e">Caveat: every resolved fact confirmed — '
+                'no refutations in view yet, so proposals skew optimistic. Treat as provisional '
+                'until a refutation signal (retraction / contradiction) feeds the loop.</div>'
+            )
+        props = ""
+        if status.proposals:
+            pitems = "".join(
+                f'<li><span class="mono">{html.escape(p["key"])} → {html.escape(p["value"])}</span> '
+                f'<span class="mut sm">{html.escape(p["reason"])}</span></li>'
+                for p in status.proposals
+            )
+            props = (
+                '<div class="bl mt">Tune proposals <span class="b laun">needs sign-off</span></div>'
+                '<div class="note">Filed to the Settings panel as suggestions — never auto-applied. '
+                'Sign off there (with the A/B-on-replay impact) to promote.</div>'
+                f'<ul class="prov">{pitems}</ul>'
+            )
+        else:
+            props = '<div class="mut sm">No tune proposals — current weights already fit the history.</div>'
+        calib = (
+            f'<div class="evbanner ok">Brier {status.brier} · lower = better-calibrated</div>'
+            f'<div class="mut sm">{status.n_scored} of {status.n_observations} facts resolved'
+            + (f' · most-recent event {round((status.freshness_seconds or 0) / 3600, 1)}h ago'
+               if status.freshness_seconds is not None else "")
+            + '</div>'
+            f'{caveat}'
+            '<div class="bl mt">Reliability bins (predicted read vs fraction confirmed)</div>'
+            '<table class="aud"><tr><th>band</th><th>n</th><th>read</th><th>confirmed</th>'
+            f'<th></th></tr>{bins}</table>{props}'
+        )
+    # --- de-US-centering (#59) ---
+    bd = breakdown
+    axes = [
+        ("Anglo share", bd.anglo, "US+UK share of sources stays below target"),
+        ("Country spread", bd.concentration, "Low single-country concentration (HHI)"),
+        ("Country diversity", bd.country_diversity, "Enough distinct originator countries"),
+        ("Language diversity", bd.language_diversity, "Enough distinct languages"),
+        ("Language balance", bd.language_dominance, "No single language dominates"),
+    ]
+    axis_html = "".join(
+        f'<div class="mcell" title="{html.escape(tip)}"><div class="mk">{html.escape(name)}</div>'
+        f'<div class="mv">{round(v * 100)}%</div></div>'
+        for name, v, tip in axes
+    )
+    de_us_html = (
+        f'<div class="evbanner {"ok" if bd.overall >= 0.6 else "bad"}">de-US-centering '
+        f'{round(bd.overall * 100)}% · 1 = maximally diverse</div>'
+        '<div class="mut sm">Measures whether the feed counters Anglo-American slant (§8). '
+        'Country is guessed from the source domain; this never touches a confidence score.</div>'
+        f'<div class="mgrid">{axis_html}</div>'
+        '<div class="bl mt">Sources by country</div>'
+        f'{_dist_bars(geo_dist)}'
+        '<div class="bl mt">Content by language</div>'
+        f'{_dist_bars(lang_dist)}'
+    )
+    # --- pipeline health (#61) ---
+    status_cls = {"healthy": "fact", "degraded": "proj", "stalled": "laun", "empty": "own"}.get(
+        health["status"], "own"
+    )
+    alerts = "".join(
+        f'<li>{html.escape(a)}</li>' for a in health["alerts"]
+    ) or '<li class="mut">none — pipeline looks healthy</li>'
+    stage_rows = "".join(
+        f'<tr><td>{html.escape(s["stage"])}</td><td>{s["count"]}</td>'
+        f'<td class="mut sm">{html.escape(s["freshness"])}</td></tr>'
+        for s in health["stages"]
+    )
+    health_html = (
+        f'<div>Overall: {_badge(health["status"], status_cls)}</div>'
+        '<div class="bl mt">Alerts</div>'
+        f'<ul class="prov">{alerts}</ul>'
+        '<div class="bl mt">Stages</div>'
+        '<table class="aud"><tr><th>stage</th><th>done</th><th>freshness</th></tr>'
+        f'{stage_rows}</table>'
+        f'<div class="mut sm" style="margin-top:6px">{health["dead_letters"]["total"]} dead-letter '
+        f'item(s) · {health["projections"]["clusters"]} clusters · '
+        f'{health["projections"]["articles"]} articles</div>'
+    )
+    return (
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Calibration — is the confidence read actually right, over time?</h3>'
+        f'{calib}</div>'
+        '<div class="ins"><h3 class="ih">De-US-centering — is the feed countering Anglo slant?</h3>'
+        f'{de_us_html}</div>'
+        '<div class="ins"><h3 class="ih">Pipeline health — is everything running?</h3>'
+        f'{health_html}</div>'
+    )
+
+
+def _bin_flag(b) -> str:
+    """Calibration-bin direction flag (under/over-confident), matching format_status."""
+    if b.predicted + 0.10 < b.actual:
+        return "under-confident"
+    if b.predicted > b.actual + 0.10:
+        return "over-confident"
+    return ""
+
+
+_TRIAGE_LABELS = {
+    "veracity-dispute": "veracity dispute",
+    "source-quality": "source quality",
+    "topic-request": "topic request",
+    "bug": "bug",
+    "ui": "display issue",
+}
+
+
+def _triage_row(it: dict, *, fresh: bool) -> str:
+    """One feedback item row (works for both triaged events and live-classified previews)."""
+    tri = it.get("triage") or it  # triaged events nest under 'triage'; previews are flat
+    cat = tri.get("category", "")
+    conf = tri.get("confidence", 0.0)
+    auto = tri.get("auto_fixable") or tri.get("route") == "auto-fix"
+    cls = "fact" if auto else "proj"
+    cat_badge = _badge(_TRIAGE_LABELS.get(cat, cat), cls)
+    fresh_badge = _badge("not yet triaged", "own", "Classified live just now (rules) — the batch "
+                         "triage agent hasn't filed it yet") if fresh else ""
+    when = it.get("submitted_at") or it.get("triaged_at")
+    when_html = f'<span class="mut sm">{when:%Y-%m-%d %H:%M}</span>' if when else ""
+    return (
+        f'<div class="mc"><div class="bs">{cat_badge}{fresh_badge} '
+        f'<span class="mut sm">{html.escape(str(it.get("source", "")))} · '
+        f'confidence {round(conf * 100)}% · {when_html}</span></div>'
+        f'<div class="t">{html.escape(str(it.get("text", "")))}</div>'
+        f'<div class="mut sm">{html.escape(str(tri.get("reason", "")))}</div></div>'
+    )
+
+
+def _review_page(review, autofix, fresh, coordinated) -> str:
+    """A5 (#77) — render the feedback triage queue. Review-routed items need an operator;
+    auto-fix items are safe to PR. Coordinated bursts are flagged — feedback is untrusted input."""
+    intro = (
+        '<div class="deriv">User feedback, triaged. <b>Needs review</b> = a person must decide '
+        '(veracity disputes, source-quality, anything ambiguous). <b>Safe to auto-fix</b> = a PR '
+        'can be generated without sign-off (clear bugs, cosmetic UI). Feedback is <b>untrusted '
+        'input</b>: a coordinated burst is a possible attack vector, surfaced below — not a '
+        'mandate.</div>'
+    )
+    warn = ""
+    if coordinated["suspicious"]:
+        srcs = ", ".join(
+            f"{html.escape(s)} ({n})" for s, n in coordinated["suspicious"].items()
+        )
+        warn = (
+            '<div class="note" style="color:#8a2a1e">Possible coordinated feedback — a burst from: '
+            f'{srcs}. Weigh these as a group, not as independent voices.</div>'
+        )
+    review_html = "".join(_triage_row(it, fresh=False) for it in review) or (
+        '<div class="mut sm">Nothing in the review queue.</div>'
+    )
+    fresh_html = "".join(_triage_row(it, fresh=True) for it in fresh)
+    autofix_html = "".join(_triage_row(it, fresh=False) for it in autofix) or (
+        '<div class="mut sm">No auto-fixable items.</div>'
+    )
+    total = len(review) + len(fresh)
+    return (
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Review queue — user feedback that needs a decision</h3>'
+        f"{intro}{warn}"
+        f'<div class="bl mt">Needs review ({total})</div>{review_html}{fresh_html}'
+        f'<div class="bl mt">Safe to auto-fix ({len(autofix)})</div>{autofix_html}</div>'
+    )
+
+
+# Capability grants (§5 bounded self-modification): which knobs an operator must approve vs which
+# may auto-tune within a bounded envelope. The kernel grants these; the system can never
+# self-escalate past them. Derived from the Config registry's `core` flag — a single source of truth.
+def _capability_grants() -> list[dict]:
+    grants = [
+        {"name": "Confidence weights (decay, primary-lift, cap)", "auto": True,
+         "note": "May be auto-tuned within a bounded envelope (Gamelan), but every change is a "
+                 "sign-off-gated proposal with an A/B-on-replay justification — never applied live."},
+        {"name": "Source preferences (soft ranking)", "auto": True,
+         "note": "Adjusted from reputation within ±0.30 per step; a soft ordering signal only, "
+                 "never used to suppress a fact."},
+        {"name": "Scoring thresholds (gate floor, tiers)", "auto": False,
+         "note": "Operator-gated. Changing how truth is scored needs explicit human sign-off."},
+        {"name": "Judge / classifier model routing", "auto": False,
+         "note": "Operator-gated. The model that judges veracity is never swapped automatically."},
+        {"name": "Source allow / deny", "auto": False,
+         "note": "Operator-gated. The system cannot grant or revoke a source's standing itself."},
+        {"name": "Ownership grouping", "auto": False,
+         "note": "Operator-provided. Co-owned outlets are collapsed only on an explicit edge."},
+    ]
+    return grants
+
+
+def _policy_page(proposal, n_events: int) -> str:
+    """A6 (#78) — render the bounded, sign-off-gated RL policy proposal + the capability grants.
+
+    `proposal` is a `learning.rl.PolicyProposal` (always approved=False). The A/B-on-replay result
+    justifies the weight side; source-preference changes stay within the safe envelope."""
+    ab = proposal.ab
+    gate = _badge("not applied — needs sign-off", "laun",
+                  "Bounded self-modification (§5): the system may PROPOSE within a safe envelope; "
+                  "only an operator can promote it.")
+    intro = (
+        '<div class="deriv">The learning loop proposes an improved policy — confidence weights '
+        '(justified by an A/B-on-replay) and soft source preferences (from reputation). It is '
+        f'<b>bounded</b> and <b>{gate}</b>: it can never apply itself or escalate past the grants '
+        'below. Reviewed over the live corroboration history.</div>'
+    )
+    if ab.n_scored == 0:
+        ab_html = (
+            '<div class="mut sm">No facts have resolved yet — the weight side has nothing to '
+            "replay against, so the proposed policy equals the current one.</div>"
+        )
+    else:
+        better = (
+            ab.brier_base is not None and ab.brier_candidate is not None
+            and ab.brier_candidate < ab.brier_base
+        )
+        ab_html = (
+            f'<div class="evbanner {"ok" if better else "bad"}">A/B-on-replay over '
+            f'{ab.n_scored} resolved facts · Brier '
+            f'<span class="mono">{ab.brier_base}→{ab.brier_candidate}</span> · '
+            f'{ab.flips} change verdict ({ab.promoted} promoted, {ab.demoted} demoted)</div>'
+        )
+    wchanges = proposal.weight_changes
+    if wchanges:
+        witems = "".join(
+            f'<li><span class="mono">{html.escape(c["key"])} → {html.escape(c["value"])}</span> '
+            f'<span class="mut sm">{html.escape(c["reason"])}</span></li>'
+            for c in wchanges
+        )
+        weights_html = (
+            '<div class="bl mt">Proposed weight changes</div>'
+            '<div class="note">These file to Settings as suggestions — sign off there to apply.</div>'
+            f'<ul class="prov">{witems}</ul>'
+        )
+    else:
+        weights_html = (
+            '<div class="bl mt">Proposed weight changes</div>'
+            '<div class="mut sm">None — current weights already fit the resolved history.</div>'
+        )
+    pchanges = proposal.pref_changes
+    if pchanges:
+        pitems = "".join(
+            f'<li><span class="mono">{html.escape(c["source"])}: {c["before"]} → {c["after"]}</span> '
+            f'<span class="mut sm">{html.escape(c["reason"])}</span></li>'
+            for c in pchanges
+        )
+        prefs_html = (
+            '<div class="bl mt">Proposed source-preference changes (within ±0.30 envelope)</div>'
+            f'<ul class="prov">{pitems}</ul>'
+        )
+    else:
+        prefs_html = (
+            '<div class="bl mt">Proposed source-preference changes</div>'
+            '<div class="mut sm">None within the safe envelope.</div>'
+        )
+    grows = "".join(
+        f'<div class="crow"><div class="cinfo"><div class="cname">{html.escape(g["name"])} '
+        + (_badge("auto-tunable (bounded)", "fact",
+                  "May propose changes within a safe envelope — still sign-off-gated")
+           if g["auto"] else
+           _badge("operator-gated", "laun", "Only an operator can change this"))
+        + f'</div><div class="mut sm">{html.escape(g["note"])}</div></div></div>'
+        for g in _capability_grants()
+    )
+    return (
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Policy — what the learning loop would change (and what it may never touch)</h3>'
+        f"{intro}"
+        f'<div class="mut sm">Proposed over {n_events} corroboration events · '
+        f'{proposal.n_observations} resolved observations</div>'
+        f'{ab_html}{weights_html}{prefs_html}</div>'
+        '<div class="ins"><h3 class="ih">Capability grants — bounded self-modification (§5)</h3>'
+        '<div class="deriv">What the system may adjust on its own (bounded, still sign-off-gated) '
+        'versus what only an operator can change. The system can never grant itself more.</div>'
+        f'{grows}</div>'
+    )
 
 
 def _eval_page(report, err: str, otlp: str) -> str:
@@ -1637,10 +2361,14 @@ def _nav(active: str) -> str:
     tabs = [
         ("/", "Feed", "content", "The news feed — open any story to see or fix how Maat judged it"),
         ("/runs", "Activity", "runs", "What the system has processed, and anything that failed"),
+        ("/review", "Review", "review", "User feedback, triaged — what needs a decision"),
         ("/clocks", "Updates", "clocks", "When Maat pulls in new news — and a switch to pause it"),
         ("/config", "Settings", "config", "The dials Maat runs on (changes are proposed, not auto-applied)"),
+        ("/policy", "Policy", "policy", "What the learning loop would change — bounded, sign-off-gated"),
         ("/prompts", "Prompts", "prompts", "Edit the instructions each AI step runs on (live on next run)"),
         ("/sources", "Sources", "sources", "Every outlet Maat reads, and how you want each one treated"),
+        ("/reputation", "Reputation", "reputation", "How each source has held up over time (§6)"),
+        ("/calibration", "Calibration", "calibration", "Is the confidence read right? Plus de-US-centering & health"),
         ("/eval", "Quality", "eval", "Automatic checks that Maat is still judging correctly"),
         ("/audit", "History", "audit", "A log of every change made in this console"),
     ]
@@ -1768,6 +2496,13 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .cname{font-weight:600;font-size:14px}
 .ovr{font-size:13px;color:#0b6b86;margin-top:3px}
 .srow2{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.cact{display:flex;flex-direction:column;gap:5px;align-items:flex-end}
+.rnum{text-align:right;font-size:14px;white-space:nowrap}
+.dist{display:flex;align-items:center;gap:8px;margin:3px 0;font-size:13px}
+.dk{min-width:70px}
+.dbar{flex:1;height:7px;background:var(--line);border-radius:5px;overflow:hidden}
+.dfill{display:block;height:100%;background:var(--acc);border-radius:5px}
+.dv{min-width:38px;text-align:right}
 .prompt{width:100%;min-height:230px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical;margin-bottom:6px}
 .note{flex-basis:100%;font-size:12px;color:var(--mut);line-height:1.5;margin:-2px 0 2px}
 .flash{max-width:820px;margin:10px auto 0;padding:9px 14px;border-radius:var(--border-radius-md,8px);background:#eaf3de;color:#3b6d11;font-size:13px;font-weight:500;border:1px solid #cfe3b6}
