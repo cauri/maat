@@ -37,6 +37,11 @@ services:
       # The admin console (P8, #82) publishes corrections to NATS; without this the reader
       # hit localhost:4222 and crash-looped. Point it at the compose nats service.
       NATS_URL: "nats://nats:4222"
+      # The console's prompt-chat agent (#158) — and any console-side LLM/embedding calls — read
+      # these from the box's .env (same place POSTGRES_* come from). Values never touch the repo;
+      # without them the chat degrades to "unavailable" rather than crashing.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      MISTRAL_API_KEY: "${MISTRAL_API_KEY:-}"
     # Loopback only: Caddy reaches it as reader:8000 on the compose network; the host port is bound
     # to 127.0.0.1 for SSH-tunnel admin access. NOT published to the internet (closes the open :8000).
     ports:
