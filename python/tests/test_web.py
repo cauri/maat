@@ -274,3 +274,19 @@ def test_redirect_carries_message_as_query():
     assert r.status_code == 303
     assert r.headers["location"].startswith("/claim/abc?ok=")
     assert _redirect("/sources").headers["location"] == "/sources"  # no message -> bare path
+
+
+def test_runs_page_degrades_when_dead_letters_table_missing():
+    from maat.web.app import _runs_page, stage_summary
+
+    out = _runs_page(stage_summary({}), {"articles": 0}, [], [], dead_ready=False)
+    assert "restart the kernel" in out  # graceful note, not a 500
+    assert "Errors — failed and skipped" not in out  # no errors table rendered
+
+
+def test_prompts_page_degrades_when_store_table_missing():
+    from maat.web.app import _prompts_page
+
+    out = _prompts_page({}, store_ready=False)
+    assert "prompt store isn't set up yet" in out and "restart the kernel" in out
+    assert "built-in" in out  # still shows the seed prompts
