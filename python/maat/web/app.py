@@ -333,7 +333,7 @@ async def prompts_view(ok: str = "") -> str:
 
 @app.post("/prompts/save")
 async def prompts_save(key: str = Form(...), text: str = Form(...), reason: str = Form("")):
-    if key not in prompts.PROMPTS_BY_KEY:
+    if key not in prompts.EDITABLE_KEYS:  # draft / on-device prompts are read-only
         return _redirect("/prompts", "Unknown prompt.")
     missing = prompts.missing_placeholders(key, text)
     if missing:  # safety: dropping a placeholder would break the run — refuse the save
@@ -347,7 +347,7 @@ async def prompts_save(key: str = Form(...), text: str = Form(...), reason: str 
 
 @app.post("/prompts/restore")
 async def prompts_restore(key: str = Form(...), reason: str = Form(""), text: str = Form("")):
-    if key not in prompts.PROMPTS_BY_KEY:
+    if key not in prompts.EDITABLE_KEYS:  # draft / on-device prompts are read-only
         return _redirect("/prompts", "Unknown prompt.")
     pub = await _publish(
         events.ADMIN_PROMPT_UPDATED,
@@ -361,6 +361,8 @@ async def prompts_restore(key: str = Form(...), reason: str = Form(""), text: st
 
 @app.post("/prompts/rollback")
 async def prompts_rollback(key: str = Form(...), version: int = Form(...)):
+    if key not in prompts.EDITABLE_KEYS:  # draft / on-device prompts are read-only
+        return _redirect("/prompts", "Unknown prompt.")
     row = await app.state.pool.fetchrow(
         "select text from prompts where key = $1 and version = $2", key, version
     )
@@ -379,7 +381,7 @@ async def prompts_rollback(key: str = Form(...), version: int = Form(...)):
 async def prompts_test(key: str = Form(...), text: str = Form(...)):
     """Eval-on-change: run the golden corpus with this candidate text (other stages stay on their
     active prompts) and report pass/fail — before the operator relies on it. Live LLM calls."""
-    if key not in prompts.PROMPTS_BY_KEY:
+    if key not in prompts.EDITABLE_KEYS:  # only the editable backend prompts can be golden-tested
         return _redirect("/prompts", "Unknown prompt.")
     three = {}
     for k in ("extract", "classify", "extremity"):
@@ -1473,59 +1475,110 @@ def _plain_group(g: str) -> str:
     return _GROUP_LABELS.get(base, base)
 
 
+# How each prompt status is presented on the Prompts page.
+_PROMPT_STATUS_BADGE = {  # status -> (badge text, badge css class, tooltip)
+    "active": ("active", "fact", "Editable — saving makes it live on the next run"),
+    "draft": ("draft", "proj", "In code but gated off — surfaced for review, not live or editable"),
+    "on-device": ("on-device", "attr", "Runs on the reader's phone (Apple) — display-only mirror"),
+}
+
+
+def _prompt_active_block(p: dict, by_key: dict) -> str:
+    """An editable backend prompt: active text, version history, rollback, restore-default."""
+    key = p["key"]
+    versions = by_key.get(key, [])
+    active = next((v for v in versions if v["active"]), None)
+    text = active["text"] if active else p["default"]
+    ver = f'version {active["version"]}' if active else "built-in (no edits yet)"
+    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE["active"]
+    past = [v for v in versions if not v["active"]]
+    hist = ""
+    if past:
+        items = "".join(
+            '<form class="inline" method="post" action="/prompts/rollback">'
+            f'<input type="hidden" name="key" value="{key}">'
+            f'<input type="hidden" name="version" value="{v["version"]}">'
+            f'<span class="mut sm">v{v["version"]} · {v["created_at"]:%Y-%m-%d %H:%M}'
+            + (f' · {html.escape(v["reason"])}' if v["reason"] else "")
+            + '</span><button title="Make this version active again">Roll back</button></form>'
+            for v in past
+        )
+        hist = f'<div class="bl mt">Earlier versions</div>{items}'
+    return (
+        '<div class="box" style="display:block">'
+        f'<div class="cname">{html.escape(p["label"])} {_badge(badge, badge_cls, badge_tip)} '
+        f'<span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
+        f'<div class="mut sm" title="Where the built-in text lives">source '
+        f'<span class="mono">{html.escape(p["source"])}</span></div>'
+        '<form method="post" action="/prompts/save">'
+        f'<input type="hidden" name="key" value="{key}">'
+        f'<textarea class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
+        f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
+        '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
+        '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
+        'this text first — live AI calls, takes a moment">Test on goldens</button> '
+        '<button title="Saves a new version, live on the next run">Save new version</button> '
+        '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
+        'built-in version">Restore original</button>'
+        f'</form>{hist}</div>'
+    )
+
+
+def _prompt_readonly_block(p: dict) -> str:
+    """A draft or on-device prompt: label, status, source, and the full text — display-only."""
+    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE[p["status"]]
+    return (
+        '<div class="box" style="display:block">'
+        f'<div class="cname">{html.escape(p["label"])} {_badge(badge, badge_cls, badge_tip)} '
+        f'<span class="mut sm">— {html.escape(p["key"])}</span></div>'
+        f'<div class="mut sm" title="Where the canonical text lives">source '
+        f'<span class="mono">{html.escape(p["source"])}</span></div>'
+        f'<textarea class="prompt" rows="14" readonly>{html.escape(p["default"])}</textarea>'
+        '<div class="mut sm">Read-only — surfaced for review, not edited here.</div>'
+        '</div>'
+    )
+
+
+# Display order + heading for each status group on the Prompts page.
+_PROMPT_GROUPS = [
+    ("active", "Active — editable, live on the next run"),
+    ("draft", "Draft — pending cauri review"),
+    ("on-device", "On-device (Apple)"),
+]
+
+
 def _prompts_page(by_key: dict, store_ready: bool = True) -> str:
-    """P8 — editable agent prompts: active text, version history, rollback, restore-default."""
+    """P8 — every prompt the platform runs, grouped by status. Active prompts are editable
+    (text, version history, rollback, restore-default); draft and on-device prompts are read-only.
+    """
     intro = (
-        '<div class="deriv">Edit an AI step\'s instructions. <b>Saving makes it live on the next '
-        'run</b> (the built-in version is the fallback). Every version is kept — roll back in one '
-        'click — and run the checks on the Quality tab afterwards. Keep the '
-        '<span class="mono">{placeholders}</span> or the save is refused.</div>'
+        '<div class="deriv">Every prompt the platform runs, so you can review them all. '
+        '<b>Active</b> prompts are editable — saving makes it live on the next run (the built-in '
+        'version is the fallback), every version is kept, and you can roll back in one click; keep '
+        'the <span class="mono">{placeholders}</span> or the save is refused. <b>Draft</b> prompts '
+        'are in code but gated off, awaiting your review. <b>On-device</b> prompts run on the '
+        "reader's phone (Apple) and are mirrored here for review. Draft and on-device are read-only."
+        '</div>'
     )
     if not store_ready:
         intro += (
             '<div class="note">The prompt store isn\'t set up yet — restart the kernel '
             "(maat-kerneld) to enable saving and version history. Showing the built-in prompts.</div>"
         )
-    blocks = []
-    for p in prompts.PROMPTS:
-        key = p["key"]
-        versions = by_key.get(key, [])
-        active = next((v for v in versions if v["active"]), None)
-        text = active["text"] if active else p["default"]
-        ver = f'version {active["version"]}' if active else "built-in (no edits yet)"
-        past = [v for v in versions if not v["active"]]
-        hist = ""
-        if past:
-            items = "".join(
-                '<form class="inline" method="post" action="/prompts/rollback">'
-                f'<input type="hidden" name="key" value="{key}">'
-                f'<input type="hidden" name="version" value="{v["version"]}">'
-                f'<span class="mut sm">v{v["version"]} · {v["created_at"]:%Y-%m-%d %H:%M}'
-                + (f' · {html.escape(v["reason"])}' if v["reason"] else "")
-                + '</span><button title="Make this version active again">Roll back</button></form>'
-                for v in past
-            )
-            hist = f'<div class="bl mt">Earlier versions</div>{items}'
-        blocks.append(
-            '<div class="box" style="display:block">'
-            f'<div class="cname">{html.escape(p["label"])} '
-            f'<span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
-            '<form method="post" action="/prompts/save">'
-            f'<input type="hidden" name="key" value="{key}">'
-            f'<textarea class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
-            f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
-            '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
-            '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
-            'this text first — live AI calls, takes a moment">Test on goldens</button> '
-            '<button title="Saves a new version, live on the next run">Save new version</button> '
-            '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
-            'built-in version">Restore original</button>'
-            f'</form>{hist}</div>'
-        )
+    sections = []
+    for status, heading in _PROMPT_GROUPS:
+        entries = [p for p in prompts.PROMPTS if p["status"] == status]
+        if not entries:
+            continue
+        if status == "active":
+            blocks = "".join(_prompt_active_block(p, by_key) for p in entries)
+        else:
+            blocks = "".join(_prompt_readonly_block(p) for p in entries)
+        sections.append(f'<div class="bl mt">{html.escape(heading)}</div>{blocks}')
     return (
         '<div class="ins"><a class="back" href="/">← back to feed</a>'
         '<h3 class="ih">Prompts — the instructions each AI step runs on</h3>'
-        f'{intro}{"".join(blocks)}</div>'
+        f'{intro}{"".join(sections)}</div>'
     )
 
 
