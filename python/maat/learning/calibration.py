@@ -17,6 +17,11 @@ corroboration (or its primary source surfaces); a thin rumour stalls, or draws a
 
 Pure functions over plain values — no DB, no I/O. `scripts/calibrate.py` feeds it the
 `cluster.corroborated` event history; the eval fixtures seed it before real history accrues.
+
+Limitation (today): there is no genuine fact-refutation signal yet — a retraction, or a
+contradicting fact. So the scored set is confirmations and stalls, and the tuner sees only
+upside; its suggestions skew optimistic until such a signal feeds in. `calibrate.py` flags this,
+and `--propose` should be treated as provisional until then.
 """
 
 from __future__ import annotations

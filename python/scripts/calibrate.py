@@ -56,6 +56,12 @@ def _report(obs: list[Observation]) -> str:
             "  over-confident" if b.predicted > b.actual + 0.1 else "")
         lines.append(f"    [{b.lo:.2f},{b.hi:.2f})  n={b.n}  read≈{b.predicted}  confirmed={b.actual}{flag}")
 
+    if by_outcome.get("confirmed") and not by_outcome.get("refuted"):
+        lines.append(
+            "\n⚠ every resolved fact CONFIRMED — no refutations in view. Until a refutation signal"
+            " (a retraction, or a contradicting fact) feeds the loop, the tuner sees only upside and"
+            " its suggestions skew toward higher confidence — treat them as provisional.")
+
     tuned, tuned_b = tune_decay(obs, base=base)
     lines.append(f"\nSUGGESTED weights — Brier {tuned_b}  (proposal only; needs sign-off)")
     for level in base.decay:
