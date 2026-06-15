@@ -45,8 +45,8 @@ extension SourceRating {
 
     var band: Band {
         if coldStart { return .neutral }
-        if reputation >= 0.75 { return .high }
-        if reputation >= 0.5 { return .medium }
-        return .low
+        if reputation >= 0.7 { return .high }      // "generally reliable" and up → green
+        if reputation >= 0.5 { return .medium }    // "mixed reliability" → amber
+        return .low                                 // "generally unreliable" / "unreliable" → red
     }
 }

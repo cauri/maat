@@ -32,7 +32,7 @@ struct LeadStoryCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Chip(text: story.confidenceWord, style: story.confidenceLevel.chip)
-                if story.hasPrimary { Chip(text: "primary source", style: .attributed) }
+                if story.hasPrimary { Chip(text: "primary-source backed", style: .attributed) }
                 Spacer(minLength: 0)
             }
             Text(story.fact)

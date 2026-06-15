@@ -683,20 +683,20 @@ def _is_primary_name(name: str) -> bool:
     return any(m in n for m in _PRIMARY_MARKERS)
 
 
-def _source_tier(reputation: float, is_primary: bool, cold_start: bool) -> str:
+def _source_tier(reputation: float, cold_start: bool) -> str:
+    """Reliability = truthfulness over time (BRIEF §6.2), in plain words. This is a SOURCE-level
+    standing — never claim-level corroboration, and never "primary source" (a per-claim role)."""
     if cold_start:
         return "not yet rated"
-    if is_primary:
-        return "primary source"
-    if reputation >= 0.8:
-        return "well-corroborated"
-    if reputation >= 0.65:
-        return "reliable"
+    if reputation >= 0.85:
+        return "highly reliable"
+    if reputation >= 0.7:
+        return "generally reliable"
     if reputation >= 0.5:
-        return "building"
-    if reputation >= 0.35:
-        return "often uncorroborated"
-    return "low"
+        return "mixed reliability"
+    if reputation >= 0.3:
+        return "generally unreliable"
+    return "unreliable"
 
 
 def _cluster_sources(cluster, art_source: dict, claim_art: dict) -> set[str]:
@@ -755,7 +755,7 @@ async def _source_ratings(pool) -> list[dict]:
             {
                 "name": s,
                 "reputation": round(reputation, 3),
-                "tier": _source_tier(reputation, is_primary, cold),
+                "tier": _source_tier(reputation, cold),
                 "is_primary": is_primary,
                 "n_stories": len(facts.get(s, set())),
                 "cold_start": cold,

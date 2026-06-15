@@ -1,19 +1,19 @@
 {
   "generated_at": "2026-06-15T12:00:00+00:00",
   "provisional": true,
-  "note": "SYNTHETIC offline fixture mirroring GET /api/sources. Reputation here is a provisional proxy (pre-#37): truthfulness over time isn't computed yet. Cold-start sources are shown neutrally (§6.6).",
+  "note": "SYNTHETIC offline fixture mirroring GET /api/sources. Reputation here is a provisional proxy (pre-#37) for source reliability — truthfulness over time. Cold-start sources are shown neutrally (§6.6).",
   "count": 11,
   "sources": [
-    { "name": "Valoria Ministry of Finance (official statement)", "reputation": 0.92, "tier": "primary source", "is_primary": true, "n_stories": 1, "cold_start": false, "trajectory": [0.86, 0.88, 0.9, 0.92], "languages": ["en"] },
-    { "name": "Préfecture des Bouches-du-Rhône (communiqué)", "reputation": 0.9, "tier": "primary source", "is_primary": true, "n_stories": 1, "cold_start": false, "trajectory": [0.88, 0.89, 0.9], "languages": ["fr"] },
-    { "name": "The Investigative Times", "reputation": 0.84, "tier": "well-corroborated", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.78, 0.8, 0.82, 0.84], "languages": ["en"] },
-    { "name": "AFP", "reputation": 0.8, "tier": "well-corroborated", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.79, 0.79, 0.8, 0.8], "languages": ["en"] },
-    { "name": "Le Méridional", "reputation": 0.72, "tier": "reliable", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.69, 0.7, 0.71, 0.72], "languages": ["fr"] },
-    { "name": "Daily Herald", "reputation": 0.64, "tier": "building", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.66, 0.65, 0.64], "languages": ["en"] },
-    { "name": "Morning Post", "reputation": 0.62, "tier": "building", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.63, 0.62, 0.62], "languages": ["en"] },
-    { "name": "Global Wire", "reputation": 0.45, "tier": "often uncorroborated", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.52, 0.49, 0.47, 0.45], "languages": ["en"] },
-    { "name": "Daily Mirror", "reputation": 0.4, "tier": "often uncorroborated", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.44, 0.42, 0.4], "languages": ["en"] },
-    { "name": "Evening Star", "reputation": 0.38, "tier": "low", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.42, 0.4, 0.38], "languages": ["en"] },
+    { "name": "Valoria Ministry of Finance (official statement)", "reputation": 0.92, "tier": "highly reliable", "is_primary": true, "n_stories": 1, "cold_start": false, "trajectory": [0.86, 0.88, 0.9, 0.92], "languages": ["en"] },
+    { "name": "Préfecture des Bouches-du-Rhône (communiqué)", "reputation": 0.9, "tier": "highly reliable", "is_primary": true, "n_stories": 1, "cold_start": false, "trajectory": [0.88, 0.89, 0.9], "languages": ["fr"] },
+    { "name": "The Investigative Times", "reputation": 0.84, "tier": "generally reliable", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.78, 0.8, 0.82, 0.84], "languages": ["en"] },
+    { "name": "AFP", "reputation": 0.8, "tier": "generally reliable", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.79, 0.79, 0.8, 0.8], "languages": ["en"] },
+    { "name": "Le Méridional", "reputation": 0.72, "tier": "generally reliable", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.69, 0.7, 0.71, 0.72], "languages": ["fr"] },
+    { "name": "Daily Herald", "reputation": 0.64, "tier": "mixed reliability", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.66, 0.65, 0.64], "languages": ["en"] },
+    { "name": "Morning Post", "reputation": 0.62, "tier": "mixed reliability", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.63, 0.62, 0.62], "languages": ["en"] },
+    { "name": "Global Wire", "reputation": 0.45, "tier": "generally unreliable", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.52, 0.49, 0.47, 0.45], "languages": ["en"] },
+    { "name": "Daily Mirror", "reputation": 0.4, "tier": "generally unreliable", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.44, 0.42, 0.4], "languages": ["en"] },
+    { "name": "Evening Star", "reputation": 0.38, "tier": "generally unreliable", "is_primary": false, "n_stories": 1, "cold_start": false, "trajectory": [0.42, 0.4, 0.38], "languages": ["en"] },
     { "name": "Korazon Daily", "reputation": 0.5, "tier": "not yet rated", "is_primary": false, "n_stories": 0, "cold_start": true, "trajectory": [0.5], "languages": ["pt"] }
   ]
 }

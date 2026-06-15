@@ -125,7 +125,7 @@ struct StoryDetailView: View {
     private var kicker: some View {
         HStack(spacing: 6) {
             Chip(text: s.confidenceWord, style: confidenceChip)
-            if s.hasPrimary { Chip(text: "primary source", style: .attributed) }
+            if s.hasPrimary { Chip(text: "primary-source backed", style: .attributed) }
             if s.extremity == .extraordinary { Chip(text: "extraordinary", style: .extraordinary) }
             Spacer(minLength: 6)
             Button {
@@ -234,7 +234,7 @@ struct StoryDetailView: View {
                 ConfidenceBar(story: s)
                 HStack(spacing: 6) {
                     ExtremityChip(extremity: s.extremity)
-                    if s.hasPrimary { Chip(text: "primary source", style: .fact) }
+                    if s.hasPrimary { Chip(text: "primary-source backed", style: .fact) }
                 }
             }
 
