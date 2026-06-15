@@ -530,6 +530,12 @@ def _story_json(cluster, claims_by_id: dict, meta: dict[str, dict]) -> dict:
         "id": cluster["id"],
         "fact": cluster["fact"],
         "confidence": float(cluster["confidence"] or 0.0),
+        "verdict": _confidence_label(
+            float(cluster["confidence"] or 0.0),
+            independent_originators=int(cluster["independent_originators"] or 0),
+            has_primary=bool(cluster["has_primary"]),
+            extremity=cluster["extremity"],
+        )[0],
         "extremity": cluster["extremity"] or "notable",
         "independent_originators": int(cluster["independent_originators"] or 0),
         "has_primary": bool(cluster["has_primary"]),
@@ -857,7 +863,12 @@ def _group_stories(clusters) -> list[list]:
 def _conf_bar(cl) -> str:
     conf = float(cl["confidence"] or 0.0)
     pct = round(conf * 100)
-    label, tier = _confidence_label(conf)
+    label, tier = _confidence_label(
+        conf,
+        independent_originators=cl["independent_originators"],
+        has_primary=cl["has_primary"],
+        extremity=cl["extremity"],
+    )
     return (
         f'<div class="conf {tier}"><div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
         f'<span class="cpct">{pct}%</span><span class="label {tier}">{html.escape(label)}</span></div>'

@@ -177,6 +177,26 @@ def test_confidence_read_rises_with_corroboration_and_primary():
     assert confidence_read(1, False) < confidence_read(2, True)
 
 
+def test_confidence_label_names_the_failure_mode():
+    from maat.pipeline.corroborate import confidence_label
+
+    # strong reads -> positive verdict
+    assert confidence_label(0.92) == ("Well corroborated", "hi")
+    assert confidence_label(0.70) == ("Corroborated", "mid")
+    # bare weak call (no signals) -> generic tiers, so the eval + other callers are unchanged
+    assert confidence_label(0.32) == ("Thinly sourced", "floor")
+    assert confidence_label(0.50) == ("Limited corroboration", "lo")
+    # WITH the cluster's signals -> NAME the failure mode (cauri's Item-3 call)
+    assert confidence_label(0.50, independent_originators=1, has_primary=False,
+                            extremity="notable") == ("Single source", "lo")
+    # the gold-leak shape: one source, extraordinary -> named specifically, not generic
+    assert confidence_label(0.24, independent_originators=1, has_primary=False,
+                            extremity="extraordinary") == ("Single source · extraordinary claim", "floor")
+    # several originators but not enough for an extraordinary claim
+    assert confidence_label(0.50, independent_originators=3, has_primary=False,
+                            extremity="extraordinary") == ("Not yet established · extraordinary claim", "lo")
+
+
 def test_agglomerate_resists_single_link_chaining():
     from maat.pipeline.corroborate import _agglomerate
 

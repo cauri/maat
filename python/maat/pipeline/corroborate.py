@@ -289,19 +289,34 @@ def confidence_read(
     return round(min(base, 0.97), 2)
 
 
-def confidence_label(conf: float) -> tuple[str, str]:
-    """Gate-the-floor labelling (§5.7): a verbal verdict + colour tier for a confidence read.
+def confidence_label(
+    conf: float,
+    *,
+    independent_originators: int | None = None,
+    has_primary: bool | None = None,
+    extremity: str | None = None,
+) -> tuple[str, str]:
+    """Gate-the-floor verdict (§5.7): a verbal label + colour tier for a confidence read.
 
-    The bottom tier is the gate — below it a claim is flagged 'thinly sourced', not presented
-    as established. DRAFT thresholds; co-design with cauri.
+    Strong reads get a positive verdict; for weak reads, when the cluster's signals are passed,
+    the label NAMES the failure mode (cauri: be specific — single source, not just "thin") so a
+    reader sees *why* it's weak. A bare call (conf only) returns the generic tiers, so existing
+    callers/eval are unchanged. We always SHOW the claim and flag it — never hide. Cut-points
+    and wording are DRAFT (cauri: start here, adjust on real data).
     """
     if conf >= 0.85:
         return ("Well corroborated", "hi")
     if conf >= 0.60:
         return ("Corroborated", "mid")
-    if conf >= 0.40:
-        return ("Limited corroboration", "lo")
-    return ("Thinly sourced", "floor")
+    tier = "floor" if conf < 0.40 else "lo"
+    if independent_originators is not None:  # name the failure mode
+        big = extremity in ("significant", "extraordinary")
+        if independent_originators <= 1 and not has_primary:
+            return ("Single source · extraordinary claim" if big else "Single source", tier)
+        if big:
+            return ("Not yet established · extraordinary claim", tier)
+        return ("Thinly corroborated", tier)
+    return ("Limited corroboration" if conf >= 0.40 else "Thinly sourced", tier)
 
 
 def corroborate(
