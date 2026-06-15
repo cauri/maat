@@ -11,7 +11,9 @@ final class AppSettings {
     /// in Settings; cleared → the bundled fixture (offline fallback). The feed store also falls back to
     /// the fixture automatically if the server is unreachable.
     /// TODO: move to a per-build-config value (xcconfig) for Debug/Release split.
-    static let defaultAPIBaseURL = "https://api.maat.press"
+    /// `nonisolated` so the (nonisolated) `IntentDataSource` in the App Intents extension can read this
+    /// default reader URL; it's an immutable constant, so it's safe outside the main actor.
+    nonisolated static let defaultAPIBaseURL = "https://api.maat.press"
 
     /// Base URL of the Maat reader. Empty → bundled fixture. Defaults to `defaultAPIBaseURL`.
     var apiBaseURL: String {
@@ -76,7 +78,11 @@ final class TopicStore {
     }
 
     func remove(at offsets: IndexSet) {
-        topics.remove(atOffsets: offsets)
+        // Foundation-only (no SwiftUI `remove(atOffsets:)`): this type compiles into the App Intents
+        // extension too (Maat/Shared), which doesn't link SwiftUI. Remove high→low so indices stay valid.
+        for index in offsets.sorted(by: >) where topics.indices.contains(index) {
+            topics.remove(at: index)
+        }
     }
 }
 

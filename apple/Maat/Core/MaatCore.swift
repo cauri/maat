@@ -51,6 +51,9 @@ final class MaatCore {
         await feed.applyRerank(FoundationModelsReranker(), topics: topics.topics)
         await feed.refreshSources()
         didBootstrap = true
+        // Donate the loaded stories to Spotlight so they're findable system-wide (#83). Best-effort
+        // and off the hot path; a Spotlight hit resolves back to `StoryEntity` (an `IndexedEntity`).
+        SpotlightDonor.donate(feed.displayStories)
     }
 
     /// Reputation ratings, loading first if an intent runs before the UI ever did.
