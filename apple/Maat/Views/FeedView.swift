@@ -11,7 +11,12 @@ struct FeedView: View {
         NavigationStack(path: $router.feedPath) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if feed.usingFallback, let error = feed.error {
+                    if feed.servingCache, let date = feed.cacheDate {
+                        FallbackBanner(
+                            message: "Offline — showing your last update from \(date.formatted(.relative(presentation: .numeric)))",
+                            icon: "clock.arrow.circlepath"
+                        ).padding(.bottom, 14)
+                    } else if feed.usingFallback, let error = feed.error {
                         FallbackBanner(message: error).padding(.bottom, 14)
                     }
 
@@ -69,9 +74,10 @@ struct FeedView: View {
 
 struct FallbackBanner: View {
     var message: String
+    var icon: String = "internaldrive"
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "internaldrive")
+            Image(systemName: icon)
             Text(message).font(.footnote)
             Spacer(minLength: 0)
         }
