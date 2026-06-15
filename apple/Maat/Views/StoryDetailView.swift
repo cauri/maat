@@ -4,9 +4,9 @@ import SwiftUI
 import Translation
 #endif
 
-// Read-first story detail (BRIEF §1). The fact + on-device summary lead; the confidence read and the
-// per-source reputation sit beneath; the claim-level veracity machinery (§5.2–5.6) tucks behind a
-// "Why this confidence" disclosure so reading comes first. Translate / go deeper / comment / pin stay.
+// The reader (BRIEF §1 — the primary purpose is to read the news). The full article body leads, with
+// a switcher across the outlets covering the story; confidence, corroboration, reputation and the
+// claim-level veracity sit beneath as *context for what you read*. Translate / pin / comment / deeper.
 
 struct StoryDetailView: View {
     let story: Story
@@ -16,54 +16,102 @@ struct StoryDetailView: View {
     @Environment(Analytics.self) private var analytics
     @Environment(PinStore.self) private var pins
 
+    @State private var full: Story?
+    @State private var selectedArticleID: String?
+
     @State private var summary: String?
     @State private var summarizing = false
 
     @State private var translator = TranslationController()
     @State private var showTranslated = false
     @State private var translating = false
-    @State private var translatedFact: String?
+    @State private var translatedTitle: [String: String] = [:]
+    @State private var translatedBody: [String: String] = [:]
     @State private var translatedClaims: [String: String] = [:]
 
     @State private var deeper: Deeper?
     @State private var loadingDeeper = false
-
     @State private var feedback: EngagementSignal?
     @State private var openedAt = Date.now
 
-    private var needsTranslation: Bool { story.primaryLanguage != settings.displayLanguageCode }
-    private var displayFact: String { (showTranslated ? translatedFact : nil) ?? story.fact }
+    // MARK: Derived
+
+    private var s: Story { full ?? story }
+    private var articles: [Article] { s.articles ?? [] }
+    private var hasBody: Bool { !articles.isEmpty }
+
+    /// Most-reputable / primary article reads by default; the reader can switch outlets.
+    private var defaultArticle: Article? {
+        articles.max { reputationScore(of: $0) < reputationScore(of: $1) }
+    }
+
+    private var selectedArticle: Article? {
+        if let id = selectedArticleID, let match = articles.first(where: { $0.id == id }) { return match }
+        return defaultArticle
+    }
+
+    private func reputationScore(of article: Article) -> Double {
+        guard let source = article.source, let rating = feed.rating(for: source) else { return 0.5 }
+        return rating.reputation + (rating.isPrimary ? 1 : 0)
+    }
+
+    private var articleLanguage: String { selectedArticle?.language ?? s.primaryLanguage }
+    private var needsTranslation: Bool { articleLanguage != settings.displayLanguageCode }
+
+    private var displayTitle: String {
+        let original = selectedArticle?.title ?? s.fact
+        if showTranslated, let id = selectedArticle?.id, let t = translatedTitle[id] { return t }
+        return original
+    }
+
+    private var displayBody: String {
+        guard let article = selectedArticle else { return "" }
+        if showTranslated, let t = translatedBody[article.id] { return t }
+        return article.body
+    }
 
     private var orderedSources: [String] {
         var seen = Set<String>()
-        return story.originatorGroups
-            .sorted { !$0.collapsed && $1.collapsed }  // independent originators first (§5.5)
+        return s.originatorGroups
+            .sorted { !$0.collapsed && $1.collapsed }
             .flatMap(\.sources)
             .filter { seen.insert($0).inserted }
     }
 
+    private var confidenceChip: ChipStyle {
+        switch s.confidenceLevel {
+        case .high: return .fact
+        case .medium: return .projection
+        case .low: return .extraordinary
+        }
+    }
+
+    // MARK: Body
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                header
-                summarySection
-                confidenceSection
-                sourcesSection
-                actionsSection
-                deeperSection
-                whySection
-                commentsLink
+            VStack(alignment: .leading, spacing: 14) {
+                kicker
+                Text(displayTitle)
+                    .font(.system(.title, design: .serif).weight(.bold))
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                byline
+                if needsTranslation { translateButton }
+                Divider().overlay(Palette.line)
+                articleBody
+                contextSections
             }
             .padding()
         }
         .background(Palette.bg)
-        .navigationTitle("Story")
+        .navigationTitle(selectedArticle?.source ?? "Story")
         #if canImport(Translation)
         .translationTask(translator.configuration) { session in
             await translator.fulfill(using: session)
         }
         #endif
-        .task { await summarize() }
+        .task { await load() }
         .onAppear {
             openedAt = .now
             analytics.record(.storyOpened, storyID: story.id)
@@ -74,104 +122,178 @@ struct StoryDetailView: View {
         }
     }
 
-    // MARK: Sections
-
-    private var header: some View {
-        SectionCard {
-            HStack {
-                ExtremityChip(extremity: story.extremity)
-                Spacer(minLength: 8)
-                Button {
-                    pins.toggle(story.id)
-                } label: {
-                    Image(systemName: pins.isPinned(story.id) ? "bookmark.fill" : "bookmark")
-                }
-                .tint(pins.isPinned(story.id) ? Palette.confHigh : Palette.muted)
-                .accessibilityLabel(pins.isPinned(story.id) ? "Unpin story" : "Pin story")
+    private var kicker: some View {
+        HStack(spacing: 6) {
+            Chip(text: "\(s.confidencePercent)% corroborated", style: confidenceChip)
+            if s.hasPrimary { Chip(text: "primary source", style: .attributed) }
+            if s.extremity == .extraordinary { Chip(text: "extraordinary", style: .extraordinary) }
+            Spacer(minLength: 6)
+            Button {
+                pins.toggle(story.id)
+            } label: {
+                Image(systemName: pins.isPinned(story.id) ? "bookmark.fill" : "bookmark")
             }
-            Text(displayFact)
-                .font(.system(.title3, design: .serif).weight(.semibold))
-                .foregroundStyle(Palette.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(orderedSources.joined(separator: " · "))
-                .font(.caption)
-                .foregroundStyle(Palette.muted)
+            .tint(pins.isPinned(story.id) ? Palette.confHigh : Palette.muted)
+            .accessibilityLabel(pins.isPinned(story.id) ? "Unpin story" : "Pin story")
         }
     }
 
-    private var summarySection: some View {
-        SectionCard(title: "Summary") {
-            if summarizing {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text("Summarising on-device…").foregroundStyle(Palette.muted)
-                }
-            } else {
-                Text((showTranslated ? translatedFact : nil) ?? summary ?? "—")
-                    .foregroundStyle(Palette.ink)
-            }
-            if !Intelligence.isAvailable {
-                Text(Intelligence.statusDescription).font(.caption2).foregroundStyle(Palette.muted)
-            }
-        }
-    }
-
-    private var confidenceSection: some View {
-        SectionCard(title: "Confidence") {
-            ConfidenceBar(story: story)
-            HStack(spacing: 6) {
-                ExtremityChip(extremity: story.extremity)
-                if story.hasPrimary { Chip(text: "primary source", style: .fact) }
-            }
-        }
-    }
-
-    private var sourcesSection: some View {
-        SectionCard(title: "Sources & reputation") {
-            ForEach(orderedSources, id: \.self) { name in
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(name).font(.subheadline).foregroundStyle(Palette.ink)
-                        if let rating = feed.rating(for: name) {
-                            Text(rating.tier).font(.caption2).foregroundStyle(rating.band.color)
+    private var byline: some View {
+        HStack(spacing: 8) {
+            if articles.count > 1 {
+                Menu {
+                    ForEach(articles) { article in
+                        Button {
+                            selectedArticleID = article.id
+                            showTranslated = false
+                        } label: {
+                            Text(sourceMenuLabel(article))
                         }
                     }
-                    Spacer(minLength: 8)
-                    if let rating = feed.rating(for: name) {
-                        Text(rating.coldStart ? "—" : "\(rating.score)")
-                            .font(.subheadline.weight(.semibold)).monospacedDigit()
-                            .foregroundStyle(rating.coldStart ? Palette.muted : rating.band.color)
-                    }
+                } label: {
+                    Label(selectedArticle?.source ?? "Source", systemImage: "newspaper")
+                        .font(.subheadline.weight(.medium))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
-                if name != orderedSources.last { Divider().overlay(Palette.line) }
+                .tint(Palette.ink)
+            } else {
+                Text(selectedArticle?.source ?? "")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Palette.ink)
+            }
+            if let source = selectedArticle?.source, let rating = feed.rating(for: source) {
+                Text("· reputation \(rating.coldStart ? "—" : "\(rating.score)")")
+                    .font(.caption).foregroundStyle(rating.band.color)
+            }
+            Spacer(minLength: 0)
+            if articleLanguage != "en" {
+                Text(articleLanguage.uppercased()).font(.caption2).foregroundStyle(Palette.muted)
             }
         }
     }
 
-    private var actionsSection: some View {
-        SectionCard(title: "This story") {
-            if needsTranslation {
-                Button {
-                    Task { await toggleTranslate() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if translating { ProgressView() }
-                        Image(systemName: "character.bubble")
-                        Text(showTranslated
-                             ? "Show original (\(story.primaryLanguage.uppercased()))"
-                             : "Translate to \(settings.displayLanguageCode.uppercased())")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(translating)
+    private func sourceMenuLabel(_ article: Article) -> String {
+        guard let source = article.source else { return "Unknown source" }
+        if let rating = feed.rating(for: source), !rating.coldStart {
+            return "\(source) · \(rating.score)"
+        }
+        return source
+    }
+
+    private var translateButton: some View {
+        Button {
+            Task { await toggleTranslate() }
+        } label: {
+            HStack(spacing: 6) {
+                if translating { ProgressView() }
+                Image(systemName: "character.bubble")
+                Text(showTranslated
+                     ? "Show original (\(articleLanguage.uppercased()))"
+                     : "Translate to \(settings.displayLanguageCode.uppercased())")
             }
+        }
+        .buttonStyle(.bordered)
+        .disabled(translating)
+    }
+
+    @ViewBuilder private var articleBody: some View {
+        if hasBody {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(displayBody.components(separatedBy: "\n\n").enumerated()), id: \.offset) { _, para in
+                    Text(para)
+                        .font(.system(.body, design: .serif))
+                        .lineSpacing(5)
+                        .foregroundStyle(Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        } else {
+            SectionCard(title: "In brief · on-device") {
+                if summarizing {
+                    HStack(spacing: 8) { ProgressView(); Text("Summarising…").foregroundStyle(Palette.muted) }
+                } else {
+                    Text(summary ?? s.fact).foregroundStyle(Palette.ink)
+                }
+                Text("Full article text isn't available for this story yet.")
+                    .font(.caption2).foregroundStyle(Palette.muted)
+            }
+        }
+    }
+
+    // MARK: Context (veracity & reputation, beneath the article)
+
+    private var contextSections: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Context — how trustworthy is this")
+                .font(.caption.weight(.semibold))
+                .textCase(.uppercase)
+                .foregroundStyle(Palette.muted)
+                .padding(.top, 6)
+
+            SectionCard(title: "Confidence") {
+                ConfidenceBar(story: s)
+                HStack(spacing: 6) {
+                    ExtremityChip(extremity: s.extremity)
+                    if s.hasPrimary { Chip(text: "primary source", style: .fact) }
+                }
+            }
+
+            SectionCard(title: "Sources & reputation") {
+                ForEach(orderedSources, id: \.self) { name in
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(name).font(.subheadline).foregroundStyle(Palette.ink)
+                            if let rating = feed.rating(for: name) {
+                                Text(rating.tier).font(.caption2).foregroundStyle(rating.band.color)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                        if let rating = feed.rating(for: name) {
+                            Text(rating.coldStart ? "—" : "\(rating.score)")
+                                .font(.subheadline.weight(.semibold)).monospacedDigit()
+                                .foregroundStyle(rating.coldStart ? Palette.muted : rating.band.color)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                    if name != orderedSources.last { Divider().overlay(Palette.line) }
+                }
+            }
+
+            SectionCard {
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Independent originators, not spread")
+                            .font(.caption).foregroundStyle(Palette.muted)
+                        OriginatorList(groups: s.originatorGroups)
+                        Text("Claims").font(.caption).foregroundStyle(Palette.muted).padding(.top, 4)
+                        ForEach(s.claims) { claim in
+                            VStack(alignment: .leading, spacing: 6) {
+                                ClaimBadges(claim: claim)
+                                Text((showTranslated ? translatedClaims[claim.id] : nil) ?? claim.text)
+                                    .font(.subheadline).foregroundStyle(Palette.ink)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                            if claim.id != s.claims.last?.id { Divider().overlay(Palette.line) }
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text("Claims & why this confidence")
+                        .font(.subheadline.weight(.medium)).foregroundStyle(Palette.ink)
+                }
+                .tint(Palette.muted)
+            }
+
+            deeperSection
             HStack(spacing: 12) {
                 feedbackButton(.feedbackUp, icon: "hand.thumbsup")
                 feedbackButton(.feedbackDown, icon: "hand.thumbsdown")
                 Spacer(minLength: 0)
             }
+            commentsLink
         }
     }
 
@@ -210,38 +332,9 @@ struct StoryDetailView: View {
         }
     }
 
-    private var whySection: some View {
-        SectionCard {
-            DisclosureGroup {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Independent originators, not spread")
-                        .font(.caption).foregroundStyle(Palette.muted)
-                    OriginatorList(groups: story.originatorGroups)
-                    Text("Claims").font(.caption).foregroundStyle(Palette.muted).padding(.top, 4)
-                    ForEach(story.claims) { claim in
-                        VStack(alignment: .leading, spacing: 6) {
-                            ClaimBadges(claim: claim)
-                            Text((showTranslated ? translatedClaims[claim.id] : nil) ?? claim.text)
-                                .font(.subheadline)
-                                .foregroundStyle(Palette.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-                        if claim.id != story.claims.last?.id { Divider().overlay(Palette.line) }
-                    }
-                }
-                .padding(.top, 8)
-            } label: {
-                Text("Why this confidence").font(.subheadline.weight(.medium)).foregroundStyle(Palette.ink)
-            }
-            .tint(Palette.muted)
-        }
-    }
-
     private var commentsLink: some View {
         NavigationLink {
-            CommentsView(story: story)
+            CommentsView(story: s)
         } label: {
             SectionCard(title: "Comments") {
                 HStack {
@@ -268,36 +361,46 @@ struct StoryDetailView: View {
 
     // MARK: Actions
 
+    private func load() async {
+        if full == nil {
+            full = try? await feed.loadStory(id: story.id, deeper: false)
+        }
+        if selectedArticleID == nil { selectedArticleID = defaultArticle?.id }
+        await summarize()
+    }
+
     private func summarize() async {
         guard summary == nil else { return }
         summarizing = true
         defer { summarizing = false }
-        summary = await FoundationModelsSummarizer().summarize(story)
+        summary = await FoundationModelsSummarizer().summarize(s)
         analytics.record(.readSummary, storyID: story.id)
     }
 
     private func toggleTranslate() async {
         if showTranslated { showTranslated = false; return }
-        if translatedFact == nil {
+        guard let article = selectedArticle else { return }
+        if translatedBody[article.id] == nil {
             translating = true
             defer { translating = false }
             translator.preferOnDevice = settings.preferOnDeviceTranslation
             translator.cloud = settings.apiBaseURL.isEmpty
                 ? nil
                 : URL(string: settings.apiBaseURL).map { CloudTranslator(baseURL: $0) }
-            let texts = [story.fact] + story.claims.map(\.text)
+            let texts = [article.title ?? s.fact, article.body] + s.claims.map(\.text)
             let out = await translator.translate(
-                texts, to: settings.displayLanguageCode, from: story.primaryLanguage
+                texts, to: settings.displayLanguageCode, from: article.language
             )
             if out.count == texts.count {
-                translatedFact = out[0]
-                for (index, claim) in story.claims.enumerated() {
-                    translatedClaims[claim.id] = out[index + 1]
+                translatedTitle[article.id] = out[0]
+                translatedBody[article.id] = out[1]
+                for (index, claim) in s.claims.enumerated() {
+                    translatedClaims[claim.id] = out[index + 2]
                 }
             }
             analytics.record(.translated, storyID: story.id)
         }
-        showTranslated = translatedFact != nil
+        showTranslated = translatedBody[article.id] != nil
     }
 
     private func goDeeper() async {

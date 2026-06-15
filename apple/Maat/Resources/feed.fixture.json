@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-06-14T12:00:00+00:00",
   "count": 3,
-  "_note": "SYNTHETIC offline fixture mirroring GET /api/feed. Lets the client build, preview, and run with no backend. Story 1 is the corpus resignation-scandal cluster (§5.5 wire-collapse + primary); story 2 is an extraordinary, wire-only, low-confidence claim (§5.6 extremity); story 3 is French, to exercise on-device translation (§4, #54).",
+  "_note": "SYNTHETIC offline fixture mirroring GET /api/feed + the detail's `articles` (full bodies the reader reads). Story 1 is the corpus resignation-scandal cluster (§5.5 wire-collapse + primary); story 2 is extraordinary + wire-only (§5.6); story 3 is French (on-device translation, #54).",
   "stories": [
     {
       "id": "cluster-resignation",
@@ -18,48 +18,16 @@
         { "sources": ["Valoria Ministry of Finance (official statement)"], "collapsed": false }
       ],
       "claims": [
-        {
-          "id": "11111111-1111-1111-1111-111111111111",
-          "text": "Valoria's finance minister Daniel Reyes resigned on Tuesday amid a widening procurement scandal.",
-          "voice": "attributed",
-          "speaker": "the finance ministry",
-          "kind": "fact",
-          "is_synthesis": false,
-          "horizon": null,
-          "in_headline": true,
-          "evidence_span": "the finance ministry said",
-          "article_id": "afp-2026-0601",
-          "source": "AFP",
-          "language": "en"
-        },
-        {
-          "id": "22222222-2222-2222-2222-222222222222",
-          "text": "Three state contracts were routed through a shell company controlled by Reyes's brother-in-law.",
-          "voice": "own",
-          "speaker": null,
-          "kind": "fact",
-          "is_synthesis": true,
-          "horizon": null,
-          "in_headline": false,
-          "evidence_span": "this paper revealed",
-          "article_id": "investigativetimes-2026-0601",
-          "source": "The Investigative Times",
-          "language": "en"
-        },
-        {
-          "id": "33333333-3333-3333-3333-333333333333",
-          "text": "An independent review of recent procurement decisions will commence under an external auditor.",
-          "voice": "own",
-          "speaker": null,
-          "kind": "fact",
-          "is_synthesis": false,
-          "horizon": null,
-          "in_headline": false,
-          "evidence_span": "An independent review ... will commence",
-          "article_id": "ministry-statement-2026-0601",
-          "source": "Valoria Ministry of Finance (official statement)",
-          "language": "en"
-        }
+        { "id": "11111111-1111-1111-1111-111111111111", "text": "Valoria's finance minister Daniel Reyes resigned on Tuesday amid a widening procurement scandal.", "voice": "attributed", "speaker": "the finance ministry", "kind": "fact", "is_synthesis": false, "horizon": null, "in_headline": true, "evidence_span": "the finance ministry said", "article_id": "afp-2026-0601", "source": "AFP", "language": "en" },
+        { "id": "22222222-2222-2222-2222-222222222222", "text": "Three state contracts were routed through a shell company controlled by Reyes's brother-in-law.", "voice": "own", "speaker": null, "kind": "fact", "is_synthesis": true, "horizon": null, "in_headline": false, "evidence_span": "this paper revealed", "article_id": "investigativetimes-2026-0601", "source": "The Investigative Times", "language": "en" },
+        { "id": "33333333-3333-3333-3333-333333333333", "text": "An independent review of recent procurement decisions will commence under an external auditor.", "voice": "own", "speaker": null, "kind": "fact", "is_synthesis": false, "horizon": null, "in_headline": false, "evidence_span": "An independent review ... will commence", "article_id": "ministry-statement-2026-0601", "source": "Valoria Ministry of Finance (official statement)", "language": "en" }
+      ],
+      "articles": [
+        { "id": "ministry-statement-2026-0601", "source": "Valoria Ministry of Finance (official statement)", "title": "Statement on the resignation of the Minister of Finance", "language": "en", "ingested_at": "2026-06-01T16:10:00+00:00", "body": "The Minister of Finance, Daniel Reyes, has today tendered his resignation, effective immediately.\n\nAn independent review of recent procurement decisions will commence under an external auditor. The findings will be made public on completion.\n\nThe Ministry thanks Mr Reyes for his service and will ensure continuity of operations. The Deputy Minister will assume the Minister's duties pending the appointment of a successor." },
+        { "id": "investigativetimes-2026-0601", "source": "The Investigative Times", "title": "Reyes steps down days after our shell-company revelations", "language": "en", "ingested_at": "2026-06-01T14:30:00+00:00", "body": "Daniel Reyes stepped down from Valoria's finance ministry on Tuesday, days after this paper revealed that three state contracts had been routed through a shell company controlled by his brother-in-law.\n\nReyes denied wrongdoing but said an independent inquiry was warranted. Documents reviewed by this paper show the contracts, worth a combined 40 million, bypassed the usual competitive tender process.\n\nThe shell company was incorporated weeks before the first award and lists an address shared with a family business, according to corporate filings." },
+        { "id": "afp-2026-0601", "source": "AFP", "title": "Valoria finance minister resigns amid procurement scandal", "language": "en", "ingested_at": "2026-06-01T13:00:00+00:00", "body": "Valoria's finance minister, Daniel Reyes, resigned on Tuesday amid a widening procurement scandal, the finance ministry said.\n\nReyes had faced mounting pressure over state contracts awarded to a firm linked to his family. 'I am stepping down to allow a full and independent inquiry,' he said in a statement.\n\nThe ministry said the resignation took effect immediately and that a deputy would assume his duties pending a successor." },
+        { "id": "herald-2026-0601", "source": "Daily Herald", "title": "Valoria finance minister resigns amid procurement scandal", "language": "en", "ingested_at": "2026-06-01T13:40:00+00:00", "body": "Valoria's finance minister, Daniel Reyes, resigned on Tuesday amid a widening procurement scandal, the finance ministry said.\n\nReyes had faced mounting pressure over state contracts awarded to a firm linked to his family. He said he was stepping down to allow a full and independent inquiry." },
+        { "id": "morningpost-2026-0601", "source": "Morning Post", "title": "Reyes quits as Valoria finance minister", "language": "en", "ingested_at": "2026-06-01T14:05:00+00:00", "body": "Valoria's finance minister Daniel Reyes resigned on Tuesday amid a widening procurement scandal, the finance ministry said, according to AFP.\n\nReyes had faced mounting pressure over state contracts awarded to a firm linked to his family. He did not admit wrongdoing." }
       ]
     },
     {
@@ -75,34 +43,13 @@
         { "sources": ["Global Wire", "Daily Mirror", "Evening Star"], "collapsed": true }
       ],
       "claims": [
-        {
-          "id": "44444444-4444-4444-4444-444444444444",
-          "text": "Country X's central bank secretly sold its entire gold reserve, according to a leaked memo.",
-          "voice": "attributed",
-          "speaker": "a leaked memo",
-          "kind": "fact",
-          "is_synthesis": false,
-          "horizon": null,
-          "in_headline": true,
-          "evidence_span": "according to a leaked memo",
-          "article_id": "globalwire-2026-0608",
-          "source": "Global Wire",
-          "language": "en"
-        },
-        {
-          "id": "55555555-5555-5555-5555-555555555555",
-          "text": "Analysts warn the currency could collapse within a week.",
-          "voice": "attributed",
-          "speaker": "analysts",
-          "kind": "projection",
-          "is_synthesis": false,
-          "horizon": "short-term",
-          "in_headline": false,
-          "evidence_span": "Analysts warn",
-          "article_id": "globalwire-2026-0608",
-          "source": "Global Wire",
-          "language": "en"
-        }
+        { "id": "44444444-4444-4444-4444-444444444444", "text": "Country X's central bank secretly sold its entire gold reserve, according to a leaked memo.", "voice": "attributed", "speaker": "a leaked memo", "kind": "fact", "is_synthesis": false, "horizon": null, "in_headline": true, "evidence_span": "according to a leaked memo", "article_id": "globalwire-2026-0608", "source": "Global Wire", "language": "en" },
+        { "id": "55555555-5555-5555-5555-555555555555", "text": "Analysts warn the currency could collapse within a week.", "voice": "attributed", "speaker": "analysts", "kind": "projection", "is_synthesis": false, "horizon": "short-term", "in_headline": false, "evidence_span": "Analysts warn", "article_id": "globalwire-2026-0608", "source": "Global Wire", "language": "en" }
+      ],
+      "articles": [
+        { "id": "globalwire-2026-0608", "source": "Global Wire", "title": "Leaked memo: Country X sold its entire gold reserve in secret", "language": "en", "ingested_at": "2026-06-08T09:00:00+00:00", "body": "A leaked internal memo suggests that Country X's central bank quietly sold its entire gold reserve over the past quarter, according to a document seen by Global Wire.\n\nThe bank has not confirmed the memo's authenticity, and Global Wire was unable to independently verify the document. Analysts cautioned that the claim rests on a single, unverified source.\n\n'If it proved true, the currency could come under severe pressure within a week,' one analyst said, while stressing that the memo had not been authenticated." },
+        { "id": "dailymirror-2026-0608", "source": "Daily Mirror", "title": "Country X 'dumped its gold', leaked memo claims", "language": "en", "ingested_at": "2026-06-08T11:20:00+00:00", "body": "Country X's central bank secretly offloaded its gold reserves, a leaked memo claims, in a report first carried by Global Wire.\n\nOfficials did not respond to requests for comment. No second source has corroborated the document." },
+        { "id": "eveningstar-2026-0608", "source": "Evening Star", "title": "Shock gold-reserve claims sweep markets", "language": "en", "ingested_at": "2026-06-08T12:45:00+00:00", "body": "Shock claims that Country X dumped its entire gold stockpile circulated on Thursday, based on a single leaked memo.\n\nThe central bank has not commented, and the document remains unverified." }
       ]
     },
     {
@@ -119,34 +66,12 @@
         { "sources": ["Préfecture des Bouches-du-Rhône (communiqué)"], "collapsed": false }
       ],
       "claims": [
-        {
-          "id": "66666666-6666-6666-6666-666666666666",
-          "text": "Les incendies près de Marseille ont forcé des milliers de personnes à évacuer mardi soir.",
-          "voice": "own",
-          "speaker": null,
-          "kind": "fact",
-          "is_synthesis": false,
-          "horizon": null,
-          "in_headline": true,
-          "evidence_span": "des milliers de personnes à évacuer",
-          "article_id": "meridional-2026-0610",
-          "source": "Le Méridional",
-          "language": "fr"
-        },
-        {
-          "id": "77777777-7777-7777-7777-777777777777",
-          "text": "La préfecture a déclaré l'état d'urgence dans trois communes.",
-          "voice": "attributed",
-          "speaker": "la préfecture",
-          "kind": "fact",
-          "is_synthesis": false,
-          "horizon": null,
-          "in_headline": false,
-          "evidence_span": "a déclaré l'état d'urgence",
-          "article_id": "prefecture-2026-0610",
-          "source": "Préfecture des Bouches-du-Rhône (communiqué)",
-          "language": "fr"
-        }
+        { "id": "66666666-6666-6666-6666-666666666666", "text": "Les incendies près de Marseille ont forcé des milliers de personnes à évacuer mardi soir.", "voice": "own", "speaker": null, "kind": "fact", "is_synthesis": false, "horizon": null, "in_headline": true, "evidence_span": "des milliers de personnes à évacuer", "article_id": "meridional-2026-0610", "source": "Le Méridional", "language": "fr" },
+        { "id": "77777777-7777-7777-7777-777777777777", "text": "La préfecture a déclaré l'état d'urgence dans trois communes.", "voice": "attributed", "speaker": "la préfecture", "kind": "fact", "is_synthesis": false, "horizon": null, "in_headline": false, "evidence_span": "a déclaré l'état d'urgence", "article_id": "prefecture-2026-0610", "source": "Préfecture des Bouches-du-Rhône (communiqué)", "language": "fr" }
+      ],
+      "articles": [
+        { "id": "meridional-2026-0610", "source": "Le Méridional", "title": "Incendies près de Marseille : des milliers d'évacués", "language": "fr", "ingested_at": "2026-06-10T20:30:00+00:00", "body": "Les incendies qui ont éclaté près de Marseille ont forcé des milliers de personnes à évacuer mardi soir, alors que des vents violents poussaient les flammes vers les zones résidentielles.\n\nLes pompiers, appuyés par des moyens aériens, ont lutté toute la nuit pour contenir le feu. Aucune victime n'était à déplorer dans l'immédiat, selon les secours.\n\nPlusieurs routes ont été coupées et la circulation des trains régionaux interrompue." },
+        { "id": "prefecture-2026-0610", "source": "Préfecture des Bouches-du-Rhône (communiqué)", "title": "Communiqué : état d'urgence déclaré dans trois communes", "language": "fr", "ingested_at": "2026-06-10T21:15:00+00:00", "body": "La préfecture des Bouches-du-Rhône a déclaré l'état d'urgence dans trois communes en raison des incendies en cours.\n\nLes habitants des secteurs concernés sont appelés à évacuer sans délai et à suivre les consignes des autorités. Des centres d'accueil ont été ouverts dans les communes voisines.\n\nLes services de secours restent pleinement mobilisés." }
       ]
     }
   ]

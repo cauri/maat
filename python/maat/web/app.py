@@ -522,6 +522,43 @@ def _claim_json(c: dict, meta: dict[str, dict]) -> dict:
     }
 
 
+async def _article_full_map(pool) -> dict[str, dict]:
+    rows = await pool.fetch(
+        "select id, source, title, url, language, body, ingested_at from articles"
+    )
+    return {r["id"]: dict(r) for r in rows}
+
+
+def _article_json(a: dict) -> dict:
+    ts = a.get("ingested_at")
+    return {
+        "id": a["id"],
+        "source": a.get("source"),
+        "title": a.get("title"),
+        "body": a.get("body") or "",
+        "url": a.get("url"),
+        "language": a.get("language") or "en",
+        "ingested_at": ts.isoformat() if ts else None,
+    }
+
+
+def _cluster_article_ids(cluster, claims_by_id: dict) -> list[str]:
+    """Distinct article ids behind a cluster (the full texts a reader can read), in a stable order."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for cid in (str(x) for x in _jload(cluster["claim_ids"])):
+        c = claims_by_id.get(cid)
+        if c and c["article_id"] not in seen:
+            seen.add(c["article_id"])
+            ids.append(c["article_id"])
+    for grp in _jload(cluster["originators"]):
+        for aid in grp:
+            if aid not in seen:
+                seen.add(aid)
+                ids.append(aid)
+    return ids
+
+
 def _story_json(cluster, claims_by_id: dict, meta: dict[str, dict]) -> dict:
     claim_ids = [str(x) for x in _jload(cluster["claim_ids"])]
     claims = [_claim_json(claims_by_id[cid], meta) for cid in claim_ids if cid in claims_by_id]
@@ -573,6 +610,11 @@ async def api_story(cluster_id: str, deeper: int = 0) -> JSONResponse:
     meta = await _article_meta(pool)
     claims_by_id = await _claims_by_id(pool)
     story = _story_json(row, claims_by_id, meta)
+    # The full articles behind the story — this is what the reader actually reads.
+    full = await _article_full_map(pool)
+    story["articles"] = [
+        _article_json(full[aid]) for aid in _cluster_article_ids(row, claims_by_id) if aid in full
+    ]
     if deeper:
         # Tier-3 "go deeper" (§2.1, §11): the PCC / server middle tier expands provenance,
         # fetches-and-verifies primary sources, and runs cross-language corroboration. Stubbed
