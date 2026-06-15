@@ -18,6 +18,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import asyncpg
 from fastapi import FastAPI, Form, HTTPException
@@ -26,6 +27,7 @@ from pydantic import BaseModel
 
 from maat import config, events
 from maat.bus import connect as nats_connect
+from maat.clocks import is_paused, read_topics
 from maat.evals import evaluate, load_expectations
 from maat.pipeline.corroborate import (
     ClaimRow,
@@ -37,6 +39,7 @@ from maat.pipeline.corroborate import (
 )
 
 CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
+ROOT = Path(__file__).resolve().parents[3]  # repo root (for config/topics.txt)
 
 DB = os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
 
@@ -183,6 +186,36 @@ async def trigger_run(stage: str = Form(...), reason: str = Form("")):
         events.ADMIN_RUN_TRIGGERED, "pipeline", events.admin_event("pipeline", reason=reason, stage=stage)
     )
     return RedirectResponse("/runs", status_code=303)
+
+
+@app.get("/clocks", response_class=HTMLResponse)
+async def clocks_view() -> str:
+    """A1 — inspect + pause/resume the two clocks (§9). Ingestion is live; harvester (#39) pending."""
+    pool = app.state.pool
+    ing = await pool.fetchrow(
+        "select count(*) n, max(created_at) last from events where type = 'article.ingested'"
+    )
+    daily = await pool.fetch(
+        "select date_trunc('day', created_at) d, count(*) n from events "
+        "where type = 'article.ingested' group by d order by d desc limit 7"
+    )
+    clk = await pool.fetch(
+        "select data from events where type = $1 order by id desc limit 20", events.ADMIN_CLOCK_SET
+    )
+    paused = is_paused([_jobj(r["data"]) for r in clk], "ingestion")
+    return _doc(_clocks_page(ing, daily, read_topics(ROOT), paused), "clocks", "clocks")
+
+
+@app.post("/clocks/set")
+async def clock_set(clock: str = Form(...), paused: str = Form(...), reason: str = Form("")):
+    # Ops control (acquisition cadence), not veracity core — genuinely applied: the next tick
+    # reads this flag and skips. No sign-off gate.
+    await _publish(
+        events.ADMIN_CLOCK_SET,
+        clock,
+        events.admin_event(clock, reason=reason, clock=clock, paused=(paused == "true")),
+    )
+    return RedirectResponse("/clocks", status_code=303)
 
 
 @app.get("/config", response_class=HTMLResponse)
@@ -1027,6 +1060,44 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
     )
 
 
+def _clocks_page(ing, daily, topics: list, paused: bool) -> str:
+    """A1 — the two clocks (§9): ingestion (live, pausable) + projection-harvester (pending #39)."""
+    last = f'{ing["last"]:%Y-%m-%d %H:%M}' if ing and ing["last"] else "—"
+    n = (ing["n"] if ing else 0) or 0
+    status = '<span class="b laun">paused</span>' if paused else '<span class="b fact">running</span>'
+    toggle_val = "false" if paused else "true"
+    toggle_label = "Resume" if paused else "Pause"
+    topics_html = ", ".join(html.escape(t) for t in topics) or (
+        '<span class="mut">none — set MAAT_TOPICS or config/topics.txt</span>'
+    )
+    ingest = (
+        f'<div class="box"><div class="bl">Ingestion clock {status}</div>'
+        f'<div class="mut sm" style="flex-basis:100%">Topics: {topics_html}</div>'
+        f'<div class="mut sm" style="flex-basis:100%">{n} articles ingested all-time · last {last} · '
+        'cadence is external (cron / systemd); one tick = <span class="mono">make tick</span></div>'
+        '<form class="inline" method="post" action="/clocks/set">'
+        '<input type="hidden" name="clock" value="ingestion">'
+        f'<input type="hidden" name="paused" value="{toggle_val}">'
+        '<input class="reason" name="reason" placeholder="why">'
+        f'<button>{toggle_label} ingestion</button></form></div>'
+    )
+    harvester = (
+        '<div class="box"><div class="bl">Projection-harvester clock</div>'
+        '<div class="mut sm" style="flex-basis:100%">Not built yet (#39, P3) — will wake on schedule '
+        "to resolve / extend / decay matured projections into the accuracy ledger (§7). This control "
+        "lights up when the harvester lands.</div></div>"
+    )
+    deltas = ""
+    if daily:
+        rows = "".join(f'<div class="kv"><b>{r["d"]:%Y-%m-%d}</b> {r["n"]} ingested</div>' for r in daily)
+        deltas = f'<div class="bl mt">Ingestion per day (last 7)</div>{rows}'
+    return (
+        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<h3 class="ih">Clocks — the two cadences (§9) (A1)</h3>'
+        f"{ingest}{harvester}{deltas}</div>"
+    )
+
+
 def _config_page(overrides: dict) -> str:
     """F5 — render the knob registry grouped, with live defaults + pending proposals."""
     out = [
@@ -1124,6 +1195,7 @@ def _nav(active: str) -> str:
     tabs = [
         ("/", "Content", "content"),
         ("/runs", "Runs", "runs"),
+        ("/clocks", "Clocks", "clocks"),
         ("/config", "Config", "config"),
         ("/sources", "Sources", "sources"),
         ("/eval", "Eval", "eval"),

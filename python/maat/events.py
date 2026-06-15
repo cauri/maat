@@ -24,6 +24,7 @@ ADMIN_THRESHOLD_CHANGED = "admin.threshold.changed"  # F5: a proposed config cha
 ADMIN_RUN_TRIGGERED = "admin.run.triggered"  # F4: operator kicked a pipeline stage
 ADMIN_SOURCE_FLAGGED = "admin.source.flagged"  # A2: allow / deny a source
 ADMIN_SOURCE_GROUPED = "admin.source.grouped"  # A2: ownership / wire / copy-network grouping
+ADMIN_CLOCK_SET = "admin.clock.set"  # A1: pause / resume a clock (the next tick reads the flag)
 
 ADMIN_EVENT_TYPES = frozenset(
     {
@@ -36,6 +37,7 @@ ADMIN_EVENT_TYPES = frozenset(
         ADMIN_RUN_TRIGGERED,
         ADMIN_SOURCE_FLAGGED,
         ADMIN_SOURCE_GROUPED,
+        ADMIN_CLOCK_SET,
     }
 )
 
