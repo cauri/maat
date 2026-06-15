@@ -22,10 +22,23 @@ struct Story: Codable, Sendable, Identifiable, Hashable {
     var languages: [String]
     var originatorGroups: [OriginatorGroup]
     var claims: [Claim]
+    /// The full articles behind the story — what the reader reads. Present on the detail payload.
+    var articles: [Article]?
     var deeper: Deeper?
 
     /// Dominant language of the story's claims — drives the on-device translate affordance (#54).
     var primaryLanguage: String { languages.first ?? claims.first?.language ?? "en" }
+}
+
+/// A full article — a provenance envelope (BRIEF §8.3) the reader reads in its entirety.
+struct Article: Codable, Sendable, Identifiable, Hashable {
+    var id: String
+    var source: String?
+    var title: String?
+    var body: String
+    var url: String?
+    var language: String
+    var ingestedAt: String?
 }
 
 struct OriginatorGroup: Codable, Sendable, Hashable {

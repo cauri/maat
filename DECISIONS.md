@@ -186,3 +186,13 @@ from the corroboration projections (avg cluster confidence + primary-source stan
 reader (`/api/sources`, `/api/source/{name}`) + a bundled fixture; the real §6 truth-over-time fold is
 P3 (#37). Refines D23 — the veracity engine is untouched, only the client's presentation. Verified on
 the iOS 27 simulator (Today + Sources).
+
+### D26 — The story detail renders the full article (the reader)
+**Decision (cauri):** it's a news app — tapping a story must open the **full article body to read**,
+not just the corroborated one-line fact + a summary. The detail now leads with the selected outlet's
+full text (serif, readable), defaulting to the highest-reputation / primary source, with a **switcher
+across the outlets covering the story** (each labelled with its reputation); confidence, corroboration,
+claims and per-source reputation sit *beneath* as context for what you read. **Data:** `/api/story/{id}`
+now returns the cluster's contributing `articles` (full `body`); the client fetches it on open, and the
+bundled fixture carries bodies for offline. Sharpens D25 (§1 — the primary purpose is reading the news);
+engine untouched. Verified on the iOS 27 simulator + installed on device.
