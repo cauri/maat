@@ -337,41 +337,37 @@ def test_prompts_page_shows_active_seed_history_and_rollback():
     assert "version 2" in out and "Roll back" in out and "v1" in out
 
 
-def test_prompts_page_groups_active_draft_and_ondevice_with_full_text():
-    """The Prompts view surfaces every registered prompt, grouped by status, with each one's
-    label, status, source, and full text. Active stays editable; draft + on-device are read-only.
-    """
+def test_prompts_page_three_panel_nav_and_selected_agent():
+    """3-panel Prompts: the LEFT nav lists every registered prompt (by label, grouped by status);
+    the MIDDLE shows the SELECTED agent's full text — editable (save form) for active, read-only
+    for draft/on-device — and a non-selected agent's body is not dumped onto the page."""
     import html as _html
 
     from maat import prompts
     from maat.web.app import _prompts_page
 
-    out = _prompts_page({})
+    out = _prompts_page({}, selected="extract")
 
-    # Group headings are present.
-    assert "Active" in out
-    assert "Draft — pending cauri review" in out
-    assert "On-device (Apple)" in out
-
-    # Every registered prompt shows up by label and source, with its full seed text.
+    # Left nav: every prompt is a selectable link, under the short group headings.
     for p in prompts.PROMPTS:
         assert _html.escape(p["label"]) in out, p["key"]
-        assert _html.escape(p["source"]) in out, p["key"]
-        # A distinctive slice of each prompt's body is rendered (escaped).
-        snippet = _html.escape(p["default"].strip().splitlines()[0])
-        assert snippet in out, p["key"]
+        assert f'/prompts?key={p["key"]}' in out, p["key"]
+    for heading in ("Editable", "Draft", "On-device"):
+        assert heading in out
 
-    # Draft + on-device blocks are read-only (a readonly textarea, no save form for them).
-    assert "readonly" in out
-    assert "Read-only — surfaced for review" in out
+    # The selected ACTIVE agent shows its full seed text + the editable save form + golden test.
+    ex_snip = _html.escape(prompts.PROMPTS_BY_KEY["extract"]["default"].strip().splitlines()[0])
+    assert ex_snip in out
+    assert 'action="/prompts/save"' in out and "Test on goldens" in out
+    # A non-selected agent's body is NOT rendered in the middle (it's only a nav link).
+    tri_snip = _html.escape(prompts.PROMPTS_BY_KEY["triage_llm"]["default"].strip().splitlines()[0])
+    assert tri_snip not in out
 
-    # Editable backend prompts keep their save form + golden-test button.
-    assert 'action="/prompts/save"' in out
-    assert "Test on goldens" in out
-
-    # A draft prompt's text is present but NOT inside a save form for that key.
-    triage_snip = _html.escape(prompts.PROMPTS_BY_KEY["triage_llm"]["default"].strip().splitlines()[0])
-    assert triage_snip in out
+    # Selecting a read-only (draft) agent shows its text read-only, with no save form.
+    draft = _prompts_page({}, selected="triage_llm")
+    assert tri_snip in draft
+    assert "readonly" in draft and "Read-only — surfaced for review" in draft
+    assert 'action="/prompts/save"' not in draft
     # On-device entries are labelled as Foundation Models mirrors.
     assert "Foundation Models" in out
 
@@ -835,21 +831,28 @@ def test_prompt_chat_builder_preserves_placeholders_verbatim():
         assert tok not in built
 
 
-def test_prompts_page_renders_chat_panel_on_editable_prompts_only():
-    """Each editable prompt gets an 'Improve with chat' panel wired to its own textarea; the
-    read-only draft/on-device prompts do not. The shared chat JS is present once."""
+def test_prompts_page_chat_panel_for_selected_editable_only():
+    """The always-open chat (right column) is wired to the SELECTED editable agent's editor; a
+    read-only selection shows a 'chat unavailable' note instead. Shared chat JS ships once."""
     from maat.web.app import _doc, _prompts_page
 
-    page = _doc(_prompts_page({}), "prompts", "prompts")
-    assert "Improve with chat" in page
+    page = _doc(_prompts_page({}, selected="extract"), "prompts", "prompts")
+    assert "Improve with Claude" in page
     assert "maatPromptChat" in page  # the inline handler shipped
-    for key in ("extract", "classify", "extremity"):  # editable -> panel + targeted textarea id
-        assert f'id="ta-{key}"' in page, key
-        assert f"maatPromptChat('{key}')" in page, key
-        assert f'id="log-{key}"' in page and f'id="in-{key}"' in page, key
-    # No chat panel/textarea is wired for a read-only prompt.
-    assert 'id="ta-triage_llm"' not in page
-    assert "maatPromptChat('triage_llm')" not in page
+    # The selected editable agent has its editor + chat wired to the same key.
+    assert 'id="ta-extract"' in page and 'id="in-extract"' in page and 'id="log-extract"' in page
+    assert "maatPromptChat('extract')" in page
+    # A non-selected agent's editor/chat is NOT on the page (it's just a nav link).
+    assert 'id="ta-classify"' not in page
+
+    # Selecting another editable agent wires that one instead.
+    page2 = _doc(_prompts_page({}, selected="classify"), "prompts", "prompts")
+    assert 'id="ta-classify"' in page2 and "maatPromptChat('classify')" in page2
+
+    # A read-only (draft) selection: no editable textarea, shows the unavailable note.
+    draft = _doc(_prompts_page({}, selected="triage_llm"), "prompts", "prompts")
+    assert 'id="ta-triage_llm"' not in draft
+    assert "Chat is available on the editable" in draft
 
 
 def test_prompt_chat_agent_prompt_in_registry_as_reviewable_draft():
