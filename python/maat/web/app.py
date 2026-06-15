@@ -13,6 +13,7 @@ Run: `make web`.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import os
@@ -29,6 +30,8 @@ from pydantic import BaseModel
 from maat import config, events, prompts
 from maat.bus import connect as nats_connect
 from maat.clocks import is_paused, read_topics
+from maat.eval_prompt import eval_goldens
+from maat.eval_prompt import summary as eval_prompt_summary
 from maat.evals import evaluate, load_expectations
 from maat.pipeline.corroborate import (
     ClaimRow,
@@ -360,6 +363,31 @@ async def prompts_rollback(key: str = Form(...), version: int = Form(...)):
     )
     msg = f"Rolled back to v{version} — live on the next run." if pub else _BUS_DOWN
     return _redirect("/prompts", msg)
+
+
+@app.post("/prompts/test")
+async def prompts_test(key: str = Form(...), text: str = Form(...)):
+    """Eval-on-change: run the golden corpus with this candidate text (other stages stay on their
+    active prompts) and report pass/fail — before the operator relies on it. Live LLM calls."""
+    if key not in prompts.PROMPTS_BY_KEY:
+        return _redirect("/prompts", "Unknown prompt.")
+    three = {}
+    for k in ("extract", "classify", "extremity"):
+        three[k] = text if k == key else await prompts.active_text(
+            app.state.pool, k, prompts.seed_default(k)
+        )
+    try:
+        report = await asyncio.to_thread(
+            eval_goldens,
+            extract_prompt=three["extract"],
+            classify_prompt=three["classify"],
+            extremity_prompt=three["extremity"],
+        )
+    except KeyError:  # no API key in the console env (e.g. the box deploy)
+        return _redirect("/prompts", "Can't test here — API keys aren't set. Run `make eval-prompt` instead.")
+    except Exception as exc:  # noqa: BLE001 - surface any pipeline failure to the operator
+        return _redirect("/prompts", f"Test failed: {exc}")
+    return _redirect("/prompts", f"Tested '{key}' on the goldens — {eval_prompt_summary(report)}")
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -1467,9 +1495,11 @@ def _prompts_page(by_key: dict) -> str:
             f'<textarea class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
             f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
             '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
+            '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
+            'this text first — live AI calls, takes a moment">Test on goldens</button> '
             '<button title="Saves a new version, live on the next run">Save new version</button> '
-            '<button formaction="/prompts/restore" title="Replace with the original built-in version">'
-            'Restore original</button>'
+            '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
+            'built-in version">Restore original</button>'
             f'</form>{hist}</div>'
         )
     return (
