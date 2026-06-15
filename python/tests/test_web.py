@@ -223,3 +223,20 @@ def test_clocks_page_status_topics_and_harvester_stub():
     assert "Prediction check" in running and "#39" in running  # harvester stub flagged
     paused = _clocks_page({"n": 5, "last": None}, [], [], True)
     assert "Paused" in paused and "Resume updates" in paused
+
+
+def test_doc_renders_confirmation_banner_only_when_flashed():
+    from maat.web.app import _doc
+
+    with_flash = _doc("<p>x</p>", "", "content", flash="Saved.")
+    assert 'class="flash"' in with_flash and "Saved." in with_flash
+    assert 'class="flash"' not in _doc("<p>x</p>", "", "content")  # none when nothing happened
+
+
+def test_redirect_carries_message_as_query():
+    from maat.web.app import _redirect
+
+    r = _redirect("/claim/abc", "Saved. Won't be overwritten.")
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/claim/abc?ok=")
+    assert _redirect("/sources").headers["location"] == "/sources"  # no message -> bare path

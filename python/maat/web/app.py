@@ -19,6 +19,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import asyncpg
 from fastapi import FastAPI, Form, HTTPException
@@ -40,6 +41,7 @@ from maat.pipeline.corroborate import (
 
 CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
 ROOT = Path(__file__).resolve().parents[3]  # repo root (for config/topics.txt)
+_BUS_DOWN = "Couldn't reach the event bus — nothing was saved."
 
 DB = os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
 
@@ -65,7 +67,7 @@ app = FastAPI(lifespan=lifespan, title="Maat operator console")
 
 
 @app.get("/", response_class=HTMLResponse)
-async def feed() -> str:
+async def feed(ok: str = "") -> str:
     pool = app.state.pool
     articles = await pool.fetch(
         "select id, title, source, language from articles order by ingested_at desc"
@@ -82,11 +84,11 @@ async def feed() -> str:
     by_article: dict[str, list] = {}
     for c in claims:
         by_article.setdefault(c["article_id"], []).append(c)
-    return _feed_page(articles, by_article, clusters, id_to_source)
+    return _feed_page(articles, by_article, clusters, id_to_source, flash=ok)
 
 
 @app.get("/cluster/{cid}", response_class=HTMLResponse)
-async def cluster_detail(cid: str) -> str:
+async def cluster_detail(cid: str, ok: str = "") -> str:
     pool = app.state.pool
     cl = await pool.fetchrow("select * from clusters where id = $1", cid)
     if cl is None:
@@ -103,11 +105,11 @@ async def cluster_detail(cid: str) -> str:
     others = await pool.fetch(
         "select id, fact from clusters where id <> $1 order by created_at desc", cid
     )
-    return _doc(_cluster_page(cl, members, id_to_source, others), "cluster", "content")
+    return _doc(_cluster_page(cl, members, id_to_source, others), "cluster", "content", flash=ok)
 
 
 @app.get("/claim/{clid}", response_class=HTMLResponse)
-async def claim_detail(clid: str) -> str:
+async def claim_detail(clid: str, ok: str = "") -> str:
     pool = app.state.pool
     c = await pool.fetchrow(
         "select c.*, a.source as art_source, a.title as art_title, a.url as art_url, "
@@ -124,21 +126,21 @@ async def claim_detail(clid: str) -> str:
         c["article_id"],
         clid,
     )
-    return _doc(_claim_page(c, prov), "claim", "content")
+    return _doc(_claim_page(c, prov), "claim", "content", flash=ok)
 
 
 @app.get("/audit", response_class=HTMLResponse)
-async def audit(limit: int = 200) -> str:
+async def audit(limit: int = 200, ok: str = "") -> str:
     rows = await app.state.pool.fetch(
         "select type, data, created_at from events where type like 'admin.%' "
         "order by id desc limit $1",
         limit,
     )
-    return _doc(_audit_page(rows), "audit", "audit")
+    return _doc(_audit_page(rows), "audit", "audit", flash=ok)
 
 
 @app.get("/eval", response_class=HTMLResponse)
-async def eval_view() -> str:
+async def eval_view(ok: str = "") -> str:
     """A4a — surface the eval harness (#32) over the live projections. Includes, never rebuilds:
     the same `evaluate()` the CLI runs, rendered for the operator. Golden regression + metrics."""
     pool = app.state.pool
@@ -156,11 +158,11 @@ async def eval_view() -> str:
     except FileNotFoundError as exc:  # no fixtures checked out
         report, err = None, f"eval fixtures not found: {exc}"
     otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-    return _doc(_eval_page(report, err, otlp), "eval", "eval")
+    return _doc(_eval_page(report, err, otlp), "eval", "eval", flash=ok)
 
 
 @app.get("/runs", response_class=HTMLResponse)
-async def runs() -> str:
+async def runs(ok: str = "") -> str:
     """F4 — run console: pipeline activity off the event log, dead-letters, run-intent."""
     pool = app.state.pool
     agg = await pool.fetch("select type, count(*) n, max(created_at) last from events group by type")
@@ -175,21 +177,21 @@ async def runs() -> str:
     dead = await pool.fetch(
         "select type, stream_id, error, created_at from dead_letters order by id desc limit 25"
     )
-    return _doc(_runs_page(stage_summary(counts), proj, recent, dead), "runs", "runs")
+    return _doc(_runs_page(stage_summary(counts), proj, recent, dead), "runs", "runs", flash=ok)
 
 
 @app.post("/runs/trigger")
 async def trigger_run(stage: str = Form(...), reason: str = Form("")):
     # Record operator intent in the audit log. Execution stays a deliberate CLI/cron step until a
     # job runner with budget guardrails (D22) is wired — the console must not silently spend API $.
-    await _publish(
+    pub = await _publish(
         events.ADMIN_RUN_TRIGGERED, "pipeline", events.admin_event("pipeline", reason=reason, stage=stage)
     )
-    return RedirectResponse("/runs", status_code=303)
+    return _redirect("/runs", "Logged. Run it yourself with the command shown." if pub else _BUS_DOWN)
 
 
 @app.get("/clocks", response_class=HTMLResponse)
-async def clocks_view() -> str:
+async def clocks_view(ok: str = "") -> str:
     """A1 — inspect + pause/resume the two clocks (§9). Ingestion is live; harvester (#39) pending."""
     pool = app.state.pool
     ing = await pool.fetchrow(
@@ -203,23 +205,28 @@ async def clocks_view() -> str:
         "select data from events where type = $1 order by id desc limit 20", events.ADMIN_CLOCK_SET
     )
     paused = is_paused([_jobj(r["data"]) for r in clk], "ingestion")
-    return _doc(_clocks_page(ing, daily, read_topics(ROOT), paused), "clocks", "clocks")
+    return _doc(_clocks_page(ing, daily, read_topics(ROOT), paused), "clocks", "clocks", flash=ok)
 
 
 @app.post("/clocks/set")
 async def clock_set(clock: str = Form(...), paused: str = Form(...), reason: str = Form("")):
     # Ops control (acquisition cadence), not veracity core — genuinely applied: the next tick
     # reads this flag and skips. No sign-off gate.
-    await _publish(
+    new_paused = paused == "true"
+    pub = await _publish(
         events.ADMIN_CLOCK_SET,
         clock,
-        events.admin_event(clock, reason=reason, clock=clock, paused=(paused == "true")),
+        events.admin_event(clock, reason=reason, clock=clock, paused=new_paused),
     )
-    return RedirectResponse("/clocks", status_code=303)
+    if not pub:
+        msg = _BUS_DOWN
+    else:
+        msg = "Updates paused — the next pull will skip." if new_paused else "Updates are back on."
+    return _redirect("/clocks", msg)
 
 
 @app.get("/config", response_class=HTMLResponse)
-async def config_view() -> str:
+async def config_view(ok: str = "") -> str:
     """F5 — show every tunable knob with its live default + any proposed (pending) override."""
     rows = await app.state.pool.fetch(
         "select distinct on (data->>'key') data->>'key' k, data->>'value' v, "
@@ -228,7 +235,7 @@ async def config_view() -> str:
         events.ADMIN_THRESHOLD_CHANGED,
     )
     overrides = {r["k"]: {"value": r["v"], "reason": r["r"], "at": r["created_at"]} for r in rows}
-    return _doc(_config_page(overrides), "config", "config")
+    return _doc(_config_page(overrides), "config", "config", flash=ok)
 
 
 @app.post("/config/set")
@@ -236,16 +243,19 @@ async def config_set(key: str = Form(...), value: str = Form(...), reason: str =
     # A proposal only — recorded + audited, never auto-applied. Promotion to live (esp. core
     # knobs: gate floor, scoring, judge model) needs sign-off + A/B-on-replay (D18 / §5).
     if key in config.KNOBS_BY_KEY and value.strip():
-        await _publish(
+        pub = await _publish(
             events.ADMIN_THRESHOLD_CHANGED,
             key,
             events.admin_event(key, reason=reason, key=key, value=value.strip()),
         )
-    return RedirectResponse("/config", status_code=303)
+        msg = "Saved as a suggestion. Nothing changed live until it's reviewed." if pub else _BUS_DOWN
+    else:
+        msg = "No change — pick a setting and enter a value."
+    return _redirect("/config", msg)
 
 
 @app.get("/sources", response_class=HTMLResponse)
-async def sources_view() -> str:
+async def sources_view(ok: str = "") -> str:
     """A2 — source registry off ingested articles + operator allow/deny + ownership grouping."""
     pool = app.state.pool
     srcs = await pool.fetch(
@@ -267,29 +277,33 @@ async def sources_view() -> str:
     )
     flag_by = {r["s"]: {"status": r["st"], "reason": r["r"]} for r in flags}
     group_by = {r["s"]: r["g"] for r in grps}
-    return _doc(_sources_page(srcs, wire, flag_by, group_by), "sources", "sources")
+    return _doc(_sources_page(srcs, wire, flag_by, group_by), "sources", "sources", flash=ok)
 
 
 @app.post("/sources/flag")
 async def source_flag(source: str = Form(...), status: str = Form(...), reason: str = Form("")):
+    msg = ""
     if status in ("allow", "deny"):
-        await _publish(
+        pub = await _publish(
             events.ADMIN_SOURCE_FLAGGED,
             source,
             events.admin_event(source, reason=reason, source=source, status=status),
         )
-    return RedirectResponse("/sources", status_code=303)
+        msg = f"Saved — {source} marked {status}. Not enforced yet." if pub else _BUS_DOWN
+    return _redirect("/sources", msg)
 
 
 @app.post("/sources/group")
 async def source_group(source: str = Form(...), group: str = Form(...), reason: str = Form("")):
+    msg = ""
     if group.strip():
-        await _publish(
+        pub = await _publish(
             events.ADMIN_SOURCE_GROUPED,
             source,
             events.admin_event(source, reason=reason, source=source, group=group.strip()),
         )
-    return RedirectResponse("/sources", status_code=303)
+        msg = f"Saved — {source} grouped as '{group.strip()}'. Not enforced yet." if pub else _BUS_DOWN
+    return _redirect("/sources", msg)
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -311,20 +325,24 @@ async def correct_claim(
     if speaker.strip():
         fields["speaker"] = speaker.strip()
     if fields:
-        await _publish(
+        pub = await _publish(
             events.ADMIN_CLASSIFICATION_CORRECTED,
             clid,
             events.admin_event(clid, reason=reason, **fields),
         )
-    return RedirectResponse(f"/claim/{clid}", status_code=303)
+        msg = "Saved. This won't be overwritten when the pipeline re-runs." if pub else _BUS_DOWN
+    else:
+        msg = "No change — pick a new label first."
+    return _redirect(f"/claim/{clid}", msg)
 
 
 @app.post("/claim/{clid}/flag")
 async def flag_claim(clid: str, abuse: str = Form(...), reason: str = Form("")):
-    await _publish(
+    pub = await _publish(
         events.ADMIN_LAUNDERING_FLAGGED, clid, events.admin_event(clid, reason=reason, abuse=abuse)
     )
-    return RedirectResponse(f"/claim/{clid}", status_code=303)
+    msg = "Flagged. The outlet now owns this claim for scoring." if pub else _BUS_DOWN
+    return _redirect(f"/claim/{clid}", msg)
 
 
 @app.post("/cluster/{cid}/split")
@@ -332,13 +350,13 @@ async def split_cluster(cid: str, claim_ids: list[str] = Form(default=[]), reaso
     pool = app.state.pool
     cl = await pool.fetchrow("select claim_ids, extremity from clusters where id = $1", cid)
     if cl is None:
-        return RedirectResponse("/", status_code=303)
+        return _redirect("/", "That story no longer exists.")
     members = _jload(cl["claim_ids"])
     picked = set(claim_ids)
     selected = [m for m in members if m in picked]
     rest = [m for m in members if m not in picked]
     if not selected or not rest:  # a no-op split: leave the cluster intact
-        return RedirectResponse(f"/cluster/{cid}", status_code=303)
+        return _redirect(f"/cluster/{cid}", "Tick at least one claim, and leave at least one, to split.")
     extremity = cl["extremity"] or "notable"
     new_ids: list[str] = []
     for part in (selected, rest):
@@ -349,7 +367,7 @@ async def split_cluster(cid: str, claim_ids: list[str] = Form(default=[]), reaso
     await _publish(
         events.ADMIN_CLUSTER_SPLIT, cid, events.admin_event(cid, reason=reason, into=new_ids)
     )
-    return RedirectResponse("/audit", status_code=303)
+    return _redirect("/audit", "Story split. Confidence recalculated for both parts.")
 
 
 @app.post("/cluster/merge")
@@ -357,12 +375,12 @@ async def merge_clusters(cluster_ids: list[str] = Form(default=[]), reason: str 
     pool = app.state.pool
     ids = [c for c in cluster_ids if c]
     if len(ids) < 2:
-        return RedirectResponse("/", status_code=303)
+        return _redirect("/", "Pick another story to merge with.")
     rows = await pool.fetch(
         "select id, claim_ids, extremity from clusters where id = any($1::text[])", ids
     )
     if len(rows) < 2:
-        return RedirectResponse("/", status_code=303)
+        return _redirect("/", "Those stories no longer exist.")
     order = {"ordinary": 0, "notable": 1, "extraordinary": 2}
     extremity = max((r["extremity"] or "notable" for r in rows), key=lambda e: order.get(e, 1))
     members: list[str] = []
@@ -376,7 +394,7 @@ async def merge_clusters(cluster_ids: list[str] = Form(default=[]), reason: str 
     await _publish(
         events.ADMIN_CLUSTER_MERGED, ncid or ids[0], events.admin_event(ncid or "", reason=reason, merged=ids)
     )
-    return RedirectResponse("/audit", status_code=303)
+    return _redirect("/audit", "Stories merged. Confidence recalculated.")
 
 
 @app.post("/cluster/{from_cid}/move")
@@ -387,7 +405,7 @@ async def move_claim(
     src = await pool.fetchrow("select claim_ids, extremity from clusters where id = $1", from_cid)
     dst = await pool.fetchrow("select claim_ids, extremity from clusters where id = $1", to_cluster)
     if src is None or dst is None:
-        return RedirectResponse(f"/cluster/{from_cid}", status_code=303)
+        return _redirect(f"/cluster/{from_cid}", "That story no longer exists.")
     src_ids = [x for x in _jload(src["claim_ids"]) if x != claim_id]
     dst_ids = _jload(dst["claim_ids"])
     if claim_id not in dst_ids:
@@ -401,7 +419,7 @@ async def move_claim(
         claim_id,
         events.admin_event(claim_id, reason=reason, from_cluster=from_cid, to_cluster=to_cluster),
     )
-    return RedirectResponse("/audit", status_code=303)
+    return _redirect("/audit", "Claim moved. Both stories rescored.")
 
 
 # ============================ event-publish + recompute glue ================================
@@ -980,7 +998,7 @@ def _story(group, id_to_source) -> str:
     return f'<div class="story">{head}{sup}</div>'
 
 
-def _feed_page(articles, by_article, clusters, id_to_source) -> str:
+def _feed_page(articles, by_article, clusters, id_to_source, flash: str = "") -> str:
     panel = ""
     n_stories = 0
     if clusters:
@@ -995,7 +1013,7 @@ def _feed_page(articles, by_article, clusters, id_to_source) -> str:
     if not cards:
         cards = '<p class="empty">No stories yet — pull some news from the Updates tab.</p>'
     subtitle = f"{n_stories or len(articles)} stories · corroboration over spread · confidence on every claim"
-    return _doc(panel + cards, subtitle, "content")
+    return _doc(panel + cards, subtitle, "content", flash=flash)
 
 
 # --- inspectors (F2) + correction forms (F3) ---
@@ -1476,12 +1494,18 @@ def _nav(active: str) -> str:
     return f'<nav class="nav">{"".join(links)}</nav>'
 
 
-def _doc(main_html: str, subtitle: str, active: str) -> str:
+def _doc(main_html: str, subtitle: str, active: str, flash: str = "") -> str:
+    banner = f'<div class="flash">{html.escape(flash)}</div>' if flash else ""
     return (
         _DOC.replace("{{nav}}", _nav(active))
         .replace("{{subtitle}}", html.escape(subtitle))
-        .replace("{{main}}", main_html)
+        .replace("{{main}}", banner + main_html)
     )
+
+
+def _redirect(path: str, msg: str = ""):
+    """Redirect after a POST (PRG), carrying a one-line confirmation for the next page to show."""
+    return RedirectResponse(f"{path}?ok={quote(msg)}" if msg else path, status_code=303)
 
 
 _DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
