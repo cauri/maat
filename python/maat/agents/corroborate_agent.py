@@ -38,10 +38,11 @@ async def main() -> None:
     rows = await pool.fetch("select id, text, article_id from claims")
     # Resolve the operator's active extremity prompt (P8) before closing the pool.
     extremity_prompt = await prompts.active_text(pool, "extremity", prompts.seed_default("extremity"))
-    # Batch recompute: reset the clusters projection so a re-run REPLACES rather than
-    # accumulates. Cluster ids are keyed on their claim_ids, so a changed claim set (or
-    # changed collapse) would otherwise leave orphan clusters behind.
-    await pool.execute("delete from clusters")
+    # The clusters currently on show — so after recompute we can RETIRE only the ones that no
+    # longer exist, instead of wiping the projection up front. (The recompute below takes
+    # minutes — clustering + a per-cluster extremity rating — and deleting first left the feed
+    # EMPTY for that whole window on every tick.)
+    prev_ids = {r["id"] for r in await pool.fetch("select id from clusters")}
     await pool.close()
 
     claims = [
@@ -50,9 +51,16 @@ async def main() -> None:
     ]
     results = corroborate(claims, bodies, extremity_of=partial(rate_extremity, prompt=extremity_prompt))
 
+    # Upsert the new clusters, then retire the superseded ones — both through the kernel's own
+    # events (it upserts on cluster.corroborated, deletes on cluster.removed), so the single
+    # writer stays the single writer and the feed is never blank: old clusters keep serving until
+    # the new ones land, then the stale ids are removed. Cluster ids are keyed on their claim_ids,
+    # so a changed claim set yields a new id and the old one falls into `prev_ids - keep`.
     nc = await connect()
+    keep: set[str] = set()
     for r in results:
         cid = _cluster_id(r.claim_ids)
+        keep.add(cid)
         await publish(
             nc,
             "cluster.corroborated",
@@ -69,9 +77,12 @@ async def main() -> None:
                 "claim_ids": r.claim_ids,
             },
         )
+    superseded = prev_ids - keep
+    for cid in superseded:
+        await publish(nc, "cluster.removed", cid, {"id": cid})
     await nc.flush()
     await nc.close()
-    print(f"emitted {len(results)} corroborated cluster(s)")
+    print(f"emitted {len(results)} corroborated cluster(s); retired {len(superseded)} superseded")
 
 
 if __name__ == "__main__":

@@ -131,7 +131,14 @@ async def main() -> None:
             # Apify pass per query: its web search surfaces primary/authoritative sources GDELT
             # misses (#108, e.g. the issuer's own release). MAAT_PRIMARY_PASS=0 opts out (credits).
             if use_apify:
-                items = await asyncio.to_thread(apify.search_and_fetch, q, max_results=5)
+                try:
+                    items = await asyncio.to_thread(apify.search_and_fetch, q, max_results=5)
+                except Exception as e:  # Apify down / out of credit (402) — a paid provider must
+                    # NOT abort the tick. Disable it for the rest of this tick (next tick retries,
+                    # in case credit is topped up) and keep going on the free GDELT stream.
+                    print(f"  [{q}] Apify unavailable, skipping primary pass this tick: {e}", flush=True)
+                    use_apify = False
+                    items = []
                 for fa in items:
                     if fa.url in seen:
                         continue
