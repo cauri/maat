@@ -51,6 +51,7 @@ from maat.pipeline.corroborate import (
 )
 from maat.providers import seam
 from maat.serving import admin_auth
+from maat.serving import spend as spend_mod
 from maat.serving.feed import feed_router
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import routed_queue
@@ -323,6 +324,31 @@ async def eval_view(ok: str = "") -> str:
         report, err = None, f"eval fixtures not found: {exc}"
     otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
     return _doc(_eval_page(report, err, otlp), "eval", "eval", flash=ok)
+
+
+@app.get("/spend", response_class=HTMLResponse)
+async def spend_view(ok: str = "") -> str:
+    """What Maat has spent so far. LLM is ESTIMATED from per-stage call counts in the event log
+    (cumulative across ticks) × per-model token estimates — cat-cafe has the exact per-call truth;
+    Apify is the ACTUAL figure from its billing API. Display-only; never a veracity signal."""
+    pool = app.state.pool
+    counts = {
+        r["type"]: r["n"]
+        for r in await pool.fetch(
+            "select type, count(*) n from events where type in "
+            "('claims.extracted','claims.classified','cluster.corroborated') group by type"
+        )
+    }
+    n_claims = await pool.fetchval("select count(*) from claims") or 0
+    rows, llm_total = spend_mod.estimate_llm_spend(
+        extract_calls=counts.get("claims.extracted", 0),
+        classify_calls=counts.get("claims.classified", 0),
+        extremity_calls=counts.get("cluster.corroborated", 0),
+        embed_claims=n_claims,
+    )
+    apify_usd = await asyncio.to_thread(spend_mod.apify_spend_usd)  # blocking httpx → off-loop
+    otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    return _doc(_spend_page(rows, llm_total, apify_usd, otlp), "spend", "spend", flash=ok)
 
 
 @app.get("/runs", response_class=HTMLResponse)
@@ -1788,6 +1814,41 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     )
 
 
+def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
+    apify_cell = f"${apify_usd:,.2f}" if apify_usd is not None else "—"
+    grand = llm_total + (apify_usd or 0.0)
+    cells = (
+        f'<div class="mcell"><div class="mk">Total (est.)</div><div class="mv">${grand:,.2f}</div></div>'
+        f'<div class="mcell"><div class="mk">AI / LLM (est.)</div><div class="mv">${llm_total:,.2f}</div></div>'
+        f'<div class="mcell"><div class="mk">Apify (actual)</div><div class="mv">{apify_cell}</div></div>'
+    )
+    srows = "".join(
+        f'<tr><td>{html.escape(r.stage)}</td><td class="mono mut">{html.escape(r.model)}</td>'
+        f'<td style="text-align:right">{r.calls:,}</td>'
+        f'<td style="text-align:right">${r.usd:,.2f}</td></tr>'
+        for r in rows
+    )
+    catcafe = (
+        f'<a class="clink" href="{html.escape(CATCAFE_URL)}" title="per-call traces + token usage">'
+        "open cat-cafe ↗</a>"
+        if otlp
+        else '<span class="mut">cat-cafe not wired</span>'
+    )
+    return (
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Spend — what Maat has cost so far</h3>'
+        f'<div class="mgrid">{cells}</div>'
+        '<div class="bl mt">By stage</div>'
+        '<table class="aud"><tr><th>stage</th><th>model</th>'
+        '<th style="text-align:right">calls</th><th style="text-align:right">est. $</th></tr>'
+        f"{srows}</table>"
+        '<div class="mut sm mt">LLM figures are <b>estimated</b> from cumulative call counts × '
+        "per-model token estimates; the exact per-call cost (and live token usage) is in cat-cafe. "
+        f"Apify is the actual billed figure from its usage API. Per-call detail: {catcafe}.</div>"
+        "</div>"
+    )
+
+
 def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
     """Sources collapsed as wire/cascade — present in a multi-article originator group (§5.5). Pure."""
     out: set = set()
@@ -2619,6 +2680,7 @@ def _nav(active: str) -> str:
         ("/reputation", "Reputation", "reputation", "How each source has held up over time (§6)"),
         ("/calibration", "Calibration", "calibration", "Is the confidence read right? Plus de-US-centering & health"),
         ("/eval", "Quality", "eval", "Automatic checks that Maat is still judging correctly"),
+        ("/spend", "Spend", "spend", "What Maat has spent on AI + acquisition so far"),
         ("/audit", "History", "audit", "A log of every change made in this console"),
     ]
     links = [
