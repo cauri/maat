@@ -242,5 +242,27 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
             .await?;
     }
 
+    // A prompt edit (P8): append a new version and make it the active one. Append-only history,
+    // one active row per key — the agents read the active row at run time.
+    if ev.typ == "admin.prompt.updated" {
+        let d = &ev.data;
+        let key = d.get("key").and_then(|v| v.as_str());
+        sqlx::query("update prompts set active = false where key = $1")
+            .bind(key)
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "insert into prompts (key, version, text, active, reason, actor) values \
+             ($1, coalesce((select max(version) from prompts where key = $1), 0) + 1, $2, true, \
+             $3, $4)",
+        )
+        .bind(key)
+        .bind(d.get("text").and_then(|v| v.as_str()))
+        .bind(d.get("reason").and_then(|v| v.as_str()))
+        .bind(d.get("actor").and_then(|v| v.as_str()))
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }

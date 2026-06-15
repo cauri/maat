@@ -25,6 +25,7 @@ ADMIN_RUN_TRIGGERED = "admin.run.triggered"  # F4: operator kicked a pipeline st
 ADMIN_SOURCE_FLAGGED = "admin.source.flagged"  # A2: allow / deny a source
 ADMIN_SOURCE_GROUPED = "admin.source.grouped"  # A2: ownership / wire / copy-network grouping
 ADMIN_CLOCK_SET = "admin.clock.set"  # A1: pause / resume a clock (the next tick reads the flag)
+ADMIN_PROMPT_UPDATED = "admin.prompt.updated"  # P8: a new active version of an agent prompt
 
 ADMIN_EVENT_TYPES = frozenset(
     {
@@ -38,6 +39,7 @@ ADMIN_EVENT_TYPES = frozenset(
         ADMIN_SOURCE_FLAGGED,
         ADMIN_SOURCE_GROUPED,
         ADMIN_CLOCK_SET,
+        ADMIN_PROMPT_UPDATED,
     }
 )
 
