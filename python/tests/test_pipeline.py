@@ -284,6 +284,23 @@ def test_parse_extremity():
     assert _parse_extremity('{"extremity": "wild"}') == "notable"  # unknown level -> default
 
 
+def test_claim_objects_parses_and_salvages_truncated_output():
+    import pytest
+
+    from maat.pipeline.extract import _claim_objects
+
+    # clean array
+    assert [o["text"] for o in _claim_objects('[{"text":"a"},{"text":"b"}]')] == ["a", "b"]
+    # markdown-fenced (find/rfind skip the ``` fence around the array)
+    assert [o["text"] for o in _claim_objects('```json\n[{"text":"a"}]\n```')] == ["a"]
+    # truncated mid-object (max_tokens cut it off): keep the complete claims, drop the partial
+    truncated = '[\n {"text":"a","voice":"own"},\n {"text":"b","voice":"own"},\n {"text":"c","vo'
+    assert [o["text"] for o in _claim_objects(truncated)] == ["a", "b"]
+    # nothing parseable -> raises (no silent empty extraction)
+    with pytest.raises(ValueError):
+        _claim_objects("no array here")
+
+
 def test_extremity_is_five_point_scale():
     from maat.pipeline.corroborate import confidence_read
     from maat.pipeline.extremity import LEVELS, _parse_extremity

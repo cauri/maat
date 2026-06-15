@@ -93,6 +93,33 @@ judge truth yourself.
 """
 
 
+def _claim_objects(raw: str) -> list[dict]:
+    """Pull the JSON array of claim objects out of the model's reply.
+
+    A claim-dense article can run the array past the token budget, cutting it off mid-object.
+    The whole-array parse then fails — and the old code discarded EVERY claim from that article
+    (the recurring "Expecting ',' delimiter" / "no JSON array" errors). Instead, salvage: close
+    the array after the last COMPLETE object and keep the claims that came through. A few real
+    claims from a long article beat none. Raises only when nothing parseable is present.
+    """
+    start = raw.find("[")
+    if start == -1:
+        raise ValueError(f"no JSON array in model output: {raw[:200]!r}")
+    end = raw.rfind("]")
+    if end > start:
+        try:
+            return json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            pass  # truncated mid-array — fall through to salvage the complete objects
+    last_obj = raw.rfind("}")
+    if last_obj > start:
+        try:
+            return json.loads(raw[start : last_obj + 1] + "]")
+        except json.JSONDecodeError:
+            pass
+    raise ValueError(f"no parseable JSON array in model output: {raw[:200]!r}")
+
+
 def extract_claims(
     article_text: str,
     *,
@@ -111,9 +138,7 @@ def extract_claims(
         .replace("{source_metadata}", source_metadata)
         .replace("{detected_language}", language)
     )
-    reply = claude_complete(filled, model=model, max_tokens=3000)
-    raw = reply.text
-    start, end = raw.find("["), raw.rfind("]")
-    if start == -1 or end == -1:
-        raise ValueError(f"no JSON array in model output: {raw[:200]!r}")
-    return [Claim.model_validate(c) for c in json.loads(raw[start : end + 1])]
+    # A long, claim-dense article needs headroom — at 3000 the array was being truncated and the
+    # whole extraction lost. Most articles use far less; we only pay for what is generated.
+    reply = claude_complete(filled, model=model, max_tokens=8000)
+    return [Claim.model_validate(c) for c in _claim_objects(reply.text)]
