@@ -16,3 +16,9 @@ hcloud server create --name maat-dev --type cax11 --location fsn1 \
 deploy/provision.sh <server-ip>
 ```
 No public ports are opened; services are verified on-box.
+
+## Admin console auth (P8, #163; D31/D32)
+The operator console (`admin.maat.press`) is gated by WireGuard (network) + Google OIDC + an
+email allow-list (identity), separate from the app's user auth. One-time setup (Google secrets in
+`/root/.env`, `deploy/wireguard.sh`), login, break-glass, and verification are in
+**[`ADMIN_AUTH.md`](ADMIN_AUTH.md)**.

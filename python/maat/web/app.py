@@ -14,6 +14,7 @@ Run: `make web`.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import html
 import json
 import os
@@ -23,7 +24,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import asyncpg
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -49,6 +50,7 @@ from maat.pipeline.corroborate import (
     is_primary_source,
 )
 from maat.providers import seam
+from maat.serving import admin_auth
 from maat.serving.feed import feed_router
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import routed_queue
@@ -85,6 +87,144 @@ app = FastAPI(lifespan=lifespan, title="Maat operator console")
 # console reads. The router is None only if FastAPI is unavailable at import (test env guard).
 if feed_router is not None:
     app.include_router(feed_router)
+
+
+# ============================ admin auth (P8, #163; D31/D32) ============================
+# Google OIDC + a strict email allowlist, SEPARATE from the user auth (serving/auth.py / Sign in
+# with Apple). Inert until the box env carries GOOGLE_CLIENT_ID/_SECRET + MAAT_ADMIN_EMAILS +
+# MAAT_ADMIN_SESSION_SECRET — until then `.enabled` is False, the gate falls open, and /admin/*
+# just redirects home, so dev/local/test behave exactly as before. Layered behind WireGuard (D31).
+_ADMIN = admin_auth.load_config(os.environ)
+if not _ADMIN.enabled:
+    print(
+        "[console] admin auth DISABLED (no MAAT_ADMIN_* secrets) — console is UNAUTHENTICATED",
+        flush=True,
+    )
+
+
+@app.middleware("http")
+async def _admin_gate(request: Request, call_next):
+    """Require a valid admin session for every console page. ``/api/*`` (the public app surface)
+    and the login dance itself stay open; everything else 303→/admin/login when not signed in."""
+    if not _ADMIN.enabled:
+        return await call_next(request)
+    path = request.url.path
+    if path.startswith("/api") or path in admin_auth.OPEN_PATHS or path.startswith("/static"):
+        return await call_next(request)
+    claims = admin_auth.verify_cookie(
+        request.cookies.get(admin_auth.SESSION_COOKIE, ""), _ADMIN.session_secret
+    )
+    if claims is None:
+        nxt = request.url.path + (("?" + request.url.query) if request.url.query else "")
+        return RedirectResponse(f"/admin/login?next={quote(nxt)}", status_code=303)
+    request.state.admin = claims
+    return await call_next(request)
+
+
+def _set_cookie(resp, name: str, value: str, max_age: int) -> None:
+    resp.set_cookie(
+        name, value, max_age=max_age, httponly=True,
+        secure=_ADMIN.cookie_secure, samesite="lax", path="/",
+    )
+
+
+async def _exchange(cfg: admin_auth.AdminConfig, code: str) -> dict:
+    """Google code→token exchange with our own short-lived httpx client. Monkeypatched in tests."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=15) as http:
+        return await admin_auth.exchange_code(cfg, code, http=http)
+
+
+async def _audit_session(event_type: str, payload: dict) -> None:
+    """Best-effort publish of admin.session.* for the audit log — never blocks/gates a login."""
+    nc = getattr(app.state, "nats", None)
+    if nc is None:
+        return
+    sub = payload.get("sub", "") or "admin"
+    try:
+        await events.publish(
+            nc, event_type, sub, events.admin_event(sub, actor=payload.get("email", ""))
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[console] admin audit publish failed ({event_type}): {exc}", flush=True)
+
+
+@app.get("/admin/login")
+async def admin_login(next: str = "/"):
+    if not _ADMIN.enabled:
+        return RedirectResponse("/", status_code=303)
+    st = admin_auth.make_state(next if next.startswith("/") else "/")
+    resp = RedirectResponse(
+        admin_auth.build_auth_url(_ADMIN, state=st["state"], nonce=st["nonce"]), status_code=303
+    )
+    _set_cookie(
+        resp, admin_auth.STATE_COOKIE,
+        admin_auth.sign_cookie(st, _ADMIN.session_secret), admin_auth.STATE_TTL,
+    )
+    return resp
+
+
+@app.get("/admin/callback")
+async def admin_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if not _ADMIN.enabled:
+        return RedirectResponse("/", status_code=303)
+    if error or not code or not state:
+        return HTMLResponse(_login_failed("Sign-in was cancelled or didn't complete."), 400)
+    st = admin_auth.verify_cookie(
+        request.cookies.get(admin_auth.STATE_COOKIE, ""), _ADMIN.session_secret
+    )
+    if not st or not hmac.compare_digest(str(st.get("state", "")), state):
+        return HTMLResponse(_login_failed("Your sign-in link expired — please try again."), 400)
+    try:
+        tok = await _exchange(_ADMIN, code)
+        claims = admin_auth.decode_id_token(tok["id_token"])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[console] admin token exchange failed: {exc}", flush=True)
+        return HTMLResponse(_login_failed("Couldn't complete sign-in with Google."), 502)
+    email, reason = admin_auth.check_identity(claims, _ADMIN, nonce=str(st.get("nonce", "")))
+    if email is None:
+        print(f"[console] admin login denied ({reason}): {claims.get('email')!r}", flush=True)
+        return HTMLResponse(_login_failed("That account isn't allowed to use this console."), 403)
+    sess = admin_auth.make_session(str(claims.get("sub", email)), email, ttl=_ADMIN.session_ttl)
+    await _audit_session(events.ADMIN_SESSION_CREATED, sess)
+    nxt = st.get("next", "/")
+    nxt = nxt if isinstance(nxt, str) and nxt.startswith("/") else "/"
+    resp = RedirectResponse(nxt, status_code=303)
+    _set_cookie(
+        resp, admin_auth.SESSION_COOKIE,
+        admin_auth.sign_cookie(sess, _ADMIN.session_secret), _ADMIN.session_ttl,
+    )
+    _set_cookie(resp, admin_auth.STATE_COOKIE, "", 0)  # clear the one-shot state cookie
+    return resp
+
+
+@app.get("/admin/logout")
+async def admin_logout(request: Request):
+    if not _ADMIN.enabled:
+        return RedirectResponse("/", status_code=303)
+    claims = admin_auth.verify_cookie(
+        request.cookies.get(admin_auth.SESSION_COOKIE, ""), _ADMIN.session_secret
+    )
+    if claims:
+        await _audit_session(events.ADMIN_SESSION_REVOKED, claims)
+    resp = RedirectResponse("/admin/login", status_code=303)
+    _set_cookie(resp, admin_auth.SESSION_COOKIE, "", 0)
+    return resp
+
+
+def _login_failed(msg: str) -> str:
+    """A minimal standalone page (no console chrome) for a denied/failed sign-in."""
+    return (
+        '<!doctype html><meta charset="utf-8"><meta name="viewport" '
+        'content="width=device-width,initial-scale=1"><title>Maat — sign in</title>'
+        '<div style="max-width:30rem;margin:18vh auto;padding:0 1.5rem;'
+        'font:16px/1.6 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;color:#1c1b19">'
+        '<h1 style="font-size:20px;letter-spacing:-.02em">Maat operator console</h1>'
+        f'<p style="color:#7a7770">{html.escape(msg)}</p>'
+        '<p><a href="/admin/login" style="color:#175fa5;font-weight:600">Try signing in again →</a></p>'
+        "</div>"
+    )
 
 
 # ============================ routes: content (feed + inspectors) ============================
@@ -2451,6 +2591,11 @@ def _nav(active: str) -> str:
         f'<a class="{"on" if key == active else ""}" href="{href}" title="{html.escape(tip)}">{label}</a>'
         for href, label, key, tip in tabs
     ]
+    if _ADMIN.enabled:
+        links.append(
+            '<a href="/admin/logout" title="End your admin session" '
+            'style="margin-left:auto;color:#b3402e">Sign out</a>'
+        )
     return f'<nav class="nav">{"".join(links)}</nav>'
 
 

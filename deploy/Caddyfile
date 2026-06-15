@@ -1,19 +1,39 @@
-# Maat public edge — terminates TLS (auto Let's Encrypt) and exposes ONLY the read API.
-# Everything else (the operator/admin console, corrections, run-triggers) is never served
-# publicly; reach it via an SSH tunnel to 127.0.0.1:8000 on the box.
+# Maat public edge — terminates TLS (auto Let's Encrypt) for two hostnames:
+#   • $MAAT_HOST        — PUBLIC. Serves ONLY the read API (/api/*). (api.maat.press)
+#   • $MAAT_ADMIN_HOST  — the operator/admin console. Public *name* + real cert, but served
+#                          ONLY to WireGuard source IPs (D31/D32). (admin.maat.press)
 #
-# $MAAT_HOST is the public hostname — e.g. <box-ip>.sslip.io (free, IP-based, real cert) or a
-# real domain whose A-record points at this box.
+# Caddy runs on the HOST network (see docker-compose.prod.yml) so the `remote_ip` matcher sees
+# the real client address — a WireGuard peer arrives as 10.8.0.x; the public internet does not.
+# The admin cert is still issued over the public :80 (HTTP-01) — the A record is public, so no
+# DNS-01 / OVH-API secret is needed (D32). Upstream is the reader on 127.0.0.1:8000 (host
+# loopback; also the SSH-tunnel break-glass address). The SSH tunnel stays as break-glass.
+
 {$MAAT_HOST} {
 	encode zstd gzip
 
 	@api path /api /api/*
 	handle @api {
-		reverse_proxy reader:8000
+		reverse_proxy 127.0.0.1:8000
 	}
 
-	# The admin/operator console stays private — not reachable from the internet.
+	# Everything else on the public host stays private — not reachable from the internet.
 	handle {
 		respond "Maat — not found" 404
+	}
+}
+
+{$MAAT_ADMIN_HOST} {
+	encode zstd gzip
+
+	# Defence-in-depth layer 1 (network): serve the console only to the WireGuard subnet.
+	# (Layer 2 is the Google-OIDC + allowlist gate inside the app.) A real LE cert is still
+	# presented to everyone; non-WG callers get a 403 instead of the login screen.
+	@wg remote_ip {$MAAT_WG_SUBNET:10.8.0.0/24}
+	handle @wg {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		respond "Maat operator console — reachable only over the private network." 403
 	}
 }

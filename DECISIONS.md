@@ -263,6 +263,22 @@ with far less to build than rolling WebAuthn; WireGuard keeps it private + sover
 never a single point of failure (break-glass over WG/SSH). **Options:** SSH-tunnel-only (status quo,
 clunky) / self-hosted passkey (more build) / **WireGuard + Google OIDC (chosen)** / reverse-proxy SSO
 (US SaaS, overkill). **Tradeoff accepted:** a US IdP in the admin path — but it's only the operator's
-login, not user data, and consistent with Apple-for-users (D9's honest limit). **Open at build:**
-redirect-flow (WG hostname + cert) vs Google device-flow (no redirect); console as its own service vs
-gated routes (gate now, split later). Tracked: #163. DRAFT — security review before production.
+login, not user data, and consistent with Apple-for-users (D9's honest limit). **Open at build:** console
+as its own service vs gated routes (gate now, split later). *(Redirect-flow + console URL resolved in
+D32.)* Tracked: #163. DRAFT — security review before production.
+
+### D32 — Admin console URL = `admin.maat.press` (public name, WireGuard-gated serving)
+**Decision (cauri: use the real domain; privacy model chosen on cauri's behalf):** the operator console
+gets a real hostname, **`admin.maat.press`**, instead of the interim `<ip>.sslip.io` (D27). A **public A
+record** `admin.maat.press → 167.233.109.64` was added in OVH's `maat.press` DNS zone (alongside the
+existing `api.maat.press` — same box), and resolves now. **Privacy model — public name + WG-gated serving
+(the simple/safe option):** the name resolves for anyone, but the console is **served only to WireGuard
+source IPs** (Caddy `remote_ip` matcher on the WG subnet + ufw); the public internet gets a 403, never the
+login screen. TLS is a **real Let's Encrypt cert** obtained via HTTP-01 over the already-public `:80` (the
+box answers for the hostname), so **no extra secrets**. **Rejected** the alternative (no public record +
+ACME **DNS-01** via the OVH API): it hides even the hostname, but needs OVH API credentials on the box and
+more moving parts — not worth it for a single operator, since "a hostname exists" is a negligible leak when
+both reachability (WG) and login (Google allowlist) are independently gated. **Resolves D31's open
+redirect-vs-device-flow question → redirect-flow:** the Google OIDC redirect URI is
+**`https://admin.maat.press/admin/callback`**. Realizes the "real domain" deferral from D27/#148 (api +
+admin now on `maat.press`); sslip.io drops to fallback. Tracked: #163.
