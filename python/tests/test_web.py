@@ -203,6 +203,94 @@ def test_prompt_registry_and_placeholder_guard():
     assert prompts.missing_placeholders("extremity", "rate {claim}") == []  # intact -> ok
 
 
+def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
+    """Every runtime prompt — backend (active + draft) and on-device — is registered with a
+    status and a source so cauri can review them all in the console."""
+    from maat import prompts
+
+    # All eight prompts are present.
+    assert set(prompts.PROMPTS_BY_KEY) == {
+        "extract", "classify", "extremity",          # active backend
+        "topics_enrich", "curation_geotag", "triage_llm",  # draft backend
+        "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
+    }
+    # Every entry carries a non-empty status, source, and prompt text.
+    for p in prompts.PROMPTS:
+        assert p["status"] in ("active", "draft", "on-device"), p["key"]
+        assert p["source"], p["key"]
+        assert p["default"].strip(), p["key"]
+    # Status partitioning is exactly as intended.
+    by_status = {}
+    for p in prompts.PROMPTS:
+        by_status.setdefault(p["status"], set()).add(p["key"])
+    assert by_status["active"] == {"extract", "classify", "extremity"}
+    assert by_status["draft"] == {"topics_enrich", "curation_geotag", "triage_llm"}
+    assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
+    # Only the active prompts are editable; draft/on-device are read-only.
+    assert prompts.EDITABLE_KEYS == frozenset({"extract", "classify", "extremity"})
+
+
+def test_draft_prompts_imported_live_from_their_modules():
+    """Draft prompt text is imported from the owning module so the console can never drift."""
+    from maat import prompts
+    from maat.agents.curation import _DRAFT_GEOTAG_PROMPT
+    from maat.agents.triage import TRIAGE_LLM_PROMPT
+    from maat.serving.topics import _LLM_PROMPT_TEMPLATE
+
+    assert prompts.PROMPTS_BY_KEY["topics_enrich"]["default"] == _LLM_PROMPT_TEMPLATE
+    assert prompts.PROMPTS_BY_KEY["curation_geotag"]["default"] == _DRAFT_GEOTAG_PROMPT
+    assert prompts.PROMPTS_BY_KEY["triage_llm"]["default"] == TRIAGE_LLM_PROMPT
+    # Draft prompts have no editable placeholders.
+    assert prompts.missing_placeholders("triage_llm", "anything") == []
+
+
+def test_ondevice_mirror_matches_swift_source_verbatim():
+    """The on-device prompts are mirrored byte-for-byte from the Swift source they name.
+
+    Guards against silent drift between the Apple Foundation Models prompts and the console
+    mirror. Reads the `instructions:` and `prompt` blocks from the Swift files (dedented the way
+    Swift presents a multi-line string literal) and asserts they appear verbatim in the mirror.
+    """
+    import pathlib
+
+    from maat import prompts
+
+    # Repo root: this test lives at <root>/python/tests/test_web.py
+    root = pathlib.Path(__file__).resolve().parents[2]
+
+    def swift_blocks(rel: str) -> list[str]:
+        src = (root / rel).read_text()
+        out, i = [], 0
+        while True:
+            start = src.find('"""', i)
+            if start == -1:
+                break
+            end = src.find('"""', start + 3)
+            lines = src[start + 3 : end].split("\n")
+            indent = lines[-1]  # closing-delimiter indentation Swift strips from each line
+            content = lines[1:-1]
+            out.append(
+                "\n".join(line[len(indent):] if line.startswith(indent) else line for line in content)
+            )
+            i = end + 3
+        return out
+
+    for key, rel in (
+        ("summarizer_ondevice", "apple/Maat/Services/Summarizer.swift"),
+        ("reranker_ondevice", "apple/Maat/Services/Reranker.swift"),
+    ):
+        entry = prompts.PROMPTS_BY_KEY[key]
+        assert entry["source"] == rel  # registry pins the canonical source path
+        # Locate the Swift file (tolerate a relocated Services/ -> Shared/ layout on side branches).
+        candidates = [rel, rel.replace("/Services/", "/Shared/")]
+        path = next((c for c in candidates if (root / c).exists()), None)
+        assert path is not None, f"{key}: cannot find Swift source ({candidates})"
+        instructions, prompt = swift_blocks(path)  # both blocks must exist
+        mirror = entry["default"]
+        assert instructions in mirror, f"{key}: instructions block drifted from {path}"
+        assert prompt in mirror, f"{key}: prompt block drifted from {path}"
+
+
 def test_active_text_falls_back_to_seed_without_pool():
     import asyncio
 
@@ -226,6 +314,45 @@ def test_prompts_page_shows_active_seed_history_and_rollback():
     }
     out = _prompts_page(rows)
     assert "version 2" in out and "Roll back" in out and "v1" in out
+
+
+def test_prompts_page_groups_active_draft_and_ondevice_with_full_text():
+    """The Prompts view surfaces every registered prompt, grouped by status, with each one's
+    label, status, source, and full text. Active stays editable; draft + on-device are read-only.
+    """
+    import html as _html
+
+    from maat import prompts
+    from maat.web.app import _prompts_page
+
+    out = _prompts_page({})
+
+    # Group headings are present.
+    assert "Active" in out
+    assert "Draft — pending cauri review" in out
+    assert "On-device (Apple)" in out
+
+    # Every registered prompt shows up by label and source, with its full seed text.
+    for p in prompts.PROMPTS:
+        assert _html.escape(p["label"]) in out, p["key"]
+        assert _html.escape(p["source"]) in out, p["key"]
+        # A distinctive slice of each prompt's body is rendered (escaped).
+        snippet = _html.escape(p["default"].strip().splitlines()[0])
+        assert snippet in out, p["key"]
+
+    # Draft + on-device blocks are read-only (a readonly textarea, no save form for them).
+    assert "readonly" in out
+    assert "Read-only — surfaced for review" in out
+
+    # Editable backend prompts keep their save form + golden-test button.
+    assert 'action="/prompts/save"' in out
+    assert "Test on goldens" in out
+
+    # A draft prompt's text is present but NOT inside a save form for that key.
+    triage_snip = _html.escape(prompts.PROMPTS_BY_KEY["triage_llm"]["default"].strip().splitlines()[0])
+    assert triage_snip in out
+    # On-device entries are labelled as Foundation Models mirrors.
+    assert "Foundation Models" in out
 
 
 def test_is_paused_reads_latest_state_per_clock():
