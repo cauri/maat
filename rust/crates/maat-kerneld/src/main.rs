@@ -109,9 +109,10 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
 
     if ev.typ == "article.ingested" {
         sqlx::query(
-            "insert into articles (id, tenant_id, title, source, url, language, body) \
-             values ($1, $2, $3, $4, $5, $6, $7) \
-             on conflict (id) do update set title = excluded.title, body = excluded.body",
+            "insert into articles (id, tenant_id, title, source, url, language, body, image_url) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8) \
+             on conflict (id) do update set title = excluded.title, body = excluded.body, \
+               image_url = excluded.image_url",
         )
         .bind(&ev.stream_id)
         .bind(&ev.tenant_id)
@@ -120,6 +121,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(ev.data.get("url").and_then(|v| v.as_str()))
         .bind(ev.data.get("language").and_then(|v| v.as_str()))
         .bind(ev.data.get("body").and_then(|v| v.as_str()))
+        .bind(ev.data.get("image_url").and_then(|v| v.as_str()))
         .execute(pool)
         .await?;
     }
