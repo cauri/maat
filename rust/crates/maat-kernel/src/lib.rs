@@ -57,4 +57,16 @@ mod tests {
         let log = vec![Event::Noop, Event::Noop];
         assert_eq!(Counter::replay(&log), Counter::replay(&log));
     }
+
+    #[test]
+    fn snapshot_then_resume_equals_full_replay() {
+        // The snapshot contract (PLAN §2.4): resuming from a snapshot at N plus the remaining
+        // events equals a full replay. Holds because the fold is pure — so checkpoints can be
+        // events, not bespoke recovery code. This is the property the RL/replay loop leans on.
+        let log = vec![Event::Noop, Event::Noop, Event::Noop, Event::Noop];
+        let full = Counter::replay(&log);
+        let snapshot = Counter::replay(&log[..2]);
+        let resumed = log[2..].iter().fold(snapshot, |s, e| Counter::apply(s, e));
+        assert_eq!(full, resumed);
+    }
 }
