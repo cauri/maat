@@ -123,12 +123,12 @@ async def _run_all() -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://itg") as ac:
             checks = [
                 ("/", "Maat"),
-                ("/runs", "Runs"),
-                ("/clocks", "Clocks"),  # A1 — ingestion clock status off the event log
+                ("/runs", "Activity"),
+                ("/clocks", "Updates"),  # A1 — ingestion clock status off the event log
                 ("/config", "0.35"),  # the seeded threshold proposal surfaces
                 ("/sources", "European Central Bank"),  # registry off articles
-                ("/eval", "Eval"),
-                ("/audit", "classification.corrected"),  # admin.* off the log, prefix stripped
+                ("/eval", "Quality"),
+                ("/audit", "fixed a claim"),  # admin.* rendered as plain action labels
                 (f"/cluster/{CLUSTER}", "rates up"),  # any($1::uuid[]) member fetch works
                 (f"/claim/{CL1}", "rates up"),  # uuid id binding works
             ]

@@ -57,12 +57,12 @@ def test_claim_badges_flag_corrections_and_laundering():
         "laundering_flag": "endorsement",
     }
     b = _claim_badges(c)
-    assert "headline" in b and "said · Araghchi" in b and "fact" in b
-    assert "corrected" in b and "laundering · endorsement" in b
+    assert "headline" in b and "quoted · Araghchi" in b and "fact" in b
+    assert "you fixed this" in b and "flagged · endorsement" in b
 
 
 def test_audit_page_strips_prefix_shows_reason_and_extras_and_handles_empty():
-    assert "No operator actions yet" in _audit_page([])
+    assert "No changes yet" in _audit_page([])
     rows = [
         {
             "type": "admin.cluster.split",
@@ -71,15 +71,15 @@ def test_audit_page_strips_prefix_shows_reason_and_extras_and_handles_empty():
         }
     ]
     out = _audit_page(rows)
-    assert "cluster.split" in out  # admin. prefix stripped for display
+    assert "split a story" in out  # plain-language action label
     assert "over-merged" in out
     assert "into=" in out  # non-standard fields surfaced
 
 
 def test_nav_marks_active_tab():
     assert 'class="on"' in _nav("content")
-    assert "Audit" in _nav("audit")
-    assert "Eval" in _nav("content")  # A4a tab present
+    assert "History" in _nav("audit")
+    assert "Quality" in _nav("content")  # renamed eval tab present
 
 
 def test_eval_page_surfaces_pass_fail_and_metrics():
@@ -107,9 +107,10 @@ def test_eval_page_surfaces_pass_fail_and_metrics():
 def test_eval_page_otlp_note_and_missing_fixtures():
     from maat.web.app import _eval_page
 
-    assert "OTLP tracing off" in _eval_page(None, "no fixtures", "")
+    assert "open cat-cafe" in _eval_page(None, "no fixtures", "")  # cat-cafe always surfaced
+    assert "not receiving yet" in _eval_page(None, "no fixtures", "")  # status when OTLP unset
     assert "no fixtures" in _eval_page(None, "no fixtures", "")
-    assert "open trace UI" in _eval_page(None, "x", "http://localhost:4318")
+    assert "receiving traces" in _eval_page(None, "x", "http://localhost:4318")
 
 
 def test_stage_summary_maps_event_types_to_stages():
@@ -119,9 +120,9 @@ def test_stage_summary_maps_event_types_to_stages():
         {"claims.extracted": {"n": 5, "last": None}, "cluster.corroborated": {"n": 2, "last": None}}
     )
     by = {r["label"]: r for r in rows}
-    assert by["Extract"]["count"] == 5
-    assert by["Corroborate"]["count"] == 2
-    assert by["Classify"]["count"] == 0  # an absent event type reads as zero, not missing
+    assert by["Pull out claims"]["count"] == 5
+    assert by["Score corroboration"]["count"] == 2
+    assert by["Label claims"]["count"] == 0  # an absent event type reads as zero, not missing
     assert all("make" in r["cmd"] for r in rows)
 
 
@@ -136,9 +137,9 @@ def test_runs_page_shows_stages_dead_letters_and_recent():
          "created_at": dt.datetime(2026, 6, 15, 9, 1)}
     ]
     out = _runs_page(stages, proj, recent, dead)
-    assert "Acquire / ingest" in out
-    assert "Dead-letter" in out and "boom" in out
-    assert "Recent events" in out
+    assert "Find articles" in out
+    assert "Errors — failed and skipped" in out and "boom" in out
+    assert "Recent activity" in out
 
 
 def test_config_knobs_sourced_from_live_code():
@@ -158,10 +159,10 @@ def test_config_page_shows_default_override_and_signoff_guard():
     out = _config_page(
         {"gate.floor": {"value": "0.35", "reason": "too strict", "at": dt.datetime(2026, 6, 15, 10, 0)}}
     )
-    assert "Config" in out
-    assert "0.35" in out and "pending sign-off" in out  # the proposal is shown, marked pending
-    assert "not auto-applied" in out  # the guardrail is surfaced to the operator
-    assert "core · sign-off" in out  # core knobs flagged
+    assert "Settings" in out
+    assert "0.35" in out and "not applied yet" in out  # the suggestion is shown, marked not-live
+    assert "suggestion" in out  # the propose-only guardrail is surfaced
+    assert "needs sign-off" in out  # core knobs flagged
 
 
 def test_wire_collapsed_sources_flags_only_multi_article_groups():
@@ -180,16 +181,16 @@ def test_sources_page_registry_badges_and_proposal_note():
         {"source": "AFP", "n": 9, "last": dt.datetime(2026, 6, 15), "langs": ["en", "fr"]},
     ]
     out = _sources_page(srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}}, {"AFP": "Wire"})
-    assert "European Central Bank" in out and "primary" in out  # primary-source role detected
-    assert "wire-collapsed" in out and "denied" in out and "group · Wire" in out
-    assert "proposals" in out  # enforcement-deferred guardrail surfaced
+    assert "European Central Bank" in out and "first-hand" in out  # first-hand source role shown
+    assert "reprint" in out and "denied" in out and "group · Wire" in out
+    assert "preferences" in out  # saved-as-preference note surfaced
 
 
 def test_nav_includes_all_p8_tabs():
     from maat.web.app import _nav
 
     n = _nav("content")
-    for label in ("Content", "Runs", "Clocks", "Config", "Sources", "Eval", "Audit"):
+    for label in ("Feed", "Activity", "Updates", "Settings", "Sources", "Quality", "History"):
         assert label in n
 
 
@@ -218,7 +219,24 @@ def test_clocks_page_status_topics_and_harvester_stub():
     from maat.web.app import _clocks_page
 
     running = _clocks_page({"n": 5, "last": dt.datetime(2026, 6, 15, 9, 0)}, [], ["AI"], False)
-    assert "running" in running and "Pause ingestion" in running and "AI" in running
-    assert "Projection-harvester" in running and "#39" in running  # harvester stub flagged
+    assert "News updates" in running and "Pause updates" in running and "AI" in running
+    assert "Prediction check" in running and "#39" in running  # harvester stub flagged
     paused = _clocks_page({"n": 5, "last": None}, [], [], True)
-    assert "paused" in paused and "Resume ingestion" in paused
+    assert "Paused" in paused and "Resume updates" in paused
+
+
+def test_doc_renders_confirmation_banner_only_when_flashed():
+    from maat.web.app import _doc
+
+    with_flash = _doc("<p>x</p>", "", "content", flash="Saved.")
+    assert 'class="flash"' in with_flash and "Saved." in with_flash
+    assert 'class="flash"' not in _doc("<p>x</p>", "", "content")  # none when nothing happened
+
+
+def test_redirect_carries_message_as_query():
+    from maat.web.app import _redirect
+
+    r = _redirect("/claim/abc", "Saved. Won't be overwritten.")
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/claim/abc?ok=")
+    assert _redirect("/sources").headers["location"] == "/sources"  # no message -> bare path
