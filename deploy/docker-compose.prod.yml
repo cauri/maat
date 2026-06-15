@@ -8,6 +8,7 @@
 #                            clusters). Cadence is operator-chosen via MAAT_TICK_INTERVAL.
 #   reader                 — the FastAPI app: public /api/* (incl. /api/v2 feed + image proxy) and
 #                            the loopback-only admin console
+#   cat-cafe               — OTLP sink: LLM spans (token usage = spend), admin-only UI on :8800
 #   caddy                  — the public edge (80/443); exposes ONLY /api/* (see Caddyfile)
 #
 # The reader is bound to 127.0.0.1, so the operator/admin console is reachable only via an SSH
@@ -68,6 +69,8 @@ services:
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
       NATS_URL: "nats://nats:4222"
+      # LLM spans (model + token usage = spend) → cat-cafe. No-op if cat-cafe is down.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://cat-cafe:4318"
     command: ["uv", "run", "--no-dev", "python", "-m", "maat.agents"]
     depends_on:
       postgres:
@@ -91,6 +94,7 @@ services:
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
       NATS_URL: "nats://nats:4222"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://cat-cafe:4318"   # corroborate/extremity LLM spend → cat-cafe
       # Operator-tunable. Topics drive what gets acquired; cadence drives cost.
       MAAT_TOPICS: ${MAAT_TOPICS:-global politics,artificial intelligence,new technology emerging,scientific discovery,art,worldwide entertainment,fun and laughter}
       MAAT_TICK_INTERVAL: ${MAAT_TICK_INTERVAL:-10800}   # 3h between ticks
@@ -135,6 +139,8 @@ services:
       # The admin console (P8, #82) publishes corrections to NATS; without this the reader
       # hit localhost:4222 and crash-looped. Point it at the compose nats service.
       NATS_URL: "nats://nats:4222"
+      # So translate spans export, and /eval shows "receiving traces" + links to cat-cafe.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://cat-cafe:4318"
     # Loopback only: Caddy reaches it as reader:8000 on the compose network; the host port is bound
     # to 127.0.0.1 for SSH-tunnel admin access. NOT published to the internet (closes the open :8000).
     ports:
@@ -144,6 +150,16 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+
+  # cat-cafe (#32) — LLM observability + spend sink. The pipeline exports OTLP spans here (model +
+  # token usage per call → cost). UI is admin-only on loopback (reach it like the reader console,
+  # via `ssh -L 8800:localhost:8800`); OTLP :4318 stays internal on the compose network. The
+  # console's /eval page links to it ("open cat-cafe ↗", CATCAFE_URL default http://localhost:8800).
+  cat-cafe:
+    image: artiumai/cat-cafe:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8800:8000"   # UI — SSH-tunnel only, never public
 
   caddy:
     image: caddy:2

@@ -8,6 +8,8 @@ COPY maat ./maat
 # scripts/ holds the acquisition clock (clock.py) and one-off acquire.py the clock service runs;
 # bundle them so the same image can drive ingestion, not just serve.
 COPY scripts ./scripts
-RUN uv sync --frozen --no-dev
+# --extra obs ships the OpenTelemetry exporter so the pipeline emits LLM spans (token usage =
+# spend) to cat-cafe when OTEL_EXPORTER_OTLP_ENDPOINT is set. No-op without the endpoint.
+RUN uv sync --frozen --no-dev --extra obs
 EXPOSE 8000
 CMD ["uv", "run", "--no-dev", "uvicorn", "maat.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
