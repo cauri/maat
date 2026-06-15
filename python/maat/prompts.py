@@ -27,6 +27,7 @@ from maat.agents.triage import TRIAGE_LLM_PROMPT
 from maat.pipeline.classify import PROMPT as CLASSIFY_PROMPT
 from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
+from maat.acquire.source_gate import PROMPT as SOURCE_GATE_PROMPT
 from maat.serving.topics import _LLM_PROMPT_TEMPLATE as TOPICS_LLM_PROMPT
 from maat.serving.topics import NEWS_QUERIES_PROMPT
 
@@ -128,6 +129,12 @@ PROMPTS: list[dict] = [
      "acquisition clock fetches news — not evergreen/SEO pages for the literal topic (e.g. 'fun and "
      "laughter' → 'comedy festival', 'feel-good viral story'). Runs once per interest per tick.",
      "placeholders": ["{interest}"]},
+    {"key": "source_gate", "label": "Source gate (is this a credible publisher?)",
+     "default": SOURCE_GATE_PROMPT, "status": "active", "source": "maat/acquire/source_gate.py",
+     "description": "At acquisition, judges each candidate's domain + headline — news outlet / "
+     "official primary source / reputable institution are kept; encyclopedias, social, SEO and "
+     "content farms are dropped before they ever become an article. Runs once per new domain.",
+     "placeholders": ["{domain}", "{headline}", "{channel}"]},
     # --- draft: gated backend prompts, surfaced read-only for cauri review (NOT active) ---
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
