@@ -73,3 +73,30 @@ final class TopicStore {
         topics.remove(atOffsets: offsets)
     }
 }
+
+/// Pinned stories the reader follows (BRIEF §1 — pin a story to follow it). On-device, per-user.
+@MainActor
+@Observable
+final class PinStore {
+    var pinned: [String] {
+        didSet { defaults.set(pinned, forKey: key) }
+    }
+
+    private let defaults: UserDefaults
+    private let key = "maat.pins"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        pinned = defaults.stringArray(forKey: key) ?? []
+    }
+
+    func isPinned(_ id: String) -> Bool { pinned.contains(id) }
+
+    func toggle(_ id: String) {
+        if let index = pinned.firstIndex(of: id) {
+            pinned.remove(at: index)
+        } else {
+            pinned.append(id)
+        }
+    }
+}

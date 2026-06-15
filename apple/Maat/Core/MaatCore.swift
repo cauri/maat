@@ -7,7 +7,7 @@ import Observation
 // same `AppRouter`. Everything here is on-device (PLAN §6).
 
 enum AppTab: String, Hashable {
-    case feed, search, topics, settings
+    case feed, sources, search, following
 }
 
 @MainActor
@@ -37,18 +37,28 @@ final class MaatCore {
     let analytics = Analytics()
     let feed = FeedStore(primary: FixtureFeedService())
     let router = AppRouter()
+    let pins = PinStore()
 
     private var didBootstrap = false
 
     private init() {}
 
-    /// Load the feed and re-rank against topics. Idempotent — safe to call from the UI's first render
-    /// and from any intent that needs data before the app has opened.
+    /// Load the feed + source reputations and re-rank against topics. Idempotent — safe to call from
+    /// the UI's first render and from any intent that needs data before the app has opened.
     func bootstrap() async {
         feed.setService(settings.makeFeedService())
         await feed.refresh()
         await feed.applyRerank(FoundationModelsReranker(), topics: topics.topics)
+        await feed.refreshSources()
         didBootstrap = true
+    }
+
+    /// Reputation ratings, loading first if an intent runs before the UI ever did.
+    func sources() async -> [SourceRating] {
+        if !didBootstrap || feed.sources.isEmpty {
+            await bootstrap()
+        }
+        return feed.sources
     }
 
     /// Stories in display order, loading them first if an intent runs before the UI ever did.

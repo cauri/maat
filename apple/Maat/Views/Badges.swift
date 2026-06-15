@@ -1,5 +1,32 @@
 import SwiftUI
 
+/// A titled white card — the shared container for detail/source sections.
+struct SectionCard<Content: View>: View {
+    var title: String?
+    @ViewBuilder var content: Content
+
+    init(title: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let title {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .textCase(.uppercase)
+                    .foregroundStyle(Palette.muted)
+            }
+            content
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.line, lineWidth: 1))
+    }
+}
+
 /// A pill, matching the web reader's `.b` chips.
 struct Chip: View {
     var text: String

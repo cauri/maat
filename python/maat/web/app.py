@@ -617,6 +617,144 @@ async def api_translate(req: TranslateReq) -> JSONResponse:
     )
 
 
+# ── Source reputation (provisional, pre-#37) — the Apple client's Sources view reads this ──────────
+#
+# Reputation as a learned truthfulness fold is P3 (#37) and not built yet. Until it is, approximate a
+# per-source signal from the corroboration projections: a source that keeps turning up in well-
+# corroborated clusters, or carries primary-source standing, scores higher. This is a PROXY, clearly
+# labelled `provisional` — NOT the §6 truthfulness trajectory. Cold-start sources stay neutral (§6.6).
+
+_PRIMARY_MARKERS = (
+    "statement", "communiqué", "communique", "ministry", "préfecture", "prefecture",
+    "official", "dataset", "document", "filing", "registry", "gazette",
+)
+
+
+def _is_primary_name(name: str) -> bool:
+    n = (name or "").lower()
+    return any(m in n for m in _PRIMARY_MARKERS)
+
+
+def _source_tier(reputation: float, is_primary: bool, cold_start: bool) -> str:
+    if cold_start:
+        return "not yet rated"
+    if is_primary:
+        return "primary source"
+    if reputation >= 0.8:
+        return "well-corroborated"
+    if reputation >= 0.65:
+        return "reliable"
+    if reputation >= 0.5:
+        return "building"
+    if reputation >= 0.35:
+        return "often uncorroborated"
+    return "low"
+
+
+def _cluster_sources(cluster, art_source: dict, claim_art: dict) -> set[str]:
+    srcs: set[str] = set()
+    for cid in _jload(cluster["claim_ids"]):
+        aid = claim_art.get(str(cid))
+        if aid and art_source.get(aid):
+            srcs.add(art_source[aid])
+    for grp in _jload(cluster["originators"]):
+        for aid in grp:
+            if art_source.get(aid):
+                srcs.add(art_source[aid])
+    return srcs
+
+
+async def _source_ratings(pool) -> list[dict]:
+    from collections import defaultdict
+
+    arts = await pool.fetch("select id, source, language from articles")
+    clusters = await pool.fetch(
+        "select fact, originators, claim_ids, confidence, has_primary, created_at "
+        "from clusters order by created_at"
+    )
+    claims = await pool.fetch("select id, article_id from claims")
+    art_source = {a["id"]: a["source"] for a in arts}
+    art_lang = {a["id"]: a["language"] for a in arts}
+    claim_art = {str(c["id"]): c["article_id"] for c in claims}
+
+    confs: dict[str, list] = defaultdict(list)
+    facts: dict[str, set] = defaultdict(set)
+    langs: dict[str, set] = defaultdict(set)
+    primary_part: dict[str, bool] = defaultdict(bool)
+
+    for cl in clusters:
+        srcs = _cluster_sources(cl, art_source, claim_art)
+        conf = float(cl["confidence"] or 0.0)
+        for s in srcs:
+            confs[s].append(conf)
+            facts[s].add(cl["fact"])
+            if cl["has_primary"]:
+                primary_part[s] = True
+        for cid in _jload(cl["claim_ids"]):
+            aid = claim_art.get(str(cid))
+            s = art_source.get(aid) if aid else None
+            if s and art_lang.get(aid):
+                langs[s].add(art_lang[aid])
+
+    ratings = []
+    for s in sorted({a["source"] for a in arts if a["source"]}):
+        cs = confs.get(s, [])
+        is_primary = _is_primary_name(s) or primary_part.get(s, False)
+        cold = not cs and not is_primary
+        reputation = 0.9 if is_primary else (sum(cs) / len(cs) if cs else 0.5)
+        reputation = max(0.0, min(1.0, reputation))
+        ratings.append(
+            {
+                "name": s,
+                "reputation": round(reputation, 3),
+                "tier": _source_tier(reputation, is_primary, cold),
+                "is_primary": is_primary,
+                "n_stories": len(facts.get(s, set())),
+                "cold_start": cold,
+                "trajectory": [round(c, 3) for c in cs[-8:]] or [round(reputation, 3)],
+                "languages": sorted(langs.get(s, set())) or ["en"],
+            }
+        )
+    ratings.sort(key=lambda r: (r["cold_start"], -r["reputation"], r["name"]))
+    return ratings
+
+
+@app.get("/api/sources")
+async def api_sources() -> JSONResponse:
+    ratings = await _source_ratings(app.state.pool)
+    return JSONResponse(
+        {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "provisional": True,
+            "note": "Pre-reputation-fold proxy (P3 #37 not built): reputation approximated from "
+            "corroboration confidence + primary-source standing, not the §6 truthfulness trajectory.",
+            "count": len(ratings),
+            "sources": ratings,
+        }
+    )
+
+
+@app.get("/api/source/{name}")
+async def api_source(name: str) -> JSONResponse:
+    pool = app.state.pool
+    match = next((r for r in await _source_ratings(pool) if r["name"] == name), None)
+    if match is None:
+        raise HTTPException(status_code=404, detail="no such source")
+    arts = await pool.fetch("select id, source from articles")
+    claims = await pool.fetch("select id, article_id from claims")
+    art_source = {a["id"]: a["source"] for a in arts}
+    claim_art = {str(c["id"]): c["article_id"] for c in claims}
+    clusters = await pool.fetch(
+        "select id, fact, confidence, originators, claim_ids from clusters order by confidence desc"
+    )
+    stories = [
+        {"id": cl["id"], "fact": cl["fact"], "confidence": float(cl["confidence"] or 0.0)}
+        for cl in clusters
+        if name in _cluster_sources(cl, art_source, claim_art)
+    ]
+    return JSONResponse({**match, "stories": stories})
+
+
 def _badge(text: str, cls: str) -> str:
     return f'<span class="b {cls}">{html.escape(text)}</span>'
 

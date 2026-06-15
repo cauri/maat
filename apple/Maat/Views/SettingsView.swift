@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Environment(FeedStore.self) private var feed
     @Environment(TopicStore.self) private var topics
     @Environment(Analytics.self) private var analytics
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         @Bindable var settings = settings
@@ -62,6 +63,11 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
     }
 

@@ -5,8 +5,17 @@ architecture in [`../PLAN.md`](../PLAN.md) §2.1 / §8. The **story** (a corrobo
 the unit: every story carries a confidence read (§5.6–5.7), its independent-originator collapse, and
 the claims that compose it. Mirrors the web reader's visual language so the two read as one product.
 
-> Status: P6 scaffold — all six stories (#52–#57) implemented and verified building on the iOS 27 SDK
-> and running on the iOS 27 simulator. See [`../DECISIONS.md`](../DECISIONS.md) D23.
+> Status: reading-first client (Apple News model) + a Sources reputation surface — see
+> [`../DECISIONS.md`](../DECISIONS.md) D25 and `../TIMELINE.md` (2026-06-15). P6 stories #52–#57 +
+> App Intents (#80) underneath. Verified building on the iOS 27 SDK and running on the iOS 27 simulator.
+>
+> **Tabs:** Today (Apple-News feed) · Sources (news-org reputation, BRIEF §6) · Search · Following
+> (pins + topics). Settings is a gear in Today. In story detail the claim-level veracity (voice / fact ·
+> projection / synthesis chips, independent-originator collapse) lives behind a "Why this confidence"
+> disclosure so reading comes first; each source carries its reputation inline.
+>
+> Reputation is a **provisional proxy** until the truth-over-time fold (#37, P3) is built — see
+> `/api/sources` below.
 
 ## Build & run
 
