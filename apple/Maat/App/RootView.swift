@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreSpotlight
 
 struct RootView: View {
     @Environment(AppRouter.self) private var router
@@ -21,6 +22,19 @@ struct RootView: View {
         }
         .task {
             await MaatCore.shared.bootstrap()
+        }
+        // A Spotlight tap on a donated story (#83) launches the app here — resolve the item id back to
+        // the story and open it. The donated identifier is namespaced by `SpotlightDonor`.
+        .onContinueUserActivity(CSSearchableItemActionType) { activity in
+            guard let identifier = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String,
+                  let storyID = SpotlightDonor.storyID(fromEntityIdentifier: identifier)
+            else { return }
+            Task {
+                if let story = await MaatCore.shared.story(id: storyID) {
+                    MaatCore.shared.router.open(story)
+                    MaatCore.shared.analytics.record(.storyOpened, storyID: storyID)
+                }
+            }
         }
     }
 }
