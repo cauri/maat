@@ -1,0 +1,19 @@
+# Maat public edge — terminates TLS (auto Let's Encrypt) and exposes ONLY the read API.
+# Everything else (the operator/admin console, corrections, run-triggers) is never served
+# publicly; reach it via an SSH tunnel to 127.0.0.1:8000 on the box.
+#
+# $MAAT_HOST is the public hostname — e.g. <box-ip>.sslip.io (free, IP-based, real cert) or a
+# real domain whose A-record points at this box.
+{$MAAT_HOST} {
+	encode zstd gzip
+
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy reader:8000
+	}
+
+	# The admin/operator console stays private — not reachable from the internet.
+	handle {
+		respond "Maat — not found" 404
+	}
+}

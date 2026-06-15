@@ -196,3 +196,17 @@ claims and per-source reputation sit *beneath* as context for what you read. **D
 now returns the cluster's contributing `articles` (full `body`); the client fetches it on open, and the
 bundled fixture carries bodies for offline. Sharpens D25 (§1 — the primary purpose is reading the news);
 engine untouched. Verified on the iOS 27 simulator + installed on device.
+
+### D27 — Production HTTPS edge; the app is a client of the server
+**Decision (cauri):** the iOS app is a **client of the deployed reader**, not a standalone fixture app —
+the bundled fixture is only an offline fallback. Stood up a **Caddy edge** on the Hetzner box: automatic
+TLS (Let's Encrypt) via `<ip>.sslip.io` — a free IP-based hostname with a real, iOS-trusted cert, so **no
+domain purchase is needed yet** (swap for a real domain later). **Only `/api/*` is public;** the
+operator/admin console (audit, corrections, run-triggers — previously exposed *unauthenticated* on plain
+`http://<ip>:8000`) is now reachable only via an SSH tunnel (reader rebound to `127.0.0.1`), with ufw
+allowing just 22/80/443. The app defaults to the prod URL (`AppSettings.defaultAPIBaseURL`), overridable
+in Settings; the feed store falls back to the fixture if the server is unreachable. **Deferred (tracked,
+#148):** a real domain, a privacy-preserving image proxy (D-images), per-user auth (P5 #51), and a
+continuously-running acquisition loop — the prod feed is currently the **seed corpus, not live news**.
+Apple distribution (TestFlight/App Store) is blocked on a dev-account admin issue; cabled dev signing
+used meanwhile.
