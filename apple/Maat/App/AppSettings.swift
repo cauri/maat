@@ -10,8 +10,8 @@ final class AppSettings {
     /// The deployed Maat reader the app talks to by default (the Hetzner box, over HTTPS). Overridable
     /// in Settings; cleared → the bundled fixture (offline fallback). The feed store also falls back to
     /// the fixture automatically if the server is unreachable.
-    /// TODO: move to a per-build-config value (xcconfig) once a real domain replaces the sslip.io host.
-    static let defaultAPIBaseURL = "https://167.233.109.64.sslip.io"
+    /// TODO: move to a per-build-config value (xcconfig) for Debug/Release split.
+    static let defaultAPIBaseURL = "https://api.maat.press"
 
     /// Base URL of the Maat reader. Empty → bundled fixture. Defaults to `defaultAPIBaseURL`.
     var apiBaseURL: String {
