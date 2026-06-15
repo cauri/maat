@@ -669,6 +669,47 @@ async def prompts_chat(req: PromptChatReq) -> JSONResponse:
     return JSONResponse({"reply": reply.text})
 
 
+class AssistantReq(BaseModel):
+    page: str = ""  # the current page's label, e.g. "Settings"
+    purpose: str = ""  # what the page is for
+    messages: list[PromptChatMsg] = []  # the running conversation, oldest first
+
+
+def _assistant_prompt(page: str, purpose: str, messages: list[PromptChatMsg], system: str) -> str:
+    """Fill the assistant's system prompt with the current page + append the conversation. Pure."""
+    head = system.replace("{page}", page or "this page").replace(
+        "{purpose}", purpose or "(no description on file)"
+    )
+    convo = "\n\n".join(
+        f"{'Operator' if m.role == 'user' else 'You'}: {m.content}" for m in messages
+    )
+    return f"{head}\n\n--- Conversation so far ---\n{convo}\n\nYou:" if convo else head
+
+
+@app.post("/assistant/chat")
+async def assistant_chat(req: AssistantReq) -> JSONResponse:
+    """Page-aware console assistant (the always-open right panel). Read-only Q&A for now — it
+    explains the current page and how the console works. Its system prompt is the editable
+    ``console_assistant`` prompt (operator-tunable on the Prompts page); ``{page}``/``{purpose}``
+    are filled with the current page. Degrades gracefully (HTTP 200 + ``error``), never 500s."""
+    system = await prompts.active_text(
+        getattr(app.state, "pool", None), "console_assistant", prompts.CONSOLE_ASSISTANT
+    )
+    prompt = _assistant_prompt(req.page, req.purpose, req.messages, system)
+    try:
+        reply = await asyncio.to_thread(
+            seam.claude_complete, prompt, model=seam.CLAUDE_JUDGE, max_tokens=1200
+        )
+    except KeyError:  # ANTHROPIC_API_KEY not set
+        return JSONResponse(
+            {"error": "Assistant unavailable — set ANTHROPIC_API_KEY in the reader's env to enable it."},
+            status_code=200,
+        )
+    except Exception as exc:  # noqa: BLE001 - any provider/network error stays graceful, never 500
+        return JSONResponse({"error": f"Assistant unavailable — {exc}"}, status_code=200)
+    return JSONResponse({"reply": reply.text})
+
+
 # ============================ routes: P8 dashboards (read-only, over real backends) ==========
 
 
@@ -2697,28 +2738,53 @@ def _eval_page(report, err: str, otlp: str) -> str:
 # ============================ chrome ========================================================
 
 
+# Sidebar nav: (href, label, active-key, icon, purpose). The purpose doubles as the page's
+# hover tooltip AND the context the right-panel assistant gets about the current page.
+_NAV_TABS = [
+    ("/", "Feed", "content", "📰", "The news feed — open any story to see or fix how Maat judged it"),
+    ("/runs", "Activity", "runs", "📊", "What the system has processed, and anything that failed"),
+    ("/review", "Review", "review", "💬", "User feedback, triaged — what needs a decision"),
+    ("/clocks", "Updates", "clocks", "⏱️", "When Maat pulls in new news — and a switch to pause it"),
+    ("/config", "Settings", "config", "⚙️", "The dials Maat runs on (changes are proposed, not auto-applied)"),
+    ("/policy", "Policy", "policy", "🎚️", "What the learning loop would change — bounded, sign-off-gated"),
+    ("/prompts", "Prompts", "prompts", "✏️", "Edit the instructions each AI step runs on (live on next run)"),
+    ("/sources", "Sources", "sources", "📚", "Every outlet Maat reads, and how you want each one treated"),
+    ("/reputation", "Reputation", "reputation", "⭐", "How each source has held up over time"),
+    ("/calibration", "Calibration", "calibration", "🎯", "Is the confidence read right? Plus de-US-centering & health"),
+    ("/eval", "Quality", "eval", "✅", "Automatic checks that Maat is still judging correctly"),
+    ("/spend", "Spend", "spend", "💰", "What Maat has spent on AI + acquisition so far"),
+    ("/audit", "History", "audit", "🕘", "A log of every change made in this console"),
+]
+# active-key -> (label, purpose) — the assistant's page context.
+_PAGE_META = {key: (label, tip) for _h, label, key, _i, tip in _NAV_TABS}
+
+
 def _nav(active: str) -> str:
-    tabs = [
-        ("/", "Feed", "content", "📰", "The news feed — open any story to see or fix how Maat judged it"),
-        ("/runs", "Activity", "runs", "📊", "What the system has processed, and anything that failed"),
-        ("/review", "Review", "review", "💬", "User feedback, triaged — what needs a decision"),
-        ("/clocks", "Updates", "clocks", "⏱️", "When Maat pulls in new news — and a switch to pause it"),
-        ("/config", "Settings", "config", "⚙️", "The dials Maat runs on (changes are proposed, not auto-applied)"),
-        ("/policy", "Policy", "policy", "🎚️", "What the learning loop would change — bounded, sign-off-gated"),
-        ("/prompts", "Prompts", "prompts", "✏️", "Edit the instructions each AI step runs on (live on next run)"),
-        ("/sources", "Sources", "sources", "📚", "Every outlet Maat reads, and how you want each one treated"),
-        ("/reputation", "Reputation", "reputation", "⭐", "How each source has held up over time"),
-        ("/calibration", "Calibration", "calibration", "🎯", "Is the confidence read right? Plus de-US-centering & health"),
-        ("/eval", "Quality", "eval", "✅", "Automatic checks that Maat is still judging correctly"),
-        ("/spend", "Spend", "spend", "💰", "What Maat has spent on AI + acquisition so far"),
-        ("/audit", "History", "audit", "🕘", "A log of every change made in this console"),
-    ]
     links = [
         f'<a class="{"on" if key == active else ""}" href="{href}" data-tip="{html.escape(tip)}">'
         f'<span class="ico">{ico}</span>{label}</a>'
-        for href, label, key, ico, tip in tabs
+        for href, label, key, ico, tip in _NAV_TABS
     ]
     return f'<nav class="nav">{"".join(links)}</nav>'
+
+
+def _assistant_panel(active: str) -> str:
+    """The always-open right-panel assistant (page-aware Q&A). Hidden on Prompts, which has its
+    own chat column. Carries the current page's label + purpose so the chat tells Claude where
+    the operator is. The conversation is client-side; the reply comes from /assistant/chat."""
+    if active == "prompts":
+        return ""
+    label, purpose = _PAGE_META.get(active, (active.title() or "Console", ""))
+    return (
+        f'<aside class="assistant" data-page="{html.escape(label)}" data-purpose="{html.escape(purpose)}">'
+        '<div class="assistant-head">💬 Ask Claude <span>· about this page</span></div>'
+        '<div class="chat-log" id="asst-log"></div>'
+        '<div class="chat-row">'
+        f'<textarea class="chat-in" id="asst-in" rows="2" placeholder="Ask about {html.escape(label)}…">'
+        '</textarea>'
+        '<button type="button" class="chat-send" id="asst-send" onclick="maatAssistant()">Send</button>'
+        '</div></aside>'
+    )
 
 
 def _doc(main_html: str, subtitle: str, active: str, flash: str = "") -> str:
@@ -2731,6 +2797,7 @@ def _doc(main_html: str, subtitle: str, active: str, flash: str = "") -> str:
     return (
         _DOC.replace("{{nav}}", _nav(active))
         .replace("{{foot}}", foot)
+        .replace("{{assistant}}", _assistant_panel(active))
         .replace("{{subtitle}}", html.escape(subtitle))
         .replace("{{main}}", banner + main_html)
     )
@@ -2754,6 +2821,7 @@ _DOC = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="topbar"><div class="subtitle">{{subtitle}}</div></div>
 {{main}}
 </main>
+{{assistant}}
 </div>
 <script>
 // "Improve with chat" (#158): raw-Claude helper on each editable prompt. Per-key conversation,
@@ -2816,5 +2884,34 @@ async function maatPromptChat(key){
   }
   btn.disabled=false; btn.textContent=label; log.scrollTop=log.scrollHeight;
 }
+
+// Page-aware console assistant (always-open right panel). Sends the current page + conversation
+// to /assistant/chat; renders the reply. Read-only Q&A for now.
+window.maatAsst = window.maatAsst || [];
+async function maatAssistant(){
+  var panel=document.querySelector('.assistant');
+  var input=document.getElementById('asst-in');
+  var log=document.getElementById('asst-log');
+  var btn=document.getElementById('asst-send');
+  if(!panel||!input||!log||!btn) return;
+  var text=input.value.trim(); if(!text) return;
+  window.maatAsst.push({role:'user',content:text});
+  maatBubble(log,'you',maatEsc(text));
+  input.value=''; btn.disabled=true; var label=btn.textContent; btn.textContent='…';
+  log.scrollTop=log.scrollHeight;
+  try{
+    var resp=await fetch('/assistant/chat',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({page:panel.dataset.page,purpose:panel.dataset.purpose,messages:window.maatAsst})});
+    var data=await resp.json();
+    if(data.error){ maatBubble(log,'err',maatEsc(data.error)); }
+    else{ window.maatAsst.push({role:'assistant',content:data.reply}); maatBubble(log,'bot',maatEsc(data.reply)); }
+  }catch(e){ maatBubble(log,'err','Assistant unavailable — '+maatEsc(e.message||e)); }
+  btn.disabled=false; btn.textContent=label; log.scrollTop=log.scrollHeight;
+}
+// Enter sends (Shift+Enter = newline).
+(function(){var i=document.getElementById('asst-in');
+  if(i)i.addEventListener('keydown',function(e){
+    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();maatAssistant();}});})();
 </script>
 </body></html>"""

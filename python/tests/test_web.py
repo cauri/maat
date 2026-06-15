@@ -212,7 +212,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     assert set(prompts.PROMPTS_BY_KEY) == {
         "extract", "classify", "extremity", "acquire_queries", "source_gate",  # active backend
         "topics_enrich", "curation_geotag", "triage_llm",  # draft backend (gated)
-        "prompt_chat_agent",                         # draft: the console chat helper's own prompt
+        "prompt_chat_agent", "console_assistant",    # draft: console chat helper + page assistant
         "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
     }
     # Every entry carries a non-empty status, source, and prompt text.
@@ -225,7 +225,9 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     for p in prompts.PROMPTS:
         by_status.setdefault(p["status"], set()).add(p["key"])
     assert by_status["active"] == {"extract", "classify", "extremity", "acquire_queries", "source_gate"}
-    assert by_status["draft"] == {"topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent"}
+    assert by_status["draft"] == {
+        "topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent", "console_assistant"
+    }
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
     # Only the active prompts are editable; draft/on-device are read-only.
     assert prompts.EDITABLE_KEYS == frozenset(
@@ -895,3 +897,19 @@ def test_doc_shell_is_sidebar_with_external_stylesheet():
     assert "<style>" not in page                                # CSS is external now
     assert 'class="app"' in page and 'class="sidebar"' in page  # sidebar layout
     assert "data-tip=" in page                                  # nav items carry on-page tooltips
+
+
+def test_assistant_panel_and_prompt_wired():
+    """The always-open assistant renders with the page context on normal pages, is hidden on
+    Prompts (its own chat), and its system prompt is an editable registry prompt with placeholders."""
+    from maat import prompts
+    from maat.web.app import _assistant_prompt, _doc
+
+    page = _doc("<p>x</p>", "sub", "config")
+    assert 'class="assistant"' in page and 'data-page="Settings"' in page
+    assert 'id="asst-in"' in page and "maatAssistant" in page
+    assert 'class="assistant"' not in _doc("x", "s", "prompts")  # Prompts keeps its own chat
+
+    assert prompts.PROMPTS_BY_KEY["console_assistant"]["status"] == "draft"  # reviewable, code-canonical
+    assert prompts.PROMPTS_BY_KEY["console_assistant"]["placeholders"] == ["{page}", "{purpose}"]
+    assert _assistant_prompt("Settings", "the dials", [], "On {page}: {purpose}") == "On Settings: the dials"
