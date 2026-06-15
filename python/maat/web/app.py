@@ -803,8 +803,9 @@ async def api_source(name: str) -> JSONResponse:
     return JSONResponse({**match, "stories": stories})
 
 
-def _badge(text: str, cls: str) -> str:
-    return f'<span class="b {cls}">{html.escape(text)}</span>'
+def _badge(text: str, cls: str, tip: str = "") -> str:
+    t = f' title="{html.escape(tip)}"' if tip else ""
+    return f'<span class="b {cls}"{t}>{html.escape(text)}</span>'
 
 
 def derivation_explain(independent_originators: int, has_primary: bool, extremity: str) -> str:
@@ -827,22 +828,31 @@ def derivation_explain(independent_originators: int, has_primary: bool, extremit
 def _claim_badges(c) -> str:
     badges = []
     if c["in_headline"]:
-        badges.append(_badge("headline", "head"))
+        badges.append(_badge("headline", "head", "This claim appeared in the article's headline"))
     if c["voice"] == "attributed":
-        badges.append(_badge(f"said · {c['speaker'] or '?'}", "attr"))
+        badges.append(_badge(
+            f"quoted · {c['speaker'] or '?'}", "attr",
+            "Attributed — someone else said it. The outlet is judged on quoting accurately, "
+            "not on whether the claim is true.",
+        ))
     else:
-        badges.append(_badge("own voice", "own"))
+        badges.append(_badge("outlet's own words", "own",
+                             "The outlet stated this itself, so it's accountable for it"))
     if c["kind"] == "fact":
-        badges.append(_badge("fact", "fact"))
+        badges.append(_badge("fact", "fact", "A claim about now, checkable as true or false"))
     elif c["kind"] == "projection":
         extra = f" · {c['horizon']}" if c["horizon"] else ""
-        badges.append(_badge(f"projection{extra}", "proj"))
+        badges.append(_badge(f"prediction{extra}", "proj",
+                             "A forecast about the future — scored separately, never as truth"))
     if c["is_synthesis"]:
-        badges.append(_badge("synthesis", "syn"))
+        badges.append(_badge("conclusion", "syn",
+                             "The outlet's own conclusion drawn from other claims"))
     if _rget(c, "corrected"):
-        badges.append(_badge("corrected", "corr"))
+        badges.append(_badge("you fixed this", "corr",
+                             "You corrected this; the pipeline won't overwrite it"))
     if _rget(c, "laundering_flag"):
-        badges.append(_badge(f"laundering · {c['laundering_flag']}", "laun"))
+        badges.append(_badge(f"flagged · {c['laundering_flag']}", "laun",
+                             "You flagged this as misleading attribution"))
     return "".join(badges)
 
 
@@ -983,7 +993,7 @@ def _feed_page(articles, by_article, clusters, id_to_source) -> str:
         )
     cards = "".join(_card(a, by_article.get(a["id"], [])) for a in articles)
     if not cards:
-        cards = '<p class="empty">No articles yet — start the agents and ingest a corpus.</p>'
+        cards = '<p class="empty">No stories yet — pull some news from the Updates tab.</p>'
     subtitle = f"{n_stories or len(articles)} stories · corroboration over spread · confidence on every claim"
     return _doc(panel + cards, subtitle, "content")
 
@@ -1010,18 +1020,23 @@ def _cluster_page(cl, members, id_to_source, others) -> str:
     )
     split = (
         f'<form class="box" method="post" action="/cluster/{cid}/split">'
-        '<div class="bl">Split — tick the claims to pull into a new cluster (the #20 fix surface)</div>'
+        '<div class="bl">Split this story</div>'
+        '<div class="note">Tick the claims that don\'t belong here — they move into a new, separate '
+        'story. Confidence is recalculated for both.</div>'
         f'{checks}'
-        '<input class="reason" name="reason" placeholder="why (recorded in the audit log)">'
-        '<button>Split selected</button></form>'
+        '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
+        '<button title="Move the ticked claims into a new story; both stories are rescored">'
+        'Split off ticked claims</button></form>'
     )
     merge = (
         '<form class="box" method="post" action="/cluster/merge">'
         f'<input type="hidden" name="cluster_ids" value="{html.escape(cid)}">'
-        '<div class="bl">Merge with another cluster (one fact split across two)</div>'
+        '<div class="bl">Merge with another story</div>'
+        '<div class="note">Pick another story that is really the same event. They become one; '
+        'confidence is recalculated for the result.</div>'
         f'<select name="cluster_ids">{_opts(others)}</select>'
-        '<input class="reason" name="reason" placeholder="why (recorded)">'
-        '<button>Merge</button></form>'
+        '<input class="reason" name="reason" placeholder="reason (optional)">'
+        '<button title="Combine these into one story and rescore">Merge stories</button></form>'
         if others else ""
     )
     mrows = []
@@ -1030,8 +1045,9 @@ def _cluster_page(cl, members, id_to_source, others) -> str:
             f'<form class="inline" method="post" action="/cluster/{cid}/move">'
             f'<input type="hidden" name="claim_id" value="{m["id"]}">'
             f'<select name="to_cluster">{_opts(others)}</select>'
-            '<input class="reason" name="reason" placeholder="why">'
-            '<button>Move</button></form>'
+            '<input class="reason" name="reason" placeholder="reason">'
+            '<button title="Move just this claim to another story; both are rescored">Move</button>'
+            '</form>'
             if others else ""
         )
         mrows.append(
@@ -1040,11 +1056,12 @@ def _cluster_page(cl, members, id_to_source, others) -> str:
             f'<div class="src">{html.escape(m["art_source"] or "")}</div>{move}</div>'
         )
     return (
-        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
         f'{_headline(cl, id_to_source)}'
-        f'<div class="deriv">Confidence derivation: {html.escape(deriv)}</div>'
+        f'<div class="deriv" title="The same calculation that produced the score above">'
+        f'How this score was reached: {html.escape(deriv)}</div>'
         f'{split}{merge}'
-        f'<div class="bl mt">Member claims ({len(members)})</div>{"".join(mrows)}</div>'
+        f'<div class="bl mt">Claims in this story ({len(members)})</div>{"".join(mrows)}</div>'
     )
 
 
@@ -1058,50 +1075,78 @@ def _claim_page(c, prov) -> str:
         for p in prov
     )
     meta = (
-        f'<div class="kv"><b>article</b> {html.escape(c["art_title"] or "")} '
+        f'<div class="kv"><b>From article</b> {html.escape(c["art_title"] or "")} '
         f'<span class="mut">({html.escape(c["art_source"] or "")}, {html.escape(c["art_language"] or "?")})</span></div>'
-        f'<div class="kv"><b>evidence span</b> {html.escape(c["evidence_span"] or "—")}</div>'
-        f'<div class="kv"><b>relay chain</b> {relay_html}</div>'
+        f'<div class="kv" title="The exact words this claim was pulled from">'
+        f'<b>Exact wording</b> {html.escape(c["evidence_span"] or "—")}</div>'
+        f'<div class="kv" title="Who passed the claim along, in order">'
+        f'<b>Quote chain</b> {relay_html}</div>'
     )
     correct = (
         f'<form class="box" method="post" action="/claim/{clid}/correct">'
-        '<div class="bl">Correct classification (each fix is an audited event)</div>'
-        '<label>kind <select name="kind"><option value="">— keep —</option>'
-        '<option value="fact">fact</option><option value="projection">projection</option></select></label>'
-        '<label>voice <select name="voice"><option value="">— keep —</option>'
-        '<option value="own">own</option><option value="attributed">attributed</option></select></label>'
-        '<label>speaker <input name="speaker" placeholder="(unchanged)"></label>'
-        '<input class="reason" name="reason" placeholder="why (recorded)">'
-        '<button>Apply correction</button></form>'
+        '<div class="bl">Fix this claim</div>'
+        '<div class="note">Change how Maat labelled it. Your fix is saved and won\'t be overwritten '
+        'when the pipeline runs again.</div>'
+        '<label title="Fact = checkable now · Prediction = about the future">Type '
+        '<select name="kind"><option value="">— leave as is —</option>'
+        '<option value="fact">fact</option><option value="projection">prediction</option></select></label>'
+        '<label title="Outlet\'s own = it said it · Quoted = it quoted someone">Voice '
+        '<select name="voice"><option value="">— leave as is —</option>'
+        '<option value="own">outlet\'s own</option><option value="attributed">quoted</option>'
+        '</select></label>'
+        '<label>Speaker <input name="speaker" placeholder="(leave blank to keep)"></label>'
+        '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
+        '<button title="Saves your label; it survives pipeline re-runs">Save fix</button></form>'
     )
     flag = (
         f'<form class="box" method="post" action="/claim/{clid}/flag">'
-        '<div class="bl">Flag a laundering abuse (§5.2) — makes the outlet own the claim</div>'
-        '<select name="abuse"><option value="endorsement">endorsement</option>'
-        '<option value="bare_repetition">bare repetition as fact</option>'
-        '<option value="selective_amplification">selective amplification</option></select>'
-        '<input class="reason" name="reason" placeholder="why (recorded)">'
-        '<button>Flag</button></form>'
+        '<div class="bl">Flag misleading attribution</div>'
+        '<div class="note">Use when an outlet hides its own claim behind a quote. Flagging makes the '
+        'outlet accountable for the claim.</div>'
+        '<select name="abuse">'
+        '<option value="endorsement">Endorsed it as true</option>'
+        '<option value="bare_repetition">Stated it as its own fact</option>'
+        '<option value="selective_amplification">Only ever amplifies one side</option></select>'
+        '<input class="reason" name="reason" placeholder="reason (optional)">'
+        '<button title="Makes the outlet own this claim for scoring">Flag it</button></form>'
     )
     provenance = (
-        '<div class="bl mt">Provenance — the events behind this claim</div>'
+        '<div class="bl mt">Where this came from</div>'
         f'<ul class="prov">{prov_rows or "<li class=mut>none</li>"}</ul>'
-        '<div class="mut sm">Model / prompt version / trace_id are not captured yet — that '
-        'capture lands with the eval surfacing in #75 (A4a).</div>'
+        '<div class="mut sm">Maat doesn\'t record which AI model judged this yet.</div>'
     )
     return (
-        '<div class="ins"><a class="back" href="/">← feed</a>'
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
         f'<div class="cfact">{html.escape(c["text"])}</div>'
         f'<div class="bs">{_claim_badges(c)}</div>{meta}'
         f'{correct}{flag}{provenance}</div>'
     )
 
 
+_ACTION_LABELS = {
+    "admin.classification.corrected": "fixed a claim",
+    "admin.laundering.flagged": "flagged attribution",
+    "admin.cluster.split": "split a story",
+    "admin.cluster.merged": "merged stories",
+    "admin.claim.moved": "moved a claim",
+    "admin.threshold.changed": "suggested a setting",
+    "admin.run.triggered": "logged a run",
+    "admin.source.flagged": "flagged a source",
+    "admin.source.grouped": "grouped sources",
+    "admin.clock.set": "paused/resumed updates",
+}
+
+
+def _action_label(event_type: str) -> str:
+    """A plain-English name for an admin event type (History page). Pure."""
+    return _ACTION_LABELS.get(event_type, event_type.removeprefix("admin."))
+
+
 def _audit_page(rows) -> str:
     if not rows:
         return (
-            '<div class="ins"><a class="back" href="/">← feed</a>'
-            '<p class="empty">No operator actions yet.</p></div>'
+            '<div class="ins"><a class="back" href="/">← back to feed</a>'
+            '<p class="empty">No changes yet. Anything you change in the console will be logged here.</p></div>'
         )
     trs = []
     for r in rows:
@@ -1111,25 +1156,25 @@ def _audit_page(rows) -> str:
         trs.append(
             "<tr>"
             f'<td class="mut">{r["created_at"]:%Y-%m-%d %H:%M}</td>'
-            f'<td><span class="atype">{html.escape(r["type"].removeprefix("admin."))}</span></td>'
+            f'<td><span class="atype">{html.escape(_action_label(r["type"]))}</span></td>'
             f'<td class="mono">{html.escape(str(d.get("target", "")))}</td>'
             f'<td>{html.escape(str(d.get("actor", "")))}</td>'
             f'<td>{html.escape(str(d.get("reason", "")))}</td>'
             f'<td class="mono">{html.escape(ex)}</td></tr>'
         )
     return (
-        '<div class="ins"><a class="back" href="/">← feed</a>'
-        '<h3 class="ih">Audit — every operator action, straight off the event log</h3>'
-        '<table class="aud"><tr><th>when</th><th>action</th><th>target</th><th>actor</th>'
-        f'<th>reason</th><th>fields</th></tr>{"".join(trs)}</table></div>'
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">History — every change made in this console</h3>'
+        '<table class="aud"><tr><th>when</th><th>what</th><th>item</th><th>who</th>'
+        f'<th>why</th><th>details</th></tr>{"".join(trs)}</table></div>'
     )
 
 
 _STAGES = [
-    ("Acquire / ingest", "article.ingested", "make acquire QUERY=… N=12  ·  make ingest-corpus"),
-    ("Extract", "claims.extracted", "make agents"),
-    ("Classify", "claims.classified", "make agents"),
-    ("Corroborate", "cluster.corroborated", "make corroborate"),
+    ("Find articles", "article.ingested", "make acquire QUERY=… N=12  ·  make ingest-corpus"),
+    ("Pull out claims", "claims.extracted", "make agents"),
+    ("Label claims", "claims.classified", "make agents"),
+    ("Score corroboration", "cluster.corroborated", "make corroborate"),
 ]
 
 
@@ -1151,15 +1196,16 @@ def _runs_page(stages, proj, recent, dead) -> str:
     )
     srows = []
     for s in stages:
-        last = f'{s["last"]:%Y-%m-%d %H:%M}' if s["last"] else "—"
+        last = f'{s["last"]:%Y-%m-%d %H:%M}' if s["last"] else "never"
         srows.append(
-            '<div class="srow"><div class="sname">'
-            f'{html.escape(s["label"])}<span class="mut sm"> · {html.escape(s["type"])}</span></div>'
-            f'<div class="snum">{s["count"]}<span class="mut sm"> events · last {last}</span></div>'
+            f'<div class="srow" title="event: {html.escape(s["type"])}"><div class="sname">'
+            f'{html.escape(s["label"])}</div>'
+            f'<div class="snum">{s["count"]}<span class="mut sm"> done · last {last}</span></div>'
             f'<div class="scmd mono">{html.escape(s["cmd"])}</div>'
             '<form class="inline" method="post" action="/runs/trigger">'
             f'<input type="hidden" name="stage" value="{html.escape(s["label"])}">'
-            '<button title="record intent in the audit log">log run</button></form></div>'
+            '<button title="Notes that you started this step. It does not run it — you run that '
+            'yourself, to control cost.">Log a run</button></form></div>'
         )
     dead_html = ""
     if dead:
@@ -1171,8 +1217,9 @@ def _runs_page(stages, proj, recent, dead) -> str:
             for r in dead
         )
         dead_html = (
-            f'<div class="bl mt">Dead-letter — projection failures ({len(dead)})</div>'
-            '<table class="aud"><tr><th>when</th><th>type</th><th>stream</th><th>error</th></tr>'
+            f'<div class="bl mt" title="Items that hit an error and were skipped, so they are not '
+            f'lost silently">Errors — failed and skipped ({len(dead)})</div>'
+            '<table class="aud"><tr><th>when</th><th>step</th><th>item</th><th>error</th></tr>'
             f"{drows}</table>"
         )
     rrows = "".join(
@@ -1182,16 +1229,15 @@ def _runs_page(stages, proj, recent, dead) -> str:
         for r in recent
     )
     note = (
-        '<div class="mut sm">Token spend + timing are traced per LLM call to cat-cafe (see Eval). '
-        "Per-run cost against the budget (D22), and projection replay (rebuild from the log, a kernel "
-        "feature), are not wired yet — flagged, not faked.</div>"
+        '<div class="mut sm">Cost and timing for each AI call are tracked in cat-cafe (see the '
+        "Quality tab). Total cost-per-run and re-building from scratch aren't wired up yet.</div>"
     )
     return (
-        '<div class="ins"><a class="back" href="/">← feed</a>'
-        '<h3 class="ih">Runs — pipeline activity off the event log (F4)</h3>'
-        f'<div class="mgrid">{pcells}</div><div class="bl mt">Stages</div>{"".join(srows)}'
-        f'{dead_html}<div class="bl mt">Recent events</div>'
-        f'<table class="aud"><tr><th>when</th><th>type</th><th>stream</th></tr>{rrows}</table>{note}</div>'
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Activity — what the system has done, and anything that failed</h3>'
+        f'<div class="mgrid">{pcells}</div><div class="bl mt">Steps</div>{"".join(srows)}'
+        f'{dead_html}<div class="bl mt">Recent activity</div>'
+        f'<table class="aud"><tr><th>when</th><th>step</th><th>item</th></tr>{rrows}</table>{note}</div>'
     )
 
 
@@ -1208,10 +1254,9 @@ def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
 
 def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
     note = (
-        '<div class="deriv">Registry from ingested articles. Allow/deny + ownership grouping are '
-        "recorded, audited <b>proposals</b> — enforcement (deny → acquisition; the ownership graph "
-        "→ §5.5 originator-collapse) is the follow-up wiring, not faked here. The ownership graph is "
-        "a learned first-class asset (§5); this is where the operator seeds and corrects it.</div>"
+        '<div class="deriv">Every outlet Maat has read. Mark a source <b>allow</b> or <b>deny</b>, or '
+        '<b>group</b> outlets owned by the same company so they count as one source, not several. '
+        'These are saved as preferences — they don\'t change scoring yet.</div>'
     )
     rows = []
     for s in srcs:
@@ -1221,16 +1266,19 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
         last = f'{s["last"]:%Y-%m-%d}' if s["last"] else "—"
         badges = []
         if is_primary_source(name):
-            badges.append(_badge("primary", "fact"))
+            badges.append(_badge("first-hand", "fact",
+                                 "A first-hand source, e.g. a body publishing its own statement"))
         if name in wire:
-            badges.append(_badge("wire-collapsed", "proj"))
+            badges.append(_badge("reprint", "proj",
+                                 "Counted as a reprint of another outlet, not separate confirmation"))
         fl = flag_by.get(name) or {}
         if fl.get("status") == "deny":
-            badges.append(_badge("denied", "laun"))
+            badges.append(_badge("denied", "laun", "You marked this source to be denied"))
         elif fl.get("status") == "allow":
-            badges.append(_badge("allowed", "own"))
+            badges.append(_badge("allowed", "own", "You marked this source as allowed"))
         if group_by.get(name):
-            badges.append(_badge(f"group · {group_by[name]}", "syn"))
+            badges.append(_badge(f"group · {group_by[name]}", "syn",
+                                 "Grouped with same-owner outlets — they count as one source"))
         rows.append(
             f'<div class="srow2"><div><div class="sname">{esc} '
             f'<span class="bs">{"".join(badges)}</span></div>'
@@ -1238,89 +1286,112 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
             '<form class="inline" method="post" action="/sources/flag">'
             f'<input type="hidden" name="source" value="{esc}">'
             '<select name="status"><option value="deny">deny</option>'
-            '<option value="allow">allow</option></select><button>flag</button></form>'
+            '<option value="allow">allow</option></select>'
+            '<button title="Saved as a preference — not enforced yet">Save</button></form>'
             '<form class="inline" method="post" action="/sources/group">'
             f'<input type="hidden" name="source" value="{esc}">'
-            '<input name="group" placeholder="owner / wire group"><button>group</button></form></div>'
+            '<input name="group" placeholder="same-owner group">'
+            '<button title="Outlets in one group count as a single source">Group</button></form></div>'
         )
-    body = "".join(rows) or '<p class="empty">No sources yet — run acquisition (make acquire QUERY=… N=12).</p>'
+    body = "".join(rows) or (
+        '<p class="empty">No sources yet — pull some news first (the Updates tab).</p>'
+    )
     return (
-        '<div class="ins"><a class="back" href="/">← feed</a>'
-        '<h3 class="ih">Sources — registry, allow/deny, ownership graph (A2)</h3>'
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Sources — every outlet Maat reads, and how you want each treated</h3>'
         f"{note}{body}</div>"
     )
 
 
 def _clocks_page(ing, daily, topics: list, paused: bool) -> str:
-    """A1 — the two clocks (§9): ingestion (live, pausable) + projection-harvester (pending #39)."""
-    last = f'{ing["last"]:%Y-%m-%d %H:%M}' if ing and ing["last"] else "—"
+    """A1 — Updates page: the ingestion clock (live, pausable) + prediction-check (pending #39)."""
+    last = f'{ing["last"]:%Y-%m-%d %H:%M}' if ing and ing["last"] else "never"
     n = (ing["n"] if ing else 0) or 0
-    status = '<span class="b laun">paused</span>' if paused else '<span class="b fact">running</span>'
+    status = '<span class="b laun">Paused</span>' if paused else '<span class="b fact">On</span>'
     toggle_val = "false" if paused else "true"
-    toggle_label = "Resume" if paused else "Pause"
+    toggle_label = "Resume updates" if paused else "Pause updates"
     topics_html = ", ".join(html.escape(t) for t in topics) or (
-        '<span class="mut">none — set MAAT_TOPICS or config/topics.txt</span>'
+        '<span class="mut">none set — add some in MAAT_TOPICS or config/topics.txt</span>'
     )
     ingest = (
-        f'<div class="box"><div class="bl">Ingestion clock {status}</div>'
-        f'<div class="mut sm" style="flex-basis:100%">Topics: {topics_html}</div>'
-        f'<div class="mut sm" style="flex-basis:100%">{n} articles ingested all-time · last {last} · '
-        'cadence is external (cron / systemd); one tick = <span class="mono">make tick</span></div>'
+        f'<div class="box"><div class="bl">News updates {status}</div>'
+        f'<div class="mut sm" style="flex-basis:100%">Topics it follows: {topics_html}</div>'
+        f'<div class="mut sm" style="flex-basis:100%">{n} articles pulled in so far · last {last}. '
+        'Runs on a timer set outside the app; pausing here makes the next run skip.</div>'
         '<form class="inline" method="post" action="/clocks/set">'
         '<input type="hidden" name="clock" value="ingestion">'
         f'<input type="hidden" name="paused" value="{toggle_val}">'
-        '<input class="reason" name="reason" placeholder="why">'
-        f'<button>{toggle_label} ingestion</button></form></div>'
+        '<input class="reason" name="reason" placeholder="reason (optional)">'
+        f'<button title="Pause: the next scheduled pull skips. Resume: it runs again.">'
+        f'{toggle_label}</button></form></div>'
     )
     harvester = (
-        '<div class="box"><div class="bl">Projection-harvester clock</div>'
-        '<div class="mut sm" style="flex-basis:100%">Not built yet (#39, P3) — will wake on schedule '
-        "to resolve / extend / decay matured projections into the accuracy ledger (§7). This control "
-        "lights up when the harvester lands.</div></div>"
+        '<div class="box"><div class="bl">Prediction check <span class="b own">coming soon</span></div>'
+        '<div class="mut sm" style="flex-basis:100%">Will later check whether past predictions came '
+        "true, and score forecasters on it. Not built yet (#39) — this turns on when it lands.</div></div>"
     )
     deltas = ""
     if daily:
-        rows = "".join(f'<div class="kv"><b>{r["d"]:%Y-%m-%d}</b> {r["n"]} ingested</div>' for r in daily)
-        deltas = f'<div class="bl mt">Ingestion per day (last 7)</div>{rows}'
+        rows = "".join(f'<div class="kv"><b>{r["d"]:%Y-%m-%d}</b> {r["n"]} new</div>' for r in daily)
+        deltas = f'<div class="bl mt">New articles per day (last 7 days)</div>{rows}'
     return (
-        '<div class="ins"><a class="back" href="/">← feed</a>'
-        '<h3 class="ih">Clocks — the two cadences (§9) (A1)</h3>'
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Updates — when Maat pulls in new news</h3>'
         f"{ingest}{harvester}{deltas}</div>"
     )
+
+
+_GROUP_LABELS = {
+    "Model routing": "AI models",
+    "Extremity": "Extraordinary-claim bar",
+    "Attribution": "Named vs anonymous sources",
+    "Clustering": "Grouping & corroboration",
+}
+
+
+def _plain_group(g: str) -> str:
+    """Plain-language section name for the Settings page — drops the §-refs. Pure."""
+    base = g.split(" (§")[0].strip()
+    return _GROUP_LABELS.get(base, base)
 
 
 def _config_page(overrides: dict) -> str:
     """F5 — render the knob registry grouped, with live defaults + pending proposals."""
     out = [
-        '<div class="ins"><a class="back" href="/">← feed</a>'
-        '<h3 class="ih">Config — model routing + veracity thresholds (F5)</h3>'
-        '<div class="deriv">Changes are recorded as audited, versioned events — they are '
-        '<b>not auto-applied</b>. Core knobs (gate floor, scoring, judge/classifier models) need '
-        'explicit sign-off + an A/B-on-replay pass before going live (D18 / §5); that promotion '
-        "path is not wired yet.</div>"
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Settings — the dials Maat runs on</h3>'
+        '<div class="deriv">A change here is saved as a <b>suggestion</b> — it does NOT take effect '
+        'until it\'s reviewed and turned on. Settings that affect how truth is scored are marked '
+        '<b>needs sign-off</b>.</div>'
     ]
     for g in config.groups():
-        out.append(f'<div class="bl mt">{html.escape(g)}</div>')
+        out.append(f'<div class="bl mt">{html.escape(_plain_group(g))}</div>')
         for k in (kn for kn in config.KNOBS if kn["group"] == g):
-            badge = _badge("core · sign-off", "laun") if k["core"] else _badge("ops", "own")
+            badge = (
+                _badge("needs sign-off", "laun",
+                       "Affects how truth is scored — won't go live without explicit approval")
+                if k["core"]
+                else _badge("minor", "own", "A lower-stakes setting")
+            )
             ov = overrides.get(k["key"])
             ov_html = ""
             if ov:
                 extra = f' · {html.escape(ov["reason"])}' if ov.get("reason") else ""
                 ov_html = (
-                    f'<div class="ovr">proposed → <b>{html.escape(ov["value"])}</b> '
-                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · pending sign-off</span></div>'
+                    f'<div class="ovr">suggested → <b>{html.escape(ov["value"])}</b> '
+                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · not applied yet</span></div>'
                 )
             out.append(
                 '<div class="crow"><div class="cinfo">'
                 f'<div class="cname">{html.escape(k["label"])} {badge}</div>'
-                f'<div class="mut sm">default <span class="mono">{html.escape(str(k["default"]))}</span> '
-                f'· <span class="mono">{html.escape(k["source"])}</span></div>{ov_html}</div>'
+                f'<div class="mut sm" title="Set in {html.escape(k["source"])}">currently '
+                f'<span class="mono">{html.escape(str(k["default"]))}</span></div>{ov_html}</div>'
                 '<form class="inline" method="post" action="/config/set">'
                 f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
                 '<input name="value" placeholder="new value">'
-                '<input class="reason" name="reason" placeholder="why">'
-                '<button>Propose</button></form></div>'
+                '<input class="reason" name="reason" placeholder="reason (optional)">'
+                '<button title="Records your suggestion. Nothing changes live until reviewed.">'
+                'Suggest change</button></form></div>'
             )
     out.append("</div>")
     return "".join(out)
@@ -1328,19 +1399,25 @@ def _config_page(overrides: dict) -> str:
 
 def _eval_page(report, err: str, otlp: str) -> str:
     """A4a — render the eval harness output (#32). `report` is `maat.evals.evaluate(...)`."""
-    obs = (
-        f'<div class="deriv">Tracing → cat-cafe · OTLP <span class="mono">{html.escape(otlp)}</span> · '
-        f'<a class="clink" href="{html.escape(CATCAFE_URL)}">open trace UI ↗</a></div>'
+    status = (
+        f'receiving traces at <span class="mono">{html.escape(otlp)}</span>'
         if otlp
-        else '<div class="mut sm">OTLP tracing off — set OTEL_EXPORTER_OTLP_ENDPOINT and run '
-        "<span class=\"mono\">make obs-up</span> to stream LLM spans to cat-cafe.</div>"
+        else 'not receiving yet — run <span class="mono">make obs-up</span> and set '
+        "OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    obs = (
+        '<div class="deriv">Live traces &amp; AI-judge view: '
+        f'<a class="clink" href="{html.escape(CATCAFE_URL)}" title="cat-cafe — per-call traces, '
+        f'token cost, and the LLM judges you define">open cat-cafe ↗</a> '
+        f'<span class="mut sm">· {status}</span></div>'
     )
     head = (
-        '<div class="ins"><a class="back" href="/">← feed</a>'
-        '<h3 class="ih">Eval — golden regression + metrics (surfacing #32, not rebuilt)</h3>'
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Quality — automatic checks that Maat is still judging correctly</h3>'
+        f'{obs}'
     )
     if report is None:
-        return f'{head}<div class="empty">{html.escape(err)}</div>{obs}</div>'
+        return f'{head}<div class="empty">{html.escape(err)}</div></div>'
     m = report["metrics"]
     n_ok = sum(1 for s in report["stories"] if s.ok)
     banner = (
@@ -1375,7 +1452,7 @@ def _eval_page(report, err: str, otlp: str) -> str:
         )
     return (
         f'{head}{banner}<div class="mgrid">{mgrid}</div>'
-        f'<div class="bl mt">Golden stories</div>{"".join(stories)}{obs}</div>'
+        f'<div class="bl mt">Test stories</div>{"".join(stories)}</div>'
     )
 
 
@@ -1384,20 +1461,18 @@ def _eval_page(report, err: str, otlp: str) -> str:
 
 def _nav(active: str) -> str:
     tabs = [
-        ("/", "Content", "content"),
-        ("/runs", "Runs", "runs"),
-        ("/clocks", "Clocks", "clocks"),
-        ("/config", "Config", "config"),
-        ("/sources", "Sources", "sources"),
-        ("/eval", "Eval", "eval"),
-        ("/audit", "Audit", "audit"),
+        ("/", "Feed", "content", "The news feed — open any story to see or fix how Maat judged it"),
+        ("/runs", "Activity", "runs", "What the system has processed, and anything that failed"),
+        ("/clocks", "Updates", "clocks", "When Maat pulls in new news — and a switch to pause it"),
+        ("/config", "Settings", "config", "The dials Maat runs on (changes are proposed, not auto-applied)"),
+        ("/sources", "Sources", "sources", "Every outlet Maat reads, and how you want each one treated"),
+        ("/eval", "Quality", "eval", "Automatic checks that Maat is still judging correctly"),
+        ("/audit", "History", "audit", "A log of every change made in this console"),
     ]
-    dimmed: list = []
     links = [
-        f'<a class="{"on" if key == active else ""}" href="{href}">{label}</a>'
-        for href, label, key in tabs
+        f'<a class="{"on" if key == active else ""}" href="{href}" title="{html.escape(tip)}">{label}</a>'
+        for href, label, key, tip in tabs
     ]
-    links += [f'<span class="dim" title="{t}">{lbl}</span>' for lbl, t in dimmed]
     return f'<nav class="nav">{"".join(links)}</nav>'
 
 
@@ -1512,6 +1587,10 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .cname{font-weight:600;font-size:14px}
 .ovr{font-size:13px;color:#0b6b86;margin-top:3px}
 .srow2{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.note{flex-basis:100%;font-size:12px;color:var(--mut);line-height:1.5;margin:-2px 0 2px}
+.flash{max-width:820px;margin:10px auto 0;padding:9px 14px;border-radius:var(--border-radius-md,8px);background:#eaf3de;color:#3b6d11;font-size:13px;font-weight:500;border:1px solid #cfe3b6}
+[title]{cursor:help}
+.nav a[title],button[title]{cursor:pointer}
 </style></head><body>
 <header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
 {{nav}}<p>{{subtitle}}</p></header>
