@@ -26,6 +26,7 @@ from urllib.parse import quote
 import asyncpg
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from maat import config, events, prompts
@@ -82,6 +83,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Maat operator console")
+
+# Central stylesheet (and any future assets) served from maat/web/static/. The Dockerfile's
+# `COPY maat ./maat` ships it; the admin gate leaves /static open.
+app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
 
 # Mount the served-feed APIRouter (serving/feed.py) so the Apple client reads /api/v2/feed and
 # /api/v2/story/{id} — confidence labels + de-US re-ranking — off the same projections this
@@ -1501,7 +1506,7 @@ def _originator_rows(cl, id_to_source) -> str:
         lbl = "wire · collapsed" if wire else "independent"
         rows.append(
             f'<div class="orig {"wire" if wire else "indep"}">'
-            f'<span class="ol">{lbl}</span>{html.escape(", ".join(names))}</div>'
+            f'<span class="ol" title="Wire = the same report reprinted across outlets (counted once, not separate confirmation). Independent = a distinct originator.">{lbl}</span>{html.escape(", ".join(names))}</div>'
         )
     return "".join(rows)
 
@@ -1792,7 +1797,7 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
         dead_html = (
             f'<div class="bl mt" title="Items that hit an error and were skipped, so they are not '
             f'lost silently">Errors — failed and skipped ({len(dead)})</div>'
-            '<table class="aud"><tr><th>when</th><th>step</th><th>item</th><th>error</th></tr>'
+            '<table class="aud"><tr><th>when</th><th title="Pipeline stage — the internal event name for what ran">step</th><th>item</th><th>error</th></tr>'
             f"{drows}</table>"
         )
     rrows = "".join(
@@ -1810,7 +1815,7 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
         '<h3 class="ih">Activity — what the system has done, and anything that failed</h3>'
         f'<div class="mgrid">{pcells}</div><div class="bl mt">Steps</div>{"".join(srows)}'
         f'{dead_html}<div class="bl mt">Recent activity</div>'
-        f'<table class="aud"><tr><th>when</th><th>step</th><th>item</th></tr>{rrows}</table>{note}</div>'
+        f'<table class="aud"><tr><th>when</th><th title="Pipeline stage — the internal event name for what ran">step</th><th>item</th></tr>{rrows}</table>{note}</div>'
     )
 
 
@@ -2168,6 +2173,25 @@ def _knob_history_block(key: str, history: dict | None) -> str:
     return f'<div class="mut sm" style="margin-top:4px">change history:<br>{items}</div>'
 
 
+def _knob_input(k: dict) -> str:
+    """The right input control for a knob, prefilled with its current live value: a model
+    dropdown, an integer field, or a 0–1 number field."""
+    cur = str(k["default"])
+    t = k.get("type", "float")
+    if t == "model":
+        opts = list(k.get("options", []))
+        if cur not in opts:
+            opts = [cur, *opts]
+        options = "".join(
+            f'<option value="{html.escape(o)}"{" selected" if o == cur else ""}>{html.escape(o)}</option>'
+            for o in opts
+        )
+        return f'<select name="value" aria-label="new value">{options}</select>'
+    if t == "int":
+        return f'<input type="number" name="value" step="1" min="1" value="{html.escape(cur)}">'
+    return f'<input type="number" name="value" step="0.01" min="0" value="{html.escape(cur)}">'
+
+
 def _config_page(overrides: dict, replay: dict | None = None, history: dict | None = None) -> str:
     """F5 — render the knob registry grouped, with live defaults + pending proposals.
 
@@ -2176,17 +2200,19 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
     out = [
         '<div class="ins"><a class="back" href="/">← back to feed</a>'
         '<h3 class="ih">Settings — the dials Maat runs on</h3>'
-        '<div class="deriv">A change here is saved as a <b>suggestion</b> — it does NOT take effect '
-        'until it\'s reviewed and turned on. Settings that affect how truth is scored are marked '
-        '<b>needs sign-off</b>. For a scoring-weight change you\'ll see its <b>A/B-on-replay</b> '
-        'impact (how it would have scored past facts) before you sign off.</div>'
+        '<div class="deriv">Changing a setting here records a <b>suggestion</b> (logged in History). '
+        '<b>Applying suggestions to the live engine isn\'t wired up yet</b> — for now they\'re kept '
+        'for review, and a scoring-weight change shows an <b>A/B-on-replay</b> preview (how it would '
+        'have scored past facts). Settings that affect how truth is scored are marked '
+        '<b>needs sign-off</b>: promoting one will need approval + an A/B pass once that step is built.</div>'
     ]
     for g in config.groups():
         out.append(f'<div class="bl mt">{html.escape(_plain_group(g))}</div>')
         for k in (kn for kn in config.KNOBS if kn["group"] == g):
             badge = (
                 _badge("needs sign-off", "laun",
-                       "Affects how truth is scored — won't go live without explicit approval")
+                       "A core scoring setting. Recorded as a suggestion only — promoting it to live "
+                       "(with approval + an A/B-on-replay check) isn't wired up yet.")
                 if k["core"]
                 else _badge("minor", "own", "A lower-stakes setting")
             )
@@ -2206,15 +2232,19 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
                 '<button title="Re-propose the built-in default for this setting (logged; still '
                 'needs sign-off to go live)">Revert to default</button></form>'
             )
+            tip = (
+                f'<span class="tip" data-tip="{html.escape(k["help"])}">i</span>'
+                if k.get("help") else ""
+            )
             out.append(
                 '<div class="crow"><div class="cinfo">'
-                f'<div class="cname">{html.escape(k["label"])} {badge}</div>'
-                f'<div class="mut sm" title="Set in {html.escape(k["source"])}">currently '
-                f'<span class="mono">{html.escape(str(k["default"]))}</span></div>{ov_html}</div>'
+                f'<div class="cname">{html.escape(k["label"])}{tip} {badge}</div>'
+                f'<div class="cur" title="Set in {html.escape(k["source"])}">now '
+                f'<b>{html.escape(str(k["default"]))}</b></div>{ov_html}</div>'
                 '<div class="cact">'
                 '<form class="inline" method="post" action="/config/set">'
                 f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
-                '<input name="value" placeholder="new value">'
+                f'{_knob_input(k)}'
                 '<input class="reason" name="reason" placeholder="reason (optional)">'
                 '<button title="Records your suggestion. Nothing changes live until reviewed.">'
                 f'Suggest change</button></form>{revert}</div></div>'
@@ -2358,7 +2388,7 @@ def _calibration_page(status, breakdown, geo_dist, lang_dist, health) -> str:
             + '</div>'
             f'{caveat}'
             '<div class="bl mt">Reliability bins (predicted read vs fraction confirmed)</div>'
-            '<table class="aud"><tr><th>band</th><th>n</th><th>read</th><th>confirmed</th>'
+            '<table class="aud"><tr><th title="The confidence band, e.g. 60–70%">band</th><th title="How many resolved facts landed in this band">n</th><th title="The confidence Maat showed (what it predicted)">read</th><th title="Share that actually turned out true (observed)">confirmed</th>'
             f'<th></th></tr>{bins}</table>{props}'
         )
     # --- de-US-centering (#59) ---
@@ -2669,36 +2699,38 @@ def _eval_page(report, err: str, otlp: str) -> str:
 
 def _nav(active: str) -> str:
     tabs = [
-        ("/", "Feed", "content", "The news feed — open any story to see or fix how Maat judged it"),
-        ("/runs", "Activity", "runs", "What the system has processed, and anything that failed"),
-        ("/review", "Review", "review", "User feedback, triaged — what needs a decision"),
-        ("/clocks", "Updates", "clocks", "When Maat pulls in new news — and a switch to pause it"),
-        ("/config", "Settings", "config", "The dials Maat runs on (changes are proposed, not auto-applied)"),
-        ("/policy", "Policy", "policy", "What the learning loop would change — bounded, sign-off-gated"),
-        ("/prompts", "Prompts", "prompts", "Edit the instructions each AI step runs on (live on next run)"),
-        ("/sources", "Sources", "sources", "Every outlet Maat reads, and how you want each one treated"),
-        ("/reputation", "Reputation", "reputation", "How each source has held up over time (§6)"),
-        ("/calibration", "Calibration", "calibration", "Is the confidence read right? Plus de-US-centering & health"),
-        ("/eval", "Quality", "eval", "Automatic checks that Maat is still judging correctly"),
-        ("/spend", "Spend", "spend", "What Maat has spent on AI + acquisition so far"),
-        ("/audit", "History", "audit", "A log of every change made in this console"),
+        ("/", "Feed", "content", "📰", "The news feed — open any story to see or fix how Maat judged it"),
+        ("/runs", "Activity", "runs", "📊", "What the system has processed, and anything that failed"),
+        ("/review", "Review", "review", "💬", "User feedback, triaged — what needs a decision"),
+        ("/clocks", "Updates", "clocks", "⏱️", "When Maat pulls in new news — and a switch to pause it"),
+        ("/config", "Settings", "config", "⚙️", "The dials Maat runs on (changes are proposed, not auto-applied)"),
+        ("/policy", "Policy", "policy", "🎚️", "What the learning loop would change — bounded, sign-off-gated"),
+        ("/prompts", "Prompts", "prompts", "✏️", "Edit the instructions each AI step runs on (live on next run)"),
+        ("/sources", "Sources", "sources", "📚", "Every outlet Maat reads, and how you want each one treated"),
+        ("/reputation", "Reputation", "reputation", "⭐", "How each source has held up over time"),
+        ("/calibration", "Calibration", "calibration", "🎯", "Is the confidence read right? Plus de-US-centering & health"),
+        ("/eval", "Quality", "eval", "✅", "Automatic checks that Maat is still judging correctly"),
+        ("/spend", "Spend", "spend", "💰", "What Maat has spent on AI + acquisition so far"),
+        ("/audit", "History", "audit", "🕘", "A log of every change made in this console"),
     ]
     links = [
-        f'<a class="{"on" if key == active else ""}" href="{href}" title="{html.escape(tip)}">{label}</a>'
-        for href, label, key, tip in tabs
+        f'<a class="{"on" if key == active else ""}" href="{href}" data-tip="{html.escape(tip)}">'
+        f'<span class="ico">{ico}</span>{label}</a>'
+        for href, label, key, ico, tip in tabs
     ]
-    if _ADMIN.enabled:
-        links.append(
-            '<a href="/admin/logout" title="End your admin session" '
-            'style="margin-left:auto;color:#b3402e">Sign out</a>'
-        )
     return f'<nav class="nav">{"".join(links)}</nav>'
 
 
 def _doc(main_html: str, subtitle: str, active: str, flash: str = "") -> str:
     banner = f'<div class="flash">{html.escape(flash)}</div>' if flash else ""
+    foot = (
+        '<div class="sidebar-foot"><a href="/admin/logout" data-tip="End your admin session">'
+        '<span class="ico">⏻</span>Sign out</a></div>'
+        if _ADMIN.enabled else ""
+    )
     return (
         _DOC.replace("{{nav}}", _nav(active))
+        .replace("{{foot}}", foot)
         .replace("{{subtitle}}", html.escape(subtitle))
         .replace("{{main}}", banner + main_html)
     )
@@ -2711,157 +2743,18 @@ def _redirect(path: str, msg: str = ""):
 
 _DOC = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Maat console</title><style>
-:root{--bg:#faf9f7;--card:#fff;--ink:#1c1b19;--mut:#7a7770;--line:#ece9e3;--acc:#175fa5}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);
- font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-a{color:inherit}
-header.top{padding:24px 20px 6px;max-width:820px;margin:0 auto}
-header.top h1{margin:0;font-size:24px;letter-spacing:-.02em}
-header.top h1 a{text-decoration:none}
-header.top p{margin:4px 0 0;color:var(--mut);font-size:13px}
-.nav{display:flex;gap:16px;align-items:center;margin:10px 0 0;font-size:13px;font-weight:600}
-.nav a{text-decoration:none;color:var(--mut);padding-bottom:3px;border-bottom:2px solid transparent}
-.nav a.on{color:var(--ink);border-bottom-color:var(--ink)}
-.nav .dim{color:#c3bfb6;cursor:not-allowed}
-main{max-width:820px;margin:0 auto;padding:12px 20px 60px}
-/* Prompts page — 3-panel: agents (left) · editor (middle) · Claude chat (right) */
-main:has(.prompts3){max-width:1180px}
-.prompts3{display:grid;grid-template-columns:200px minmax(0,1fr) 360px;gap:16px;align-items:stretch;margin-top:14px}
-.p3-col{min-width:0}
-.p3-left{align-self:start;position:sticky;top:14px}
-.p3-group{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:14px 0 5px}
-.p3-group:first-child{margin-top:0}
-.p3-item{display:block;text-decoration:none;color:var(--ink);font-size:14px;line-height:1.3;padding:7px 10px;border-radius:8px;border:1px solid transparent}
-.p3-item:hover{background:#f0efe9}
-.p3-item.on{background:#eaf3de;border-color:#cfe3b6;font-weight:600}
-.chat3{display:flex;flex-direction:column;height:100%;border:1px solid var(--line);border-radius:12px;background:#f6f5f2}
-.chat3-head{font-size:13px;font-weight:600;color:var(--acc);padding:10px 12px;border-bottom:1px solid var(--line)}
-.chat3 .chat-log{flex:1 1 auto;overflow-y:auto;min-height:0}
-.chat3 .chat-log:empty{display:block}  /* keep filling the column so the input stays at the bottom */
-@media (max-width:1000px){main:has(.prompts3){max-width:820px}.prompts3{grid-template-columns:1fr;align-items:start}.p3-left{position:static}.chat3{height:auto;max-height:70vh}}
-.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:14px 0}
-.panel h3,.ih{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
-.story{padding:15px 0;border-top:1px solid var(--line)}
-.story:first-of-type{border-top:0}
-.cfact{font-weight:600;font-size:16px;letter-spacing:-.01em}
-.clink{text-decoration:none}.clink:hover{text-decoration:underline;text-decoration-color:var(--line)}
-.cmeta{font-size:14px;color:#3a3833;margin:2px 0 7px}
-.conf{display:flex;align-items:center;gap:9px;margin:7px 0}
-.cbar{flex:1;height:7px;background:var(--line);border-radius:5px;overflow:hidden}
-.cfill{height:100%;border-radius:5px}
-.cpct{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums}
-.label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:1px 8px;border-radius:20px}
-.conf.hi .cfill{background:#3b6d11}.conf.hi .cpct{color:#3b6d11}.conf.hi .label{background:#eaf3de;color:#3b6d11}
-.conf.mid .cfill{background:#92580a}.conf.mid .cpct{color:#92580a}.conf.mid .label{background:#faeeda;color:#92580a}
-.conf.lo .cfill{background:#b3402e}.conf.lo .cpct{color:#b3402e}.conf.lo .label{background:#fbe4df;color:#b3402e}
-.conf.floor .cfill{background:#8a2a1e}.conf.floor .cpct{color:#8a2a1e}.conf.floor .label{background:#f7d9d3;color:#8a2a1e}
-.ex{font-size:11px;font-weight:600;padding:1px 8px;border-radius:20px;background:#f0efe9;color:#67645d}
-.ex.extraordinary{background:#fbe4df;color:#b3402e}
-.origs{display:flex;flex-direction:column;gap:5px}
-.orig{font-size:13px;padding:5px 11px;border-radius:9px}
-.orig.wire{background:#faeeda}
-.orig.indep{background:#eaf3de}
-.ol{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-right:8px}
-.sup-wrap{margin-top:10px;padding-top:9px;border-top:1px dashed var(--line)}
-.sup-head{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin-bottom:5px}
-.sup{display:flex;gap:8px;align-items:baseline;padding:2px 0;font-size:13px}
-.sup-pct{font-weight:700;font-variant-numeric:tabular-nums;min-width:34px}
-.sup-pct.hi{color:#3b6d11}.sup-pct.mid{color:#92580a}.sup-pct.lo{color:#b3402e}.sup-pct.floor{color:#8a2a1e}
-.sup-fact{color:#3a3833}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;
- padding:18px 18px 12px;margin:14px 0;box-shadow:0 1px 2px rgba(0,0,0,.03)}
-.card .src{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
-.card h2{margin:4px 0 12px;font-size:19px;line-height:1.3;letter-spacing:-.01em}
-.claim{padding:9px 0;border-top:1px solid var(--line)}
-.claim .t{margin-top:3px}
-.bs{display:flex;flex-wrap:wrap;gap:5px}
-.b{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;line-height:1.6}
-.own{background:#f0efe9;color:#67645d}
-.attr{background:#e6f1fb;color:#175fa5}
-.fact{background:#eaf3de;color:#3b6d11}
-.proj{background:#faeeda;color:#92580a}
-.syn{background:#eeedfe;color:#4a3fb0}
-.head{background:#1c1b19;color:#fff}
-.corr{background:#def0f6;color:#0b6b86}
-.laun{background:#fbe4df;color:#8a2a1e}
-.foot{margin-top:10px;padding-top:8px;border-top:1px solid var(--line);font-size:12px;color:var(--mut)}
-.muted,.empty,.mut{color:var(--mut)}
-.empty{text-align:center;padding:60px 0}
-.ins{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}
-.back{display:inline-block;margin-bottom:10px;font-size:13px;color:var(--mut);text-decoration:none}
-.deriv{font-size:13px;color:#3a3833;background:#f6f5f2;border-radius:9px;padding:8px 11px;margin:8px 0}
-.box{border:1px solid var(--line);border-radius:11px;padding:12px 13px;margin:11px 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-.box .bl{flex-basis:100%;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);font-weight:700}
-.bl.mt{margin-top:14px;display:block}
-.box label{font-size:13px;display:flex;gap:5px;align-items:center}
-.box input,.box select,.inline input,.inline select{font:inherit;font-size:13px;padding:4px 7px;border:1px solid var(--line);border-radius:7px;background:#fff}
-.box .reason,.inline .reason{flex:1;min-width:120px}
-.btnrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
-button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px solid var(--ink);border-radius:7px;background:var(--ink);color:#fff;cursor:pointer}
-.ck{flex-basis:100%;font-size:13px;gap:7px}
-.mc{padding:10px 0;border-top:1px solid var(--line)}
-.mc .src{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-top:3px}
-.inline{display:flex;gap:6px;align-items:center;margin-top:7px}
-.kv{font-size:14px;margin:5px 0}.kv b{font-weight:600}
-.prov{margin:6px 0;padding-left:18px;font-size:13px}.sm{font-size:12px;margin-top:6px}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-.aud{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
-.aud th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border-bottom:1px solid var(--line);padding:6px 8px}
-.aud td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-.atype{font-weight:600;color:var(--acc)}
-.evbanner{display:inline-block;font-weight:700;font-size:13px;padding:4px 12px;border-radius:8px;margin:4px 0 12px}
-.evbanner.ok{background:#eaf3de;color:#3b6d11}.evbanner.bad{background:#fbe4df;color:#b3402e}
-.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:8px 0}
-.mcell{background:#f6f5f2;border-radius:9px;padding:9px 11px}
-.mk{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);font-weight:700}
-.mv{font-size:15px;margin-top:2px}
-.estory{border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin:7px 0}
-.estory.ok{border-color:#cfe3b6;background:#f6faef}
-.estory.bad{border-color:#e9b8ae;background:#fdf4f1}
-.eh{font-weight:600;font-size:14px}
-.srow{display:grid;grid-template-columns:1.1fr 1.3fr 1.8fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
-.sname{font-weight:600}
-.scmd{color:var(--mut);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.crow{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
-.cname{font-weight:600;font-size:14px}
-.ovr{font-size:13px;color:#0b6b86;margin-top:3px}
-.srow2{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
-.cact{display:flex;flex-direction:column;gap:5px;align-items:flex-end}
-.rnum{text-align:right;font-size:14px;white-space:nowrap}
-.dist{display:flex;align-items:center;gap:8px;margin:3px 0;font-size:13px}
-.dk{min-width:70px}
-.dbar{flex:1;height:7px;background:var(--line);border-radius:5px;overflow:hidden}
-.dfill{display:block;height:100%;background:var(--acc);border-radius:5px}
-.dv{min-width:38px;text-align:right}
-.prompt{width:100%;min-height:230px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical;margin-bottom:6px}
-.note{flex-basis:100%;font-size:12px;color:var(--mut);line-height:1.5;margin:-2px 0 2px}
-.chat{flex-basis:100%;margin:8px 0 2px;border:1px solid var(--line);border-radius:9px;background:#f6f5f2}
-.chat>summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--acc);padding:8px 11px;list-style:none}
-.chat>summary::-webkit-details-marker{display:none}
-.chat>summary::before{content:"💬 ";font-weight:400}
-.chat[open]>summary{border-bottom:1px solid var(--line)}
-.chat-help{padding:8px 11px 0;line-height:1.5}
-.chat-log{padding:6px 11px;display:flex;flex-direction:column;gap:8px}
-.chat-log:empty{display:none}
-.msg{font-size:13px;line-height:1.5;padding:7px 10px;border-radius:9px;max-width:92%;white-space:pre-wrap;word-wrap:break-word}
-.msg.you{background:#e6f1fb;align-self:flex-end}
-.msg.bot{background:#fff;border:1px solid var(--line);align-self:flex-start}
-.msg.err{background:#fbe4df;color:#8a2a1e;align-self:stretch;max-width:100%}
-.msg pre{background:#1c1b19;color:#f3f1ec;border-radius:7px;padding:9px 11px;margin:6px 0 0;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.45;white-space:pre-wrap;word-wrap:break-word}
-.msg .apply{margin-top:7px;font-size:12px;padding:4px 10px}
-.chat-row{display:flex;gap:7px;align-items:flex-end;padding:4px 11px 11px}
-.chat-in{flex:1;font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical;min-height:38px}
-.chat-send{white-space:nowrap}
-.chat-send[disabled]{opacity:.55;cursor:progress}
-.flash{max-width:820px;margin:10px auto 0;padding:9px 14px;border-radius:var(--border-radius-md,8px);background:#eaf3de;color:#3b6d11;font-size:13px;font-weight:500;border:1px solid #cfe3b6}
-[title]{cursor:help}
-.nav a[title],button[title]{cursor:pointer}
-</style></head><body>
-<header class="top"><h1><a href="/">Maat</a> <span class="mut" style="font-size:13px;font-weight:400">operator console</span></h1>
-{{nav}}<p>{{subtitle}}</p></header>
-<main>{{main}}</main>
+<title>Maat console</title><link rel="stylesheet" href="/static/console.css"></head><body>
+<div class="app">
+<aside class="sidebar">
+<a class="brand" href="/"><b>Maat</b><span>operator console</span></a>
+{{nav}}
+{{foot}}
+</aside>
+<main>
+<div class="topbar"><div class="subtitle">{{subtitle}}</div></div>
+{{main}}
+</main>
+</div>
 <script>
 // "Improve with chat" (#158): raw-Claude helper on each editable prompt. Per-key conversation,
 // POST to /prompts/chat, render the reply; a fenced block becomes an "Apply to editor" button
