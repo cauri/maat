@@ -66,7 +66,7 @@ mod tests {
         let log = vec![Event::Noop, Event::Noop, Event::Noop, Event::Noop];
         let full = Counter::replay(&log);
         let snapshot = Counter::replay(&log[..2]);
-        let resumed = log[2..].iter().fold(snapshot, |s, e| Counter::apply(s, e));
+        let resumed = log[2..].iter().fold(snapshot, Counter::apply);
         assert_eq!(full, resumed);
     }
 }
