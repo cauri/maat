@@ -6,6 +6,7 @@ from maat.learning.calibration import (
     brier_score,
     calibration_bins,
     observations_from_history,
+    replay_ab,
     resolve_outcome,
     tune_decay,
     tune_proposals,
@@ -115,3 +116,25 @@ def test_tune_decay_brier_never_increases_on_mixed_outcomes():
     _, tuned_b = tune_decay(obs)
     assert base_b is not None and tuned_b is not None
     assert tuned_b <= base_b
+
+
+def test_replay_ab_counts_verdict_flips():
+    # replay-before-promote: a more-confident candidate should PROMOTE these confirmed reads,
+    # and that downstream impact is reported (not just the Brier delta).
+    obs = [Observation(2, False, "extraordinary", "confirmed") for _ in range(3)]
+    base = Weights.defaults()
+    candidate = Weights({**base.decay, "extraordinary": 0.40}, base.primary_lift, base.cap)
+    ab = replay_ab(obs, base, candidate)
+    assert ab.n_scored == 3
+    assert ab.flips == 3 and ab.promoted == 3 and ab.demoted == 0
+    assert ab.brier_candidate < ab.brier_base  # more confident on facts that confirmed → better
+
+
+def test_tune_decay_respects_step_bounds():
+    # the same facts want a big swing (decay → ~0.30), but a single step is bounded (max-delta),
+    # so the suggestion moves toward confidence without leaping there on thin evidence.
+    obs = [Observation(2, False, "extraordinary", "confirmed") for _ in range(8)]
+    cur = Weights.defaults().decay["extraordinary"]
+    tuned, _ = tune_decay(obs)
+    assert tuned.decay["extraordinary"] >= cur - 0.25 - 1e-9  # never jumps more than the max delta
+    assert tuned.decay["extraordinary"] < cur  # but it did move

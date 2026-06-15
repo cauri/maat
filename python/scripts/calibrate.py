@@ -28,6 +28,7 @@ from maat.learning.calibration import (
     brier_score,
     calibration_bins,
     observations_from_history,
+    replay_ab,
     tune_decay,
     tune_proposals,
 )
@@ -70,6 +71,11 @@ def _report(obs: list[Observation]) -> str:
             lines.append(f"    decay.{level}: {a} → {t}")
     if tuned.decay == dict(base.decay):
         lines.append("    (no change — the starting points already fit the resolved history)")
+    else:
+        ab = replay_ab(obs, base, tuned)
+        lines.append(
+            f"\nreplay-before-promote (D18): on {ab.n_scored} resolved facts, {ab.flips} would change"
+            f" verdict ({ab.promoted} more confident, {ab.demoted} less). Sign off knowing the impact.")
     return "\n".join(lines)
 
 
