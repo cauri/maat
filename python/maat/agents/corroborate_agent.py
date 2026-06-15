@@ -10,14 +10,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from functools import partial
 from pathlib import Path
 
 import asyncpg
 from dotenv import load_dotenv
 
+from maat import prompts
 from maat.bus import connect
 from maat.events import publish
 from maat.pipeline.corroborate import ClaimRow, corroborate
+from maat.pipeline.extremity import rate_extremity
 
 
 def _cluster_id(claim_ids: list[str]) -> str:
@@ -33,6 +36,8 @@ async def main() -> None:
     src = {r["id"]: r["source"] for r in arts}
     bodies = {r["id"]: r["body"] for r in arts}
     rows = await pool.fetch("select id, text, article_id from claims")
+    # Resolve the operator's active extremity prompt (P8) before closing the pool.
+    extremity_prompt = await prompts.active_text(pool, "extremity", prompts.seed_default("extremity"))
     # Batch recompute: reset the clusters projection so a re-run REPLACES rather than
     # accumulates. Cluster ids are keyed on their claim_ids, so a changed claim set (or
     # changed collapse) would otherwise leave orphan clusters behind.
@@ -43,7 +48,7 @@ async def main() -> None:
         ClaimRow(id=str(r["id"]), text=r["text"], article_id=r["article_id"], source=src.get(r["article_id"], ""))
         for r in rows
     ]
-    results = corroborate(claims, bodies)
+    results = corroborate(claims, bodies, extremity_of=partial(rate_extremity, prompt=extremity_prompt))
 
     nc = await connect()
     for r in results:

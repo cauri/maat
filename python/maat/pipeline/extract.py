@@ -99,14 +99,19 @@ def extract_claims(
     source_metadata: str = "",
     language: str = "unknown",
     model: str = EXTRACT_MODEL,
+    prompt: str = PROMPT,
 ) -> list[Claim]:
-    """Extract the atomic claims from one article (BRIEF §5.1-5.2)."""
-    prompt = (
-        PROMPT.replace("{article_text}", article_text)
+    """Extract the atomic claims from one article (BRIEF §5.1-5.2).
+
+    `prompt` defaults to the in-code template (the canonical seed); the operator console may
+    pass an active override from the prompt store (P8) so edits take effect on the next run.
+    """
+    filled = (
+        prompt.replace("{article_text}", article_text)
         .replace("{source_metadata}", source_metadata)
         .replace("{detected_language}", language)
     )
-    reply = claude_complete(prompt, model=model, max_tokens=3000)
+    reply = claude_complete(filled, model=model, max_tokens=3000)
     raw = reply.text
     start, end = raw.find("["), raw.rfind("]")
     if start == -1 or end == -1:

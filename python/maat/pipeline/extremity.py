@@ -79,7 +79,10 @@ def _parse_extremity(raw: str) -> str:
     return val if val in LEVELS else "notable"
 
 
-def rate_extremity(fact: str, *, model: str = EXTREMITY_MODEL) -> str:
-    """Rate a fact's prior: ordinary | notable | extraordinary (§5.6)."""
-    reply = claude_complete(PROMPT.replace("{claim}", fact), model=model, max_tokens=200)
+def rate_extremity(fact: str, *, model: str = EXTREMITY_MODEL, prompt: str = PROMPT) -> str:
+    """Rate a fact's prior: ordinary | notable | extraordinary (§5.6).
+
+    `prompt` defaults to the in-code template; the console may pass an active override (P8).
+    """
+    reply = claude_complete(prompt.replace("{claim}", fact), model=model, max_tokens=200)
     return _parse_extremity(reply.text)

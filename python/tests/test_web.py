@@ -190,8 +190,42 @@ def test_nav_includes_all_p8_tabs():
     from maat.web.app import _nav
 
     n = _nav("content")
-    for label in ("Feed", "Activity", "Updates", "Settings", "Sources", "Quality", "History"):
+    for label in ("Feed", "Activity", "Updates", "Settings", "Prompts", "Sources", "Quality", "History"):
         assert label in n
+
+
+def test_prompt_registry_and_placeholder_guard():
+    from maat import prompts
+
+    assert {"extract", "classify", "extremity"} <= set(prompts.PROMPTS_BY_KEY)
+    assert prompts.seed_default("classify")  # non-empty in-code seed
+    assert "{claim}" in prompts.missing_placeholders("extremity", "no placeholder here")  # caught
+    assert prompts.missing_placeholders("extremity", "rate {claim}") == []  # intact -> ok
+
+
+def test_active_text_falls_back_to_seed_without_pool():
+    import asyncio
+
+    from maat import prompts
+
+    assert asyncio.run(prompts.active_text(None, "extract", "SEED")) == "SEED"
+
+
+def test_prompts_page_shows_active_seed_history_and_rollback():
+    from maat.web.app import _prompts_page
+
+    base = _prompts_page({})  # no edits yet
+    assert "Prompts" in base and "live on the next run" in base and "built-in" in base
+    rows = {
+        "extract": [
+            {"key": "extract", "version": 2, "text": "v2 {article_text} {source_metadata} {detected_language}",
+             "active": True, "reason": "tweak", "created_at": dt.datetime(2026, 6, 15, 9, 0)},
+            {"key": "extract", "version": 1, "text": "v1", "active": False, "reason": "",
+             "created_at": dt.datetime(2026, 6, 15, 8, 0)},
+        ]
+    }
+    out = _prompts_page(rows)
+    assert "version 2" in out and "Roll back" in out and "v1" in out
 
 
 def test_is_paused_reads_latest_state_per_clock():

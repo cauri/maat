@@ -128,6 +128,7 @@ async def _run_all() -> None:
                 ("/config", "0.35"),  # the seeded threshold proposal surfaces
                 ("/sources", "European Central Bank"),  # registry off articles
                 ("/eval", "Quality"),
+                ("/prompts", "Prompts"),  # P8 prompt editor renders (seeds when no edits)
                 ("/audit", "fixed a claim"),  # admin.* rendered as plain action labels
                 (f"/cluster/{CLUSTER}", "rates up"),  # any($1::uuid[]) member fetch works
                 (f"/claim/{CL1}", "rates up"),  # uuid id binding works
@@ -148,6 +149,7 @@ async def _run_all() -> None:
                 ("/runs/trigger", {"stage": "Corroborate", "reason": "smoke"}),
                 ("/clocks/set", {"clock": "ingestion", "paused": "true", "reason": "smoke"}),
                 (f"/claim/{CL1}/correct", {"kind": "projection", "reason": "smoke"}),
+                ("/prompts/save", {"key": "extremity", "text": "rate {claim}", "reason": "smoke"}),
                 (f"/cluster/{CLUSTER}/split", {"claim_ids": CL1, "reason": "smoke"}),
             ]
             for path, form in posts:

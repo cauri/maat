@@ -70,15 +70,19 @@ def classify_claims(
     *,
     article_text: str = "",
     model: str = CLASSIFY_MODEL,
+    prompt: str = PROMPT,
 ) -> list[Claim]:
-    """Tag each claim fact/projection (+ synthesis, horizon). Returns updated copies."""
+    """Tag each claim fact/projection (+ synthesis, horizon). Returns updated copies.
+
+    `prompt` defaults to the in-code template; the console may pass an active override (P8).
+    """
     if not claims:
         return claims
     claims_json = json.dumps([c.text for c in claims], ensure_ascii=False, indent=2)
-    prompt = PROMPT.replace("{article_text}", article_text or "(none)").replace(
+    filled = prompt.replace("{article_text}", article_text or "(none)").replace(
         "{claims_json}", claims_json
     )
-    reply = claude_complete(prompt, model=model, max_tokens=2000)
+    reply = claude_complete(filled, model=model, max_tokens=2000)
     raw = reply.text
     start, end = raw.find("["), raw.rfind("]")
     if start == -1 or end == -1:

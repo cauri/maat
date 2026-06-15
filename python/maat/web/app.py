@@ -26,7 +26,7 @@ from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from maat import config, events
+from maat import config, events, prompts
 from maat.bus import connect as nats_connect
 from maat.clocks import is_paused, read_topics
 from maat.evals import evaluate, load_expectations
@@ -304,6 +304,62 @@ async def source_group(source: str = Form(...), group: str = Form(...), reason: 
         )
         msg = f"Saved — {source} grouped as '{group.strip()}'. Not enforced yet." if pub else _BUS_DOWN
     return _redirect("/sources", msg)
+
+
+@app.get("/prompts", response_class=HTMLResponse)
+async def prompts_view(ok: str = "") -> str:
+    """P8 — edit the agent prompts directly. Edits go live on the next run; versioned + rollback."""
+    rows = await app.state.pool.fetch(
+        "select key, version, text, active, reason, created_at from prompts order by key, version desc"
+    )
+    by_key: dict[str, list] = {}
+    for r in rows:
+        by_key.setdefault(r["key"], []).append(r)
+    return _doc(_prompts_page(by_key), "prompts", "prompts", flash=ok)
+
+
+@app.post("/prompts/save")
+async def prompts_save(key: str = Form(...), text: str = Form(...), reason: str = Form("")):
+    if key not in prompts.PROMPTS_BY_KEY:
+        return _redirect("/prompts", "Unknown prompt.")
+    missing = prompts.missing_placeholders(key, text)
+    if missing:  # safety: dropping a placeholder would break the run — refuse the save
+        return _redirect("/prompts", f"Not saved — keep these placeholders: {' '.join(missing)}")
+    pub = await _publish(
+        events.ADMIN_PROMPT_UPDATED, key, events.admin_event(key, reason=reason, key=key, text=text)
+    )
+    msg = "Saved — live on the next run. Run the checks on Quality." if pub else _BUS_DOWN
+    return _redirect("/prompts", msg)
+
+
+@app.post("/prompts/restore")
+async def prompts_restore(key: str = Form(...), reason: str = Form(""), text: str = Form("")):
+    if key not in prompts.PROMPTS_BY_KEY:
+        return _redirect("/prompts", "Unknown prompt.")
+    pub = await _publish(
+        events.ADMIN_PROMPT_UPDATED,
+        key,
+        events.admin_event(key, reason=reason or "restore code default", key=key,
+                           text=prompts.seed_default(key)),
+    )
+    msg = "Restored the original — live on the next run." if pub else _BUS_DOWN
+    return _redirect("/prompts", msg)
+
+
+@app.post("/prompts/rollback")
+async def prompts_rollback(key: str = Form(...), version: int = Form(...)):
+    row = await app.state.pool.fetchrow(
+        "select text from prompts where key = $1 and version = $2", key, version
+    )
+    if row is None:
+        return _redirect("/prompts", "That version no longer exists.")
+    pub = await _publish(
+        events.ADMIN_PROMPT_UPDATED,
+        key,
+        events.admin_event(key, reason=f"rolled back to v{version}", key=key, text=row["text"]),
+    )
+    msg = f"Rolled back to v{version} — live on the next run." if pub else _BUS_DOWN
+    return _redirect("/prompts", msg)
 
 
 # ============================ routes: corrections (F3, admin events) =========================
@@ -1152,6 +1208,7 @@ _ACTION_LABELS = {
     "admin.source.flagged": "flagged a source",
     "admin.source.grouped": "grouped sources",
     "admin.clock.set": "paused/resumed updates",
+    "admin.prompt.updated": "edited a prompt",
 }
 
 
@@ -1373,6 +1430,55 @@ def _plain_group(g: str) -> str:
     return _GROUP_LABELS.get(base, base)
 
 
+def _prompts_page(by_key: dict) -> str:
+    """P8 — editable agent prompts: active text, version history, rollback, restore-default."""
+    intro = (
+        '<div class="deriv">Edit an AI step\'s instructions. <b>Saving makes it live on the next '
+        'run</b> (the built-in version is the fallback). Every version is kept — roll back in one '
+        'click — and run the checks on the Quality tab afterwards. Keep the '
+        '<span class="mono">{placeholders}</span> or the save is refused.</div>'
+    )
+    blocks = []
+    for p in prompts.PROMPTS:
+        key = p["key"]
+        versions = by_key.get(key, [])
+        active = next((v for v in versions if v["active"]), None)
+        text = active["text"] if active else p["default"]
+        ver = f'version {active["version"]}' if active else "built-in (no edits yet)"
+        past = [v for v in versions if not v["active"]]
+        hist = ""
+        if past:
+            items = "".join(
+                '<form class="inline" method="post" action="/prompts/rollback">'
+                f'<input type="hidden" name="key" value="{key}">'
+                f'<input type="hidden" name="version" value="{v["version"]}">'
+                f'<span class="mut sm">v{v["version"]} · {v["created_at"]:%Y-%m-%d %H:%M}'
+                + (f' · {html.escape(v["reason"])}' if v["reason"] else "")
+                + '</span><button title="Make this version active again">Roll back</button></form>'
+                for v in past
+            )
+            hist = f'<div class="bl mt">Earlier versions</div>{items}'
+        blocks.append(
+            '<div class="box" style="display:block">'
+            f'<div class="cname">{html.escape(p["label"])} '
+            f'<span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
+            '<form method="post" action="/prompts/save">'
+            f'<input type="hidden" name="key" value="{key}">'
+            f'<textarea class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
+            f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
+            '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
+            '<button title="Saves a new version, live on the next run">Save new version</button> '
+            '<button formaction="/prompts/restore" title="Replace with the original built-in version">'
+            'Restore original</button>'
+            f'</form>{hist}</div>'
+        )
+    return (
+        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<h3 class="ih">Prompts — the instructions each AI step runs on</h3>'
+        f'{intro}{"".join(blocks)}</div>'
+    )
+
+
 def _config_page(overrides: dict) -> str:
     """F5 — render the knob registry grouped, with live defaults + pending proposals."""
     out = [
@@ -1483,6 +1589,7 @@ def _nav(active: str) -> str:
         ("/runs", "Activity", "runs", "What the system has processed, and anything that failed"),
         ("/clocks", "Updates", "clocks", "When Maat pulls in new news — and a switch to pause it"),
         ("/config", "Settings", "config", "The dials Maat runs on (changes are proposed, not auto-applied)"),
+        ("/prompts", "Prompts", "prompts", "Edit the instructions each AI step runs on (live on next run)"),
         ("/sources", "Sources", "sources", "Every outlet Maat reads, and how you want each one treated"),
         ("/eval", "Quality", "eval", "Automatic checks that Maat is still judging correctly"),
         ("/audit", "History", "audit", "A log of every change made in this console"),
@@ -1611,6 +1718,7 @@ button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px s
 .cname{font-weight:600;font-size:14px}
 .ovr{font-size:13px;color:#0b6b86;margin-top:3px}
 .srow2{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.prompt{width:100%;min-height:230px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical;margin-bottom:6px}
 .note{flex-basis:100%;font-size:12px;color:var(--mut);line-height:1.5;margin:-2px 0 2px}
 .flash{max-width:820px;margin:10px auto 0;padding:9px 14px;border-radius:var(--border-radius-md,8px);background:#eaf3de;color:#3b6d11;font-size:13px;font-weight:500;border:1px solid #cfe3b6}
 [title]{cursor:help}
