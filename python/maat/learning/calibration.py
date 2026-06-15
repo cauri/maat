@@ -30,7 +30,13 @@ from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 
-from maat.pipeline.corroborate import _CONFIDENCE_CAP, _DECAY, _PRIMARY_LIFT, confidence_read
+from maat.pipeline.corroborate import (
+    _CONFIDENCE_CAP,
+    _DECAY,
+    _PRIMARY_LIFT,
+    confidence_label,
+    confidence_read,
+)
 
 
 @dataclass(frozen=True)
@@ -144,6 +150,11 @@ def calibration_bins(
 # A coarse grid over the per-originator doubt; the search is offline so this is cheap.
 _DECAY_GRID = (0.30, 0.40, 0.50, 0.55, 0.60, 0.66, 0.70, 0.76, 0.82)
 
+# Bounds on a single auto-tune step (Gamelan's bounded self-modification): a suggestion stays in
+# this absolute range and moves at most this far from the current value, so the loop can never
+# propose a wild swing on thin evidence — the operator still signs off, but within a safe envelope.
+_DECAY_FLOOR, _DECAY_CEIL, _MAX_DELTA = 0.20, 0.90, 0.25
+
 
 def tune_decay(
     observations: Iterable[Observation], *,
@@ -164,17 +175,61 @@ def tune_decay(
         facts = [o for o in scored if o.extremity == level]
         if not facts:
             continue  # no evidence at this level — leave the starting point untouched
-        # Seed with the CURRENT weight's score, so a grid that misses the base value can never
-        # make things worse — only a strictly-better grid point is adopted (no churn on ties).
-        best_v = base.decay[level]
+        cur = base.decay[level]
+        lo_b, hi_b = max(_DECAY_FLOOR, cur - _MAX_DELTA), min(_DECAY_CEIL, cur + _MAX_DELTA)
+        # Seed with the CURRENT weight's score so a grid that misses the base value can never make
+        # things worse — only a strictly-better, in-bounds grid point is adopted (no churn on ties).
+        best_v = cur
         best_b = brier_score(facts, replace(base, decay={**tuned_decay, level: best_v}))
         for v in grid:
+            if not lo_b <= v <= hi_b:
+                continue  # outside the safe envelope — never propose a wild swing on thin evidence
             b = brier_score(facts, replace(base, decay={**tuned_decay, level: v}))
             if b is not None and best_b is not None and b < best_b:
                 best_v, best_b = v, b
         tuned_decay[level] = best_v
     tuned = replace(base, decay=tuned_decay)
     return tuned, brier_score(scored, tuned)
+
+
+_TIER_RANK = {"floor": 0, "lo": 1, "mid": 2, "hi": 3}  # verdict bands, least → most confident
+
+
+@dataclass(frozen=True)
+class ReplayAB:
+    """How a candidate weight-set would have played out on the resolved history."""
+
+    brier_base: float | None
+    brier_candidate: float | None
+    n_scored: int
+    flips: int     # resolved facts whose verdict tier changes under the candidate
+    promoted: int  # ... to a more-confident tier
+    demoted: int   # ... to a less-confident tier
+
+
+def replay_ab(
+    observations: Iterable[Observation], base: Weights | None = None,
+    candidate: Weights | None = None,
+) -> ReplayAB:
+    """Replay-before-promote (D18): score a candidate weight-set against the resolved history —
+    Brier before/after AND how many facts cross a verdict band — so a sign-off is informed by the
+    downstream impact, not one number. Pure; the operator still decides. The verdict band uses the
+    live `confidence_label` cut-points, so a 'flip' is exactly what a reader would have seen change.
+    """
+    base = base or Weights.defaults()
+    candidate = candidate or base
+    scored = _scorable(observations)
+    flips = promoted = demoted = 0
+    for o in scored:
+        before = confidence_label(base.read(o.independent_originators, o.has_primary, o.extremity))[1]
+        after = confidence_label(candidate.read(o.independent_originators, o.has_primary, o.extremity))[1]
+        if before != after:
+            flips += 1
+            if _TIER_RANK[after] > _TIER_RANK[before]:
+                promoted += 1
+            else:
+                demoted += 1
+    return ReplayAB(brier_score(scored, base), brier_score(scored, candidate), len(scored), flips, promoted, demoted)
 
 
 def tune_proposals(observations: Iterable[Observation], *, base: Weights | None = None) -> list[dict]:
