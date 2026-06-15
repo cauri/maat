@@ -66,7 +66,7 @@ struct SourceDetailView: View {
                         .font(.title.weight(.semibold))
                         .foregroundStyle(r.coldStart ? Palette.muted : r.band.color)
                     Text(r.isPrimary
-                         ? "Primary source · highest standing"
+                         ? "Official source · highest standing"
                          : "How truthfully this source has reported over time")
                         .font(.caption).foregroundStyle(Palette.muted)
                     if !r.languages.isEmpty {
