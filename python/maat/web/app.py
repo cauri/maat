@@ -1943,11 +1943,13 @@ def _prompt_active_block(p: dict, by_key: dict) -> str:
         f'<textarea id="ta-{key}" class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
         f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
         '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
+        '<div class="btnrow">'
         '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
-        'this text first — live AI calls, takes a moment">Test on goldens</button> '
-        '<button title="Saves a new version, live on the next run">Save new version</button> '
+        'this text first — live AI calls, takes a moment">Test on goldens</button>'
+        '<button title="Saves a new version, live on the next run">Save new version</button>'
         '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
         'built-in version">Restore original</button>'
+        '</div>'
         f'</form>{hist}</div>'
     )
 
@@ -2664,18 +2666,19 @@ header.top p{margin:4px 0 0;color:var(--mut);font-size:13px}
 main{max-width:820px;margin:0 auto;padding:12px 20px 60px}
 /* Prompts page — 3-panel: agents (left) · editor (middle) · Claude chat (right) */
 main:has(.prompts3){max-width:1180px}
-.prompts3{display:grid;grid-template-columns:200px minmax(0,1fr) 360px;gap:16px;align-items:start;margin-top:14px}
+.prompts3{display:grid;grid-template-columns:200px minmax(0,1fr) 360px;gap:16px;align-items:stretch;margin-top:14px}
 .p3-col{min-width:0}
-.p3-left,.p3-right{position:sticky;top:14px}
+.p3-left{align-self:start;position:sticky;top:14px}
 .p3-group{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:14px 0 5px}
 .p3-group:first-child{margin-top:0}
 .p3-item{display:block;text-decoration:none;color:var(--ink);font-size:14px;line-height:1.3;padding:7px 10px;border-radius:8px;border:1px solid transparent}
 .p3-item:hover{background:#f0efe9}
 .p3-item.on{background:#eaf3de;border-color:#cfe3b6;font-weight:600}
-.chat3{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:12px;background:#f6f5f2;max-height:80vh}
+.chat3{display:flex;flex-direction:column;height:100%;border:1px solid var(--line);border-radius:12px;background:#f6f5f2}
 .chat3-head{font-size:13px;font-weight:600;color:var(--acc);padding:10px 12px;border-bottom:1px solid var(--line)}
 .chat3 .chat-log{flex:1 1 auto;overflow-y:auto;min-height:0}
-@media (max-width:1000px){main:has(.prompts3){max-width:820px}.prompts3{grid-template-columns:1fr}.p3-left,.p3-right{position:static}.chat3{max-height:none}}
+.chat3 .chat-log:empty{display:block}  /* keep filling the column so the input stays at the bottom */
+@media (max-width:1000px){main:has(.prompts3){max-width:820px}.prompts3{grid-template-columns:1fr;align-items:start}.p3-left{position:static}.chat3{height:auto;max-height:70vh}}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:14px 0}
 .panel h3,.ih{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
 .story{padding:15px 0;border-top:1px solid var(--line)}
@@ -2733,6 +2736,7 @@ main:has(.prompts3){max-width:1180px}
 .box label{font-size:13px;display:flex;gap:5px;align-items:center}
 .box input,.box select,.inline input,.inline select{font:inherit;font-size:13px;padding:4px 7px;border:1px solid var(--line);border-radius:7px;background:#fff}
 .box .reason,.inline .reason{flex:1;min-width:120px}
+.btnrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
 button{font:inherit;font-size:13px;font-weight:600;padding:5px 12px;border:1px solid var(--ink);border-radius:7px;background:var(--ink);color:#fff;cursor:pointer}
 .ck{flex-basis:100%;font-size:13px;gap:7px}
 .mc{padding:10px 0;border-top:1px solid var(--line)}
