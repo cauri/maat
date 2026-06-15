@@ -6,8 +6,9 @@ support, an extraordinary one needs many independent originators to reach the sa
 confidence. This rates the PRIOR only — never the verdict; a claim can be extraordinary
 and true, or ordinary and false.
 
-DRAFT — new prompt, created during the away-build for review on return. The three levels
-and the decay they map to (in `corroborate.confidence_read`) are first cuts.
+DRAFT — created during the away-build; cauri reviewed it and moved it to a 5-point scale on
+Sonnet, with the bar set a bit higher (the decay constants in `corroborate.confidence_read`).
+Prompt boundaries flagged for cauri's follow-up review.
 """
 
 from __future__ import annotations
@@ -16,39 +17,46 @@ import json
 
 from maat.providers.seam import claude_complete
 
-EXTREMITY_MODEL = "claude-haiku-4-5-20251001"  # a 3-way prior judgement; cheap is fine
+EXTREMITY_MODEL = "claude-sonnet-4-6"  # a 5-point prior judgement (cauri: Sonnet for sharper priors)
 
-LEVELS = ("ordinary", "notable", "extraordinary")
+LEVELS = ("routine", "ordinary", "notable", "significant", "extraordinary")
 
 PROMPT = r"""# ROLE
 
-You rate the PRIOR against a single factual claim — how extraordinary it would be if asserted
-without support — so a downstream confidence read can demand more corroboration for the
-extraordinary. You are NOT judging whether the claim is true; only how surprising it is.
+You rate the PRIOR against a single factual claim — how surprising it would be if asserted
+without support — on a FIVE-POINT scale, so a downstream confidence read can demand more
+corroboration for the more extraordinary. You are NOT judging whether the claim is true; only
+how surprising it would be before any evidence.
 
 # GOALS
 
-- Place the claim on a three-level prior, judged before any corroboration is seen.
+- Place the claim on a five-level prior, judged before any corroboration is seen.
 
-# GUIDELINES
+# GUIDELINES (lowest to highest prior-implausibility)
 
-- ordinary — routine and expected, low-stakes, the kind of thing reported daily and seldom wrong
-  ("the minister attended the summit", "the index closed lower").
-- notable — consequential or contested but unsurprising in its context; a normal hard-news claim
-  ("the minister resigned amid a procurement scandal", "the ceasefire talks collapsed").
+- routine — happens constantly and is near-always reported accurately; nothing rides on it being
+  wrong ("markets opened", "the council met", "the index closed lower").
+- ordinary — normal hard news, an expected kind of event for its context ("a minister gave a
+  policy speech", "the central bank held rates", "a company reported quarterly earnings").
+- notable — consequential or mildly surprising, but unremarkable that it happened ("a minister
+  resigned", "merger talks collapsed", "a factory closed with job losses").
+- significant — surprising and serious, or contested; a reasonable reader would want it
+  well-sourced ("a minister resigned amid a corruption probe", "a breach exposed millions of
+  records", "a ceasefire was violated").
 - extraordinary — if true it overturns expectations or carries grave consequence, or it is
-  inherently rare and hard to establish ("the minister ordered the killings", "the vote was
-  rigged", "a banned weapon was used"). Judge by the prior, not by your guess at the verdict.
+  inherently rare and hard to establish ("a minister ordered killings", "an election was rigged",
+  "a banned weapon was used", "a leader secretly diverted state funds").
 
 # GUARDRAILS
 
-- Judge the prior only, never the truth: a claim can be extraordinary and true, or ordinary and false.
+- Judge the prior only, never the truth: a claim can be extraordinary and true, or routine and false.
 - Rate the claim as written; do not import outside knowledge about the specific people or bodies named.
-- When genuinely unsure between two levels, choose the lower (do not inflate the bar).
+- When genuinely between two levels, choose the LOWER — never inflate the bar.
 
 # OUTPUT FORMAT
 
-- A JSON object: { "extremity": "ordinary"|"notable"|"extraordinary", "reason": string }
+- A JSON object:
+  { "extremity": "routine"|"ordinary"|"notable"|"significant"|"extraordinary", "reason": string }
 
 # CONTEXT
 

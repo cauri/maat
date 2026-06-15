@@ -166,9 +166,9 @@ def test_effective_originators_weights_by_sourcing():
 def test_confidence_read_rises_with_corroboration_and_primary():
     from maat.pipeline.corroborate import confidence_read
 
-    # diminishing returns on independent originators
-    assert confidence_read(1, False) == 0.5
-    assert confidence_read(2, False) == 0.75
+    # diminishing returns on independent originators (default prior "notable", decay 0.55)
+    assert confidence_read(1, False) == 0.45
+    assert confidence_read(2, False) == 0.7
     assert confidence_read(3, False) < confidence_read(4, False)
     # a primary source closes half the remaining gap, never reaching certainty
     assert confidence_read(3, True) > confidence_read(3, False)
@@ -234,6 +234,20 @@ def test_parse_extremity():
     assert _parse_extremity('prose then {"extremity":"ordinary"} trailing') == "ordinary"
     assert _parse_extremity("no json at all") == "notable"  # safe default
     assert _parse_extremity('{"extremity": "wild"}') == "notable"  # unknown level -> default
+
+
+def test_extremity_is_five_point_scale():
+    from maat.pipeline.corroborate import confidence_read
+    from maat.pipeline.extremity import LEVELS, _parse_extremity
+
+    assert LEVELS == ("routine", "ordinary", "notable", "significant", "extraordinary")
+    assert _parse_extremity('{"extremity": "significant"}') == "significant"
+    assert _parse_extremity('{"extremity": "routine"}') == "routine"
+    # confidence is strictly decreasing as the prior rises across all five levels
+    confs = [confidence_read(3, False, lv) for lv in LEVELS]
+    assert confs == sorted(confs, reverse=True)
+    # the raised bar: an extraordinary claim earns much less than a routine one from 2 originators
+    assert confidence_read(2, False, "routine") > confidence_read(2, False, "extraordinary") + 0.2
 
 
 def test_admin_event_payload():
