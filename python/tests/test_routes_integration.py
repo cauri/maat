@@ -161,6 +161,15 @@ async def _run_all() -> None:
             for path, form in posts:
                 r = await ac.post(path, data=form)
                 assert r.status_code == 303, f"{path} -> {r.status_code}"
+
+            # Regression: when a newer projection table hasn't been migrated yet, the page must
+            # degrade — not 500 (the Activity/Prompts bug). Drop the tables and re-hit.
+            await pool.execute("drop table dead_letters")
+            await pool.execute("drop table prompts")
+            for path, must in (("/runs", "restart the kernel"), ("/prompts", "restart the kernel")):
+                r = await ac.get(path)
+                assert r.status_code == 200, f"{path} regressed to {r.status_code} on missing table"
+                assert must in r.text, f"{path} missing the degrade note"
     finally:
         await pool.close()
         await _teardown()

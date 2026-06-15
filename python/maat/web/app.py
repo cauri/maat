@@ -177,10 +177,16 @@ async def runs(ok: str = "") -> str:
         "events": await pool.fetchval("select count(*) from events"),
     }
     recent = await pool.fetch("select type, stream_id, created_at from events order by id desc limit 25")
-    dead = await pool.fetch(
-        "select type, stream_id, error, created_at from dead_letters order by id desc limit 25"
+    try:
+        dead = await pool.fetch(
+            "select type, stream_id, error, created_at from dead_letters order by id desc limit 25"
+        )
+        dead_ready = True
+    except asyncpg.UndefinedTableError:  # migration not applied yet — degrade, don't 500
+        dead, dead_ready = [], False
+    return _doc(
+        _runs_page(stage_summary(counts), proj, recent, dead, dead_ready), "runs", "runs", flash=ok
     )
-    return _doc(_runs_page(stage_summary(counts), proj, recent, dead), "runs", "runs", flash=ok)
 
 
 @app.post("/runs/trigger")
@@ -312,13 +318,17 @@ async def source_group(source: str = Form(...), group: str = Form(...), reason: 
 @app.get("/prompts", response_class=HTMLResponse)
 async def prompts_view(ok: str = "") -> str:
     """P8 — edit the agent prompts directly. Edits go live on the next run; versioned + rollback."""
-    rows = await app.state.pool.fetch(
-        "select key, version, text, active, reason, created_at from prompts order by key, version desc"
-    )
+    try:
+        rows = await app.state.pool.fetch(
+            "select key, version, text, active, reason, created_at from prompts order by key, version desc"
+        )
+        store_ready = True
+    except asyncpg.UndefinedTableError:  # migration not applied yet — show built-ins, don't 500
+        rows, store_ready = [], False
     by_key: dict[str, list] = {}
     for r in rows:
         by_key.setdefault(r["key"], []).append(r)
-    return _doc(_prompts_page(by_key), "prompts", "prompts", flash=ok)
+    return _doc(_prompts_page(by_key, store_ready), "prompts", "prompts", flash=ok)
 
 
 @app.post("/prompts/save")
@@ -1292,7 +1302,7 @@ def stage_summary(counts: dict) -> list[dict]:
     return rows
 
 
-def _runs_page(stages, proj, recent, dead) -> str:
+def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     pcells = "".join(
         f'<div class="mcell"><div class="mk">{html.escape(k)}</div><div class="mv">{v}</div></div>'
         for k, v in proj.items()
@@ -1311,7 +1321,12 @@ def _runs_page(stages, proj, recent, dead) -> str:
             'yourself, to control cost.">Log a run</button></form></div>'
         )
     dead_html = ""
-    if dead:
+    if not dead_ready:
+        dead_html = (
+            '<div class="bl mt">Errors</div><div class="note">Not set up yet — restart the kernel '
+            "(maat-kerneld) to apply the latest updates.</div>"
+        )
+    elif dead:
         drows = "".join(
             f'<tr><td class="mut">{r["created_at"]:%m-%d %H:%M}</td>'
             f'<td class="mono" style="color:#b3402e">{html.escape(r["type"])}</td>'
@@ -1458,7 +1473,7 @@ def _plain_group(g: str) -> str:
     return _GROUP_LABELS.get(base, base)
 
 
-def _prompts_page(by_key: dict) -> str:
+def _prompts_page(by_key: dict, store_ready: bool = True) -> str:
     """P8 — editable agent prompts: active text, version history, rollback, restore-default."""
     intro = (
         '<div class="deriv">Edit an AI step\'s instructions. <b>Saving makes it live on the next '
@@ -1466,6 +1481,11 @@ def _prompts_page(by_key: dict) -> str:
         'click — and run the checks on the Quality tab afterwards. Keep the '
         '<span class="mono">{placeholders}</span> or the save is refused.</div>'
     )
+    if not store_ready:
+        intro += (
+            '<div class="note">The prompt store isn\'t set up yet — restart the kernel '
+            "(maat-kerneld) to enable saving and version history. Showing the built-in prompts.</div>"
+        )
     blocks = []
     for p in prompts.PROMPTS:
         key = p["key"]
