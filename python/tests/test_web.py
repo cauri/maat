@@ -871,3 +871,27 @@ def test_prompt_chat_agent_prompt_in_registry_as_reviewable_draft():
     # The instructions keep the substitution points the console fills at chat time.
     for tok in ("{prompt_label}", "{prompt_purpose}", "{current_prompt}"):
         assert tok in prompts.PROMPT_CHAT_AGENT
+
+
+def test_settings_page_uses_smart_inputs_and_tooltips():
+    """Model knobs render a <select> with the current model selected; numeric knobs render number
+    fields (not free text); every knob carries an on-page (data-tip) explanation."""
+    from maat.web.app import _config_page
+
+    out = _config_page({})
+    assert '<select name="value"' in out                       # model knob -> dropdown
+    assert "claude-haiku-4-5-20251001" in out and "selected" in out  # current model preselected
+    assert 'type="number"' in out and 'step="0.01"' in out and 'step="1"' in out  # float + int fields
+    assert 'placeholder="new value"' not in out               # the dumb free-text box is gone
+    assert 'class="tip" data-tip=' in out                      # hover help on the page
+
+
+def test_doc_shell_is_sidebar_with_external_stylesheet():
+    """The shell is the sidebar layout, styled from the central /static/console.css (no inline CSS)."""
+    from maat.web.app import _doc
+
+    page = _doc("<p>x</p>", "sub", "config")
+    assert 'rel="stylesheet" href="/static/console.css"' in page
+    assert "<style>" not in page                                # CSS is external now
+    assert 'class="app"' in page and 'class="sidebar"' in page  # sidebar layout
+    assert "data-tip=" in page                                  # nav items carry on-page tooltips
