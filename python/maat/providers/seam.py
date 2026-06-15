@@ -87,19 +87,33 @@ def mistral_complete(prompt: str, *, model: str = MISTRAL_BULK, max_tokens: int 
         return Reply(text=text, model=model)
 
 
+# Mistral's embeddings endpoint caps the total tokens per request, so a single call with the whole
+# corpus 400s once the claim set grows (it worked at ~74 claims, broke at ~239). Batch the inputs to
+# stay safely under the limit — order is preserved within and across batches.
+_EMBED_BATCH = 64
+
+
 def mistral_embed(texts: list[str], *, model: str = MISTRAL_EMBED) -> list[list[float]]:
-    """Multilingual embeddings for clustering / dedup / identity (1024-dim)."""
+    """Multilingual embeddings for clustering / dedup / identity (1024-dim). Batched (#scale)."""
+    if not texts:
+        return []
     key = os.environ["MISTRAL_API_KEY"]
-    with llm_span("embed", model, f"{len(texts)} texts") as span:
-        resp = httpx.post(
-            MISTRAL_EMBED_URL,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": model, "input": texts},
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if span is not None:
-            span.set_attribute("gen_ai.usage.input_tokens", data.get("usage", {}).get("prompt_tokens", 0))
-            span.set_attribute("maat.embed.count", len(texts))
-        return [item["embedding"] for item in data["data"]]
+    out: list[list[float]] = []
+    for start in range(0, len(texts), _EMBED_BATCH):
+        chunk = texts[start : start + _EMBED_BATCH]
+        with llm_span("embed", model, f"{len(chunk)} texts") as span:
+            resp = httpx.post(
+                MISTRAL_EMBED_URL,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": model, "input": chunk},
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if span is not None:
+                span.set_attribute(
+                    "gen_ai.usage.input_tokens", data.get("usage", {}).get("prompt_tokens", 0)
+                )
+                span.set_attribute("maat.embed.count", len(chunk))
+            out.extend(item["embedding"] for item in data["data"])
+    return out
