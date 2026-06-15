@@ -1,0 +1,3 @@
+# Don't ship the local build output into the image build context (it's large and host-specific;
+# the image builds its own release artifacts).
+target/

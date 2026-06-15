@@ -17,7 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from maat.acquire import apify
-from maat.acquire.fetch import fetch_body
+from maat.acquire.fetch import fetch_article
 from maat.acquire.gdelt import search
 from maat.bus import connect
 from maat.events import publish
@@ -45,7 +45,7 @@ async def main() -> None:
     nc = await connect()
     n = 0
     for a in arts:
-        body = fetch_body(a.url)
+        body, image_url = fetch_article(a.url)
         if not body:
             print(f"  skip (no body) {a.domain}")
             continue
@@ -53,7 +53,8 @@ async def main() -> None:
             nc,
             "article.ingested",
             _aid(a.url),
-            {"title": a.title, "source": a.domain, "language": a.language, "body": body, "url": a.url},
+            {"title": a.title, "source": a.domain, "language": a.language, "body": body,
+             "url": a.url, "image_url": image_url},
         )
         n += 1
         print(f"  + [{a.country or '?'}/{a.language or '?'}] {a.domain}: {a.title[:52]}")

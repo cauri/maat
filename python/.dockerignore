@@ -4,5 +4,5 @@ __pycache__
 .pytest_cache
 .ruff_cache
 .uv
-scripts
+# scripts/ is bundled into the image (the acquisition-clock service runs clock.py). tests/ is not.
 tests

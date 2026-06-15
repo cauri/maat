@@ -47,6 +47,17 @@ final class AppSettings {
         return APIFeedService(baseURL: url)
     }
 
+    /// URL for an article's lead image, served through the reader's privacy-preserving proxy (#1):
+    /// the client passes the article *id*, never the origin URL, so the publisher never sees the
+    /// reader's users. nil in fixture mode (no server) or when the base URL is invalid.
+    func imageURL(articleID: String) -> URL? {
+        guard !apiBaseURL.isEmpty, let base = URL(string: apiBaseURL) else { return nil }
+        var comps = URLComponents(url: base.appending(path: "api/v2/image"),
+                                  resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "article", value: articleID)]
+        return comps?.url
+    }
+
     private enum Keys {
         static let api = "maat.apiBaseURL"
         static let onDevice = "maat.preferOnDeviceTranslation"

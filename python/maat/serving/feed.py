@@ -26,9 +26,15 @@ Veracity contract:
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
+import socket
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urljoin, urlparse
+
+import httpx
 
 from maat.agents.curation import Story as CurationStory, curate
 from maat.pipeline.corroborate import confidence_label
@@ -38,10 +44,10 @@ from maat.pipeline.corroborate import confidence_label
 # so the route parameter/return annotations resolve for OpenAPI — `from __future__ import
 # annotations` makes every annotation a forward-ref, which needs the names in module globals.
 try:  # pragma: no cover - exercised whenever FastAPI is present (the normal case)
-    from fastapi import APIRouter, HTTPException, Request
+    from fastapi import APIRouter, HTTPException, Request, Response
     from fastapi.responses import JSONResponse
 except ImportError:  # pragma: no cover - FastAPI absent (pure-builder-only env)
-    APIRouter = HTTPException = Request = JSONResponse = None  # type: ignore[assignment,misc]
+    APIRouter = HTTPException = Request = Response = JSONResponse = None  # type: ignore[assignment,misc]
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +212,7 @@ def build_story(
             cluster.get("originators"), article_meta
         ),
         "languages": languages,
+        "hero_image_article_id": _hero_image_article_id(cluster, claims, article_meta),
         "claims": claims,
     }
 
@@ -282,6 +289,29 @@ def _primary_source(
                 return src
     sources = _jload(cluster.get("sources"))
     return sources[0] if sources else ""
+
+
+def _hero_image_article_id(
+    cluster: dict[str, Any],
+    claims: list[dict[str, Any]],
+    article_meta: dict[str, dict[str, Any]],
+) -> str | None:
+    """Article id whose lead image best represents the story (for the client's proxy URL).
+
+    Prefer the primary originator's article; fall back to any claim's article with an image.
+    Returns the article id — never the raw URL — because the client fetches the image through
+    the reader's proxy (/api/v2/image?article=<id>), so the origin server never sees the
+    reader's users (privacy, #1). Display-only; never a veracity signal.
+    """
+    for grp in _jload(cluster.get("originators")):
+        for aid in grp:
+            if (article_meta.get(aid) or {}).get("image_url"):
+                return aid
+    for claim in claims:
+        aid = claim.get("article_id")
+        if aid and (article_meta.get(aid) or {}).get("image_url"):
+            return aid
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +402,92 @@ def build_feed(
 
 
 # ---------------------------------------------------------------------------
+# Image proxy (#1) — privacy-preserving, SSRF-guarded
+# ---------------------------------------------------------------------------
+#
+# The Apple client requests article images by ARTICLE ID, never by URL: the reader looks up the
+# stored og:image for that id and fetches it, so the origin server never sees the user's IP and a
+# client cannot make the reader fetch an arbitrary host. The stored URL is still SSRF-guarded
+# (public IPs only), size/time-capped, and the bytes are cached in-process. Display-only — image
+# fetch outcomes never feed veracity.
+
+_IMAGE_TIMEOUT = 6.0
+_IMAGE_MAX_BYTES = 8 * 1024 * 1024  # 8 MB — generous for a hero image, bounds memory/abuse
+_IMAGE_CACHE_MAX = 256  # FIFO cap; per-process, lossy across workers (fine — it's a cache)
+_image_cache: dict[str, tuple[bytes, str]] = {}
+
+
+async def _host_is_public(host: str, port: int) -> bool:
+    """True only if EVERY resolved address for ``host`` is a public, routable IP.
+
+    Blocks the obvious SSRF targets — loopback, RFC-1918 private ranges, link-local (incl. the
+    169.254.169.254 cloud-metadata endpoint), reserved/multicast/unspecified. Residual gap: a
+    DNS-rebind between this check and httpx's own resolution; acceptable for a low-value image
+    proxy whose inputs are og:image tags from real news sites (defense-in-depth, not a vault).
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for *_rest, sockaddr in infos:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return False
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
+async def _safe_image_fetch(url: str) -> tuple[bytes, str] | None:
+    """Fetch an image URL with SSRF + size + content-type guards. Returns (bytes, content_type).
+
+    Redirects are followed manually (max 3 hops) so each hop's host is re-validated — httpx's
+    auto-redirect would bypass the per-hop check. Anything non-image, oversized, or non-200
+    returns None (the route answers 502).
+    """
+    current = url
+    async with httpx.AsyncClient(follow_redirects=False, timeout=_IMAGE_TIMEOUT) as client:
+        for _ in range(4):  # initial request + up to 3 redirects
+            parsed = urlparse(current)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                return None
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            if not await _host_is_public(parsed.hostname, port):
+                return None
+            try:
+                resp = await client.get(current, headers={"User-Agent": "maat-image-proxy/1"})
+            except httpx.HTTPError:
+                return None
+            if resp.is_redirect:
+                loc = resp.headers.get("location")
+                if not loc:
+                    return None
+                current = urljoin(current, loc)
+                continue
+            if resp.status_code != 200:
+                return None
+            ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            if not ctype.startswith("image/"):
+                return None
+            data = resp.content
+            if not data or len(data) > _IMAGE_MAX_BYTES:
+                return None
+            return data, ctype
+    return None  # too many redirects
+
+
+# ---------------------------------------------------------------------------
 # Thin FastAPI router (reads DB → calls pure builders — no app.py edits)
 # ---------------------------------------------------------------------------
 
@@ -383,7 +499,7 @@ def _make_router() -> Any:
 
     async def _load_article_meta(pool) -> dict[str, dict[str, Any]]:
         rows = await pool.fetch(
-            "select id, source, language, title, url from articles"
+            "select id, source, language, title, url, image_url from articles"
         )
         return {r["id"]: dict(r) for r in rows}
 
@@ -433,8 +549,8 @@ def _make_router() -> Any:
         article_ids = list({c["article_id"] for c in story["claims"] if c.get("article_id")})
         if article_ids:
             full_rows = await pool.fetch(
-                "select id, source, title, url, language, body, ingested_at from articles "
-                "where id = any($1::text[])",
+                "select id, source, title, url, language, body, image_url, ingested_at "
+                "from articles where id = any($1::text[])",
                 article_ids,
             )
             story["articles"] = [
@@ -445,6 +561,9 @@ def _make_router() -> Any:
                     "body": r.get("body") or "",
                     "url": r.get("url"),
                     "language": r.get("language") or "en",
+                    # Raw og:image for transparency; the client still loads it via the proxy
+                    # (/api/v2/image?article=<id>), never directly (privacy, #1).
+                    "image_url": r.get("image_url"),
                     "ingested_at": (
                         r["ingested_at"].isoformat() if r.get("ingested_at") else None
                     ),
@@ -455,6 +574,35 @@ def _make_router() -> Any:
             story["articles"] = []
 
         return JSONResponse(story)
+
+    @router.get("/image")
+    async def image_proxy(article: str, request: Request):
+        """Privacy-preserving image proxy (#1): client passes an ARTICLE ID, not a URL.
+
+        We look up that article's stored og:image and stream it back, SSRF-guarded and cached,
+        so the origin server never sees the reader's users and the client can't drive the reader
+        to fetch arbitrary hosts. Display-only enrichment; never a veracity signal.
+        """
+        pool = request.app.state.pool
+        row = await pool.fetchrow("select image_url from articles where id = $1", article)
+        if row is None or not row["image_url"]:
+            raise HTTPException(status_code=404, detail="no image for article")
+
+        cached = _image_cache.get(article)
+        if cached is None:
+            cached = await _safe_image_fetch(row["image_url"])
+            if cached is None:
+                raise HTTPException(status_code=502, detail="image unavailable")
+            if len(_image_cache) >= _IMAGE_CACHE_MAX:
+                _image_cache.pop(next(iter(_image_cache)))  # FIFO eviction
+            _image_cache[article] = cached
+
+        data, ctype = cached
+        return Response(
+            content=data,
+            media_type=ctype,
+            headers={"Cache-Control": "public, max-age=86400"},  # let Caddy + client cache too
+        )
 
     return router
 
