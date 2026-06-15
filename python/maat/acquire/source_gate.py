@@ -31,12 +31,14 @@ topic, importance, or truth of the content.
 GOALS
 - Pass only credible publishers: genuine news outlets, official primary sources, and reputable institutions.
 - Discard reference pages, social and user-generated content, SEO and content farms before analysis.
-- Accept a real news outlet whatever the topic, in any country or language.
+- Accept EVERY real news outlet — national, regional, local, niche, trade, or financial — whatever
+  the topic, country, or language. Never drop a genuine outlet just because it is small or unfamiliar.
 
 PROCESS
 1. Identify the publisher from the domain (and, for a video or social URL, the channel or author).
 2. Classify it as one of:
-   - news: a journalism outlet — newspaper, wire service, magazine, broadcaster, or trade press.
+   - news: a journalism outlet — newspaper, wire service, magazine, broadcaster, trade press,
+     financial / markets press, or a regional / local outlet — at any scale, in any language.
    - primary: an organisation's own official release about itself — a government body, central bank, regulator, court, or a company's own newsroom / press release.
    - institution: a reputable research institute, think tank, IGO, university, or standards body publishing original analysis or reports.
    - other: none of the above.
@@ -45,8 +47,11 @@ PROCESS
 
 GUIDELINES
 - Judge the publisher, not the topic — a real outlet covering a light or local story is still news.
-- Accept clearly journalistic domains in any region or language, even ones you do not recognise.
-- Prefer rejecting when a domain genuinely looks like a blog, content farm, or aggregator rather than a publisher.
+- When uncertain, lean ACCEPT if the domain presents as a news outlet (a masthead, datelined
+  reporting, a newsroom) — regional, local, niche, trade, and financial outlets all count, even
+  unfamiliar or foreign-language ones. Reject only when it is clearly NOT journalism (see guardrails).
+- A personal blog, a single-author Substack/Medium, or a self-promoting company site is not a news
+  outlet; an established outlet you simply do not recognise IS.
 - Set "outlet" to the human-readable publisher name (e.g. "BBC News", "European Central Bank", "Reuters").
 
 GUARDRAILS
@@ -82,6 +87,12 @@ Output: {"accept": true, "kind": "news", "outlet": "BBC News"}
 
 DOMAIN: ecb.europa.eu — HEADLINE: Monetary policy decisions
 Output: {"accept": true, "kind": "primary", "outlet": "European Central Bank"}
+
+DOMAIN: finanznachrichten.de — HEADLINE: Deutsche Bank lifts its full-year guidance
+Output: {"accept": true, "kind": "news", "outlet": "finanznachrichten.de"}
+
+DOMAIN: thecontentmill.example — HEADLINE: 10 best blenders of 2026 (affiliate picks)
+Output: {"accept": false, "kind": "other", "outlet": ""}
 """
 
 # Obvious non-news, dropped for free (no LLM). YouTube is deliberately ABSENT — news outlets
