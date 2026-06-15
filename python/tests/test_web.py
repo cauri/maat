@@ -189,5 +189,36 @@ def test_nav_includes_all_p8_tabs():
     from maat.web.app import _nav
 
     n = _nav("content")
-    for label in ("Content", "Runs", "Config", "Sources", "Eval", "Audit"):
+    for label in ("Content", "Runs", "Clocks", "Config", "Sources", "Eval", "Audit"):
         assert label in n
+
+
+def test_is_paused_reads_latest_state_per_clock():
+    from maat.clocks import is_paused
+
+    newest_first = [{"clock": "ingestion", "paused": True}, {"clock": "ingestion", "paused": False}]
+    assert is_paused(newest_first, "ingestion") is True  # latest wins
+    assert is_paused([], "ingestion") is False  # never set -> running
+    assert is_paused([{"clock": "harvester", "paused": True}], "ingestion") is False  # other clock
+
+
+def test_read_topics_env_then_file(monkeypatch, tmp_path):
+    from maat.clocks import read_topics
+
+    monkeypatch.setenv("MAAT_TOPICS", "world politics, AI")
+    assert read_topics(tmp_path) == ["world politics", "AI"]
+    monkeypatch.delenv("MAAT_TOPICS", raising=False)
+    assert read_topics(tmp_path) == []  # no env, no file
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "topics.txt").write_text("# comment\nAI safety\n\nelections\n")
+    assert read_topics(tmp_path) == ["AI safety", "elections"]  # comments + blanks skipped
+
+
+def test_clocks_page_status_topics_and_harvester_stub():
+    from maat.web.app import _clocks_page
+
+    running = _clocks_page({"n": 5, "last": dt.datetime(2026, 6, 15, 9, 0)}, [], ["AI"], False)
+    assert "running" in running and "Pause ingestion" in running and "AI" in running
+    assert "Projection-harvester" in running and "#39" in running  # harvester stub flagged
+    paused = _clocks_page({"n": 5, "last": None}, [], [], True)
+    assert "paused" in paused and "Resume ingestion" in paused

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ from maat.acquire import apify
 from maat.acquire.fetch import fetch_body
 from maat.acquire.gdelt import search
 from maat.bus import connect
+from maat.clocks import is_paused
 from maat.events import publish
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +56,13 @@ async def main() -> None:
     pool = await asyncpg.create_pool(
         os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
     )
+    clk = await pool.fetch(
+        "select data from events where type = 'admin.clock.set' order by id desc limit 20"
+    )
+    if is_paused([json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in clk]):
+        await pool.close()
+        print("ingestion clock paused (admin.clock.set) — skipping tick")
+        return
     seen = {r["url"] for r in await pool.fetch("select url from articles where url is not null")}
     await pool.close()
 

@@ -119,6 +119,7 @@ async def _run_all() -> None:
             checks = [
                 ("/", "Maat"),
                 ("/runs", "Runs"),
+                ("/clocks", "Clocks"),  # A1 — ingestion clock status off the event log
                 ("/config", "0.35"),  # the seeded threshold proposal surfaces
                 ("/sources", "European Central Bank"),  # registry off articles
                 ("/eval", "Eval"),
@@ -140,6 +141,7 @@ async def _run_all() -> None:
                 ("/config/set", {"key": "gate.floor", "value": "0.5", "reason": "smoke"}),
                 ("/sources/flag", {"source": "AFP", "status": "deny", "reason": "smoke"}),
                 ("/runs/trigger", {"stage": "Corroborate", "reason": "smoke"}),
+                ("/clocks/set", {"clock": "ingestion", "paused": "true", "reason": "smoke"}),
                 (f"/claim/{CL1}/correct", {"kind": "projection", "reason": "smoke"}),
                 (f"/cluster/{CLUSTER}/split", {"claim_ids": CL1, "reason": "smoke"}),
             ]
