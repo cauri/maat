@@ -1,4 +1,4 @@
-.PHONY: help kernel-test kernel-lint py-setup py-smoke py-lint eval acquire tick obs-up db-up db-down ci
+.PHONY: help kernel-test kernel-lint py-setup py-smoke py-lint eval eval-prompt acquire tick obs-up db-up db-down ci
 
 help:
 	@echo "kernel-test  - cargo test (rust kernel)"
@@ -7,6 +7,7 @@ help:
 	@echo "py-smoke     - verify Claude + Mistral keys (live APIs, costs \$$)"
 	@echo "py-lint      - ruff check"
 	@echo "eval         - eval harness over the projections (golden + metrics)"
+	@echo "eval-prompt  - run the golden corpus with the ACTIVE prompts + score (live APIs, costs \$$)"
 	@echo "acquire      - GDELT: fetch real articles (QUERY=... N=12, live web + APIs)"
 	@echo "tick         - ingestion clock: acquire NEW articles for config/topics.txt"
 	@echo "obs-up       - start cat-cafe (OTLP eval sink) on :8800 / :4318"
@@ -36,6 +37,9 @@ corroborate:
 
 eval:
 	cd python && uv run python scripts/eval.py
+
+eval-prompt:
+	cd python && uv run python scripts/eval_prompt.py
 
 acquire:
 	cd python && uv run python scripts/acquire.py "$(QUERY)" $(N)

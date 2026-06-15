@@ -114,6 +114,10 @@ async def _run_all() -> None:
 
     from maat.web import app as appmod
 
+    # Keep this harness LLM-free + deterministic: the /prompts/test smoke must take the
+    # graceful no-key path, never a live (paid) call, even if keys are in the shell env.
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+    os.environ.pop("MISTRAL_API_KEY", None)
     await _setup()
     pool = await asyncpg.create_pool(TEST_URL)
     appmod.app.state.pool = pool
@@ -150,6 +154,8 @@ async def _run_all() -> None:
                 ("/clocks/set", {"clock": "ingestion", "paused": "true", "reason": "smoke"}),
                 (f"/claim/{CL1}/correct", {"kind": "projection", "reason": "smoke"}),
                 ("/prompts/save", {"key": "extremity", "text": "rate {claim}", "reason": "smoke"}),
+                # eval-on-change with no API key set -> graceful redirect, no LLM call
+                ("/prompts/test", {"key": "extremity", "text": "rate {claim}"}),
                 (f"/cluster/{CLUSTER}/split", {"claim_ids": CL1, "reason": "smoke"}),
             ]
             for path, form in posts:
