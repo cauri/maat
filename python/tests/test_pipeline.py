@@ -111,9 +111,15 @@ def test_is_primary_source():
     assert is_primary_source("Valoria Ministry of Finance (official statement)")
     assert is_primary_source("European Central Bank")  # issuer of its own rate decision
     assert is_primary_source("Federal Reserve")
+    # the acquired source is often a bare domain — an issuer's own domain is primary (#108)
+    assert is_primary_source("ecb.europa.eu")  # the ECB's own release
+    assert is_primary_source("treasury.gov")
+    assert is_primary_source("gov.uk")
+    assert is_primary_source("who.int")
     assert not is_primary_source("Daily Herald")
     assert not is_primary_source("AFP")  # a wire agency relays, it is not a primary source
     assert not is_primary_source("Reuters")
+    assert not is_primary_source("governance-weekly.com")  # label match, not substring
 
 
 def test_has_provenance_flags_bald_assertions():
