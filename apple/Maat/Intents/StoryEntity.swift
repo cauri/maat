@@ -11,21 +11,21 @@ struct StoryEntity: AppEntity, Identifiable {
 
     let id: String
     let fact: String
-    let confidencePercent: Int
+    let confidenceWord: String
     let independentOriginators: Int
     let hasPrimary: Bool
 
     var displayRepresentation: DisplayRepresentation {
         DisplayRepresentation(
             title: "\(fact)",
-            subtitle: "\(confidencePercent)% confidence · \(independentOriginators) independent originators"
+            subtitle: "\(confidenceWord) · \(independentOriginators) independent originators"
         )
     }
 
     init(_ story: Story) {
         id = story.id
         fact = story.fact
-        confidencePercent = story.confidencePercent
+        confidenceWord = story.confidenceWord
         independentOriginators = story.independentOriginators
         hasPrimary = story.hasPrimary
     }

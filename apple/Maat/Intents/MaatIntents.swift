@@ -67,7 +67,7 @@ struct TopStoryIntent: AppIntent {
         let summary = await FoundationModelsSummarizer().summarize(top)
         return .result(
             value: StoryEntity(top),
-            dialog: "Top story, \(top.confidencePercent)% confidence. \(summary)"
+            dialog: "Top story, \(top.confidenceWord.lowercased()). \(summary)"
         )
     }
 }

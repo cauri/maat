@@ -20,15 +20,10 @@ struct ConfidenceBar: View {
                 }
                 .frame(height: 7)
 
-                Text("\(story.confidencePercent)%")
-                    .font(.subheadline.weight(.bold))
-                    .monospacedDigit()
+                Text(story.confidenceWord)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(level.color)
-
-                Text("confidence")
-                    .font(.caption2.weight(.medium))
-                    .textCase(.uppercase)
-                    .foregroundStyle(Palette.muted)
+                    .fixedSize()
             }
             .frame(height: 18)
 

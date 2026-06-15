@@ -24,7 +24,7 @@ struct FollowingView: View {
                         NavigationLink(value: story) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(story.fact).font(.subheadline).foregroundStyle(Palette.ink).lineLimit(2)
-                                Text("\(story.confidencePercent)% confidence").font(.caption2).foregroundStyle(Palette.muted)
+                                Text(story.confidenceWord).font(.caption2).foregroundStyle(story.confidenceLevel.color)
                             }
                         }
                     }

@@ -31,7 +31,7 @@ struct LeadStoryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Chip(text: "\(story.confidencePercent)% corroborated", style: story.confidenceLevel.chip)
+                Chip(text: story.confidenceWord, style: story.confidenceLevel.chip)
                 if story.hasPrimary { Chip(text: "primary source", style: .attributed) }
                 Spacer(minLength: 0)
             }
@@ -60,26 +60,21 @@ struct StoryRow: View {
                 .font(.system(.headline, design: .serif))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(sourceLine(story))
-                    .font(.caption)
-                    .foregroundStyle(Palette.muted)
-                    .lineLimit(2)
-                Spacer(minLength: 6)
-                Text("\(story.confidencePercent)%")
+            Text(sourceLine(story))
+                .font(.caption)
+                .foregroundStyle(Palette.muted)
+                .lineLimit(2)
+            HStack(spacing: 6) {
+                Text(story.confidenceWord)
                     .font(.caption.weight(.semibold))
-                    .monospacedDigit()
                     .foregroundStyle(story.confidenceLevel.color)
-            }
-            if story.extremity == .extraordinary || story.primaryLanguage != "en" {
-                HStack(spacing: 6) {
-                    if story.extremity == .extraordinary {
-                        Chip(text: "extraordinary claim", style: .extraordinary)
-                    }
-                    if story.primaryLanguage != "en" {
-                        Chip(text: "original: \(story.primaryLanguage.uppercased())", style: .neutral)
-                    }
+                if story.extremity == .extraordinary {
+                    Chip(text: "extraordinary claim", style: .extraordinary)
                 }
+                if story.primaryLanguage != "en" {
+                    Chip(text: "original: \(story.primaryLanguage.uppercased())", style: .neutral)
+                }
+                Spacer(minLength: 0)
             }
         }
         .padding(.vertical, 11)

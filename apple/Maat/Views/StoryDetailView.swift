@@ -124,7 +124,7 @@ struct StoryDetailView: View {
 
     private var kicker: some View {
         HStack(spacing: 6) {
-            Chip(text: "\(s.confidencePercent)% corroborated", style: confidenceChip)
+            Chip(text: s.confidenceWord, style: confidenceChip)
             if s.hasPrimary { Chip(text: "primary source", style: .attributed) }
             if s.extremity == .extraordinary { Chip(text: "extraordinary", style: .extraordinary) }
             Spacer(minLength: 6)
@@ -161,7 +161,7 @@ struct StoryDetailView: View {
                     .foregroundStyle(Palette.ink)
             }
             if let source = selectedArticle?.source, let rating = feed.rating(for: source) {
-                Text("· reputation \(rating.coldStart ? "—" : "\(rating.score)")")
+                Text("· \(rating.tier)")
                     .font(.caption).foregroundStyle(rating.band.color)
             }
             Spacer(minLength: 0)
@@ -174,7 +174,7 @@ struct StoryDetailView: View {
     private func sourceMenuLabel(_ article: Article) -> String {
         guard let source = article.source else { return "Unknown source" }
         if let rating = feed.rating(for: source), !rating.coldStart {
-            return "\(source) · \(rating.score)"
+            return "\(source) · \(rating.tier)"
         }
         return source
     }
@@ -247,12 +247,7 @@ struct StoryDetailView: View {
                                 Text(rating.tier).font(.caption2).foregroundStyle(rating.band.color)
                             }
                         }
-                        Spacer(minLength: 8)
-                        if let rating = feed.rating(for: name) {
-                            Text(rating.coldStart ? "—" : "\(rating.score)")
-                                .font(.subheadline.weight(.semibold)).monospacedDigit()
-                                .foregroundStyle(rating.coldStart ? Palette.muted : rating.band.color)
-                        }
+                        Spacer(minLength: 0)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
