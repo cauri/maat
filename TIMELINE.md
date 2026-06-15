@@ -6,6 +6,36 @@ point. Newest at top.
 
 ---
 
+## 2026-06-15 — P8 operator console + prompt governance
+
+Built the **admin/operator console** (epic #66) — the reader evolved into an operator surface to run,
+observe, and **correct** the veracity engine. Shipped F1–F5, A1, A2, A4a: claim/cluster inspectors +
+corrections (split/merge/move, classification, §5.2 laundering flags), run/activity + dead-letters,
+ingestion-clock pause, source registry, config + eval (cat-cafe) surfacing. Admin actions are **typed
+events** on the same log (audit + replay free, D5/D20); corrections double as golden-corpus / RL signal.
+Then a plain-language pass (tabs renamed — **Clocks→Updates**, Content→Feed, Runs→Activity,
+Config→Settings, Eval→Quality, Audit→History — tooltips, after-action confirmations). See D28.
+
+- **Course-change worth remembering — prompt governance.** cauri asked to edit agent prompts directly
+  in the console, which cut against the repo's "prompts live in code" convention (the `claude-review`
+  note). Resolved (D29, cauri chose "Option B"): code stays the **canonical seed**; the console saves
+  **event-sourced operator overrides** the agents read at run time (live on next run), versioned +
+  rollback + placeholder-guard + **eval-on-change** (`make eval-prompt`). The convention is deliberately
+  **relaxed for operator overrides only** — not arbitrary external prompts; content still co-designed
+  with cauri; edits operator-driven, never agent self-modification.
+- **Testing pivot (D30):** added a Postgres-backed route integration harness and put it on the CI gate
+  (`services: postgres`) — deterministic DB integration belongs on the gate (D16 was about live LLMs,
+  not infra). It raises rather than skips in CI without a DB.
+- **Gotcha for other agents:** the web app reads projections the **kernel** owns; if kerneld hasn't
+  applied a new migration, a page reading the new table 500s. Fixed Activity/Prompts to **degrade, not
+  500**, when `dead_letters`/`prompts` are missing — but the real unblock is **rebuild + restart
+  `maat-kerneld`** so it applies migrations on startup. Restart kerneld after merging a migration.
+- Read-only **Gamelan** prompt comparison (no port): Gamelan models the system prompt as self-adapting
+  event-sourced *working memory*; Maat keeps it code-canonical + operator-gated with an eval net — an
+  intentional divergence (don't let the core drift unsupervised). Possible future inspiration: prompt
+  *composition* (base + memory + per-call) vs one flat template per stage.
+- Issue hygiene: backfilled closed issues for previously-untracked work (#124–#127) under epic #66.
+
 ## 2026-06-15 — Client UX reframe: Apple-News reading model + Sources reputation
 
 The P6 client first shipped veracity-dashboard-first; cauri reframed it to the brief's intent (§1:
