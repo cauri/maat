@@ -86,8 +86,12 @@ async def main() -> None:
             seen.add(a.url)
             new += 1
             got += 1
-        if got == 0 and apify.available():  # fallback: Apify gives bodies inline
-            for fa in apify.search_and_fetch(topic, max_results=10):
+        # Always run a small Apify pass: its web search surfaces primary/authoritative sources —
+        # the issuer's own release (e.g. ecb.europa.eu) — that the news-only GDELT stream misses
+        # (#108). When GDELT came back empty it widens to a full fallback. MAAT_PRIMARY_PASS=0 opts
+        # out (Apify costs credits per call).
+        if apify.available() and os.environ.get("MAAT_PRIMARY_PASS", "1") != "0":
+            for fa in apify.search_and_fetch(topic, max_results=10 if got == 0 else 5):
                 if fa.url in seen:
                     continue
                 await publish(nc, "article.ingested", _aid(fa.url),

@@ -184,11 +184,22 @@ _PRIMARY_MARKERS = (
     "central bank", "reserve bank", "federal reserve",
     "document", "dataset", "filing", "transcript",
 )
+# The acquired source is often a bare domain (e.g. "ecb.europa.eu"), which the name markers
+# above miss. An issuer's own domain IS the primary source for its own release (#108): government
+# / military domains in any country (a "gov" or "mil" label), and these intergovernmental
+# bodies. Matched on domain labels, not substrings, so "governance.com" is not a false hit.
+_PRIMARY_DOMAINS = (
+    "europa.eu", "un.org", "imf.org", "worldbank.org", "bis.org", "oecd.org",
+    "who.int", "nato.int", "icc-cpi.int", "wto.org",
+)
 
 
 def is_primary_source(source: str) -> bool:
     s = source.lower()
-    return any(k in s for k in _PRIMARY_MARKERS)
+    if any(k in s for k in _PRIMARY_MARKERS):
+        return True
+    labels = set(s.split("."))
+    return bool({"gov", "mil"} & labels) or s.endswith(_PRIMARY_DOMAINS)
 
 
 # §5.2 laundering — endorsement / dropped attribution. A good outlet states WHERE its
