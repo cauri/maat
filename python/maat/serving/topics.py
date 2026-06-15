@@ -241,6 +241,88 @@ def parse_interest(interest: str, *, use_llm: bool = False) -> TopicSpec:
     return _pure_parse(interest)
 
 
+# ---------------------------------------------------------------------------
+# News-query generation (interest → recent-news search queries).
+#
+# The acquisition clock must NOT search the literal interest string — "fun and laughter" or "art"
+# pull SEO/blog/listicle junk, not news. This turns each interest into a few NEWS-oriented search
+# queries via the LLM (cauri-approved prompt; editable in /prompts as "acquire_queries"), falling
+# back to the deterministic single query so acquisition never stalls.
+# ---------------------------------------------------------------------------
+
+# Active prompt — CONTENT co-designed with + approved by cauri. Editable in the console.
+NEWS_QUERIES_PROMPT = """\
+# ROLE
+You turn a reader's interest into search queries that retrieve recent NEWS
+articles from a global news index (GDELT) and web search.
+
+# TASK
+Given one interest, output JSON only:
+  {"queries": [2-4 news search queries], "sourcelang": <GDELT lang or null>,
+   "sourcecountry": <ISO-3166-1 alpha-2 or null>}
+
+# RULES
+- Every query must target NEWS - current events, decisions, launches, rulings,
+  incidents, named people / organisations / places - NOT evergreen explainers,
+  how-tos, listicles, definitions, or product/SEO pages.
+- Frame for recent developments, not general knowledge. Examples:
+    "artificial intelligence" -> ["AI regulation EU", "frontier model release",
+                                   "AI chip export controls"]
+    "scientific discovery"    -> ["new research findings", "space mission update",
+                                   "clinical trial results"]
+    "art"                     -> ["major museum exhibition", "art auction record",
+                                   "cultural heritage ruling"]
+    "fun and laughter"        -> ["comedy festival", "feel-good viral story",
+                                   "entertainment award show"]
+- 2-6 words per query, lowercase, no boolean operators.
+- Set sourcelang/sourcecountry only if the interest is inherently regional.
+- Output ONLY valid JSON, no commentary.
+
+# INTEREST
+{interest}
+"""
+
+
+def parse_news_queries(text: str, *, fallback: str, max_queries: int = 4) -> list[str]:
+    """Pure parser: pull the news queries out of the model's JSON reply (testable, no I/O).
+
+    Returns ``[fallback]`` if the reply has no usable queries, so acquisition never stalls on a
+    malformed LLM response.
+    """
+    import json as _json
+
+    try:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end == -1:
+            raise ValueError("no JSON object")
+        data = _json.loads(text[start : end + 1])
+        queries = [str(q).strip() for q in data.get("queries", []) if str(q).strip()]
+        return queries[:max_queries] or [fallback]
+    except Exception:  # noqa: BLE001 - bad JSON / shape: fall back to the literal interest
+        return [fallback]
+
+
+def news_queries(
+    interest: str, *, prompt: str = NEWS_QUERIES_PROMPT, max_queries: int = 4
+) -> list[str]:
+    """Interest -> up to ``max_queries`` recent-news search queries (one LLM call). Blocking (httpx).
+
+    Falls back to the deterministic single-query parse on any error (no key, network, bad reply),
+    so the acquisition clock always has something to search.
+    """
+    interest = (interest or "").strip()
+    if not interest:
+        return []
+    fallback = _pure_parse(interest).query or interest
+    try:
+        from maat.providers.seam import claude_complete
+
+        reply = claude_complete(prompt.replace("{interest}", interest), max_tokens=256)
+        return parse_news_queries(reply.text, fallback=fallback, max_queries=max_queries)
+    except Exception:  # noqa: BLE001 - provider/network error: deterministic fallback
+        return [fallback]
+
+
 def story_matches(story: dict, topics: list[TopicSpec], *, min_hits: int = 1) -> bool:
     """Return True if the story is relevant to at least one of the user's topics.
 

@@ -210,7 +210,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
 
     # Every runtime + console prompt is present (incl. the prompt-chat helper's own draft, #159).
     assert set(prompts.PROMPTS_BY_KEY) == {
-        "extract", "classify", "extremity",          # active backend
+        "extract", "classify", "extremity", "acquire_queries",  # active backend
         "topics_enrich", "curation_geotag", "triage_llm",  # draft backend (gated)
         "prompt_chat_agent",                         # draft: the console chat helper's own prompt
         "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
@@ -224,11 +224,11 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     by_status = {}
     for p in prompts.PROMPTS:
         by_status.setdefault(p["status"], set()).add(p["key"])
-    assert by_status["active"] == {"extract", "classify", "extremity"}
+    assert by_status["active"] == {"extract", "classify", "extremity", "acquire_queries"}
     assert by_status["draft"] == {"topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent"}
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
     # Only the active prompts are editable; draft/on-device are read-only.
-    assert prompts.EDITABLE_KEYS == frozenset({"extract", "classify", "extremity"})
+    assert prompts.EDITABLE_KEYS == frozenset({"extract", "classify", "extremity", "acquire_queries"})
 
 
 def test_draft_prompts_imported_live_from_their_modules():

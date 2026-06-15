@@ -37,7 +37,8 @@ async def main() -> None:
     query = sys.argv[1]
     maxrec = int(sys.argv[2]) if len(sys.argv) > 2 else 12
     try:
-        arts = search(query, maxrecords=maxrec, timespan="7d")
+        # Off the event loop: blocking httpx keeps the NATS client's flush/ping alive (see clock.py).
+        arts = await asyncio.to_thread(search, query, maxrecords=maxrec, timespan="7d")
     except Exception as e:  # GDELT down / still rate-limited after retries
         print(f"GDELT unavailable: {e}")
         arts = []
@@ -45,7 +46,7 @@ async def main() -> None:
     nc = await connect()
     n = 0
     for a in arts:
-        body, image_url = fetch_article(a.url)
+        body, image_url = await asyncio.to_thread(fetch_article, a.url)
         if not body:
             print(f"  skip (no body) {a.domain}")
             continue
@@ -62,12 +63,13 @@ async def main() -> None:
     # Fallback: GDELT (and trafilatura) yielded nothing usable — try Apify (search + body in one).
     if n == 0 and apify.available():
         print("GDELT yielded nothing — falling back to Apify rag-web-browser")
-        for fa in apify.search_and_fetch(query, max_results=maxrec):
+        for fa in await asyncio.to_thread(apify.search_and_fetch, query, max_results=maxrec):
             await publish(
                 nc,
                 "article.ingested",
                 _aid(fa.url),
-                {"title": fa.title, "source": fa.domain, "language": fa.language, "body": fa.body, "url": fa.url},
+                {"title": fa.title, "source": fa.domain, "language": fa.language, "body": fa.body,
+                 "url": fa.url, "image_url": fa.image},
             )
             n += 1
             print(f"  + [apify/{fa.language or '?'}] {fa.domain}: {fa.title[:52]}")
