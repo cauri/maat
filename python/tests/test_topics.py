@@ -300,3 +300,28 @@ def test_use_llm_false_is_default():
     s1 = parse_interest("inflation")
     s2 = parse_interest("inflation", use_llm=False)
     assert s1 == s2
+
+
+# ---------------------------------------------------------------------------
+# parse_news_queries — interest → recent-news queries (pure parse of the LLM reply)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_news_queries_extracts_and_caps():
+    from maat.serving.topics import parse_news_queries
+
+    reply = 'noise {"queries": ["AI regulation EU", "frontier model release", "a", "b", "c"]} tail'
+    out = parse_news_queries(reply, fallback="ai", max_queries=4)
+    assert out == ["AI regulation EU", "frontier model release", "a", "b"]
+
+
+def test_parse_news_queries_falls_back_on_no_json():
+    from maat.serving.topics import parse_news_queries
+
+    assert parse_news_queries("sorry, I cannot help", fallback="art") == ["art"]
+
+
+def test_parse_news_queries_falls_back_on_empty():
+    from maat.serving.topics import parse_news_queries
+
+    assert parse_news_queries('{"queries": []}', fallback="fun and laughter") == ["fun and laughter"]

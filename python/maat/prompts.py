@@ -28,6 +28,7 @@ from maat.pipeline.classify import PROMPT as CLASSIFY_PROMPT
 from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
 from maat.serving.topics import _LLM_PROMPT_TEMPLATE as TOPICS_LLM_PROMPT
+from maat.serving.topics import NEWS_QUERIES_PROMPT
 
 # ---------------------------------------------------------------------------
 # On-device (Apple / Foundation Models) prompts — DISPLAY-ONLY MIRRORS.
@@ -121,6 +122,12 @@ PROMPTS: list[dict] = [
      "routine→extraordinary scale; the confidence read uses it to demand more independent "
      "corroboration for bigger claims. Runs per fact.",
      "placeholders": ["{claim}"]},
+    {"key": "acquire_queries", "label": "Interest → news search queries", "default": NEWS_QUERIES_PROMPT,
+     "status": "active", "source": "maat/serving/topics.py",
+     "description": "Turns each reader interest into 2–4 recent-NEWS search queries, so the "
+     "acquisition clock fetches news — not evergreen/SEO pages for the literal topic (e.g. 'fun and "
+     "laughter' → 'comedy festival', 'feel-good viral story'). Runs once per interest per tick.",
+     "placeholders": ["{interest}"]},
     # --- draft: gated backend prompts, surfaced read-only for cauri review (NOT active) ---
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
