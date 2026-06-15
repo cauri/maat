@@ -290,3 +290,292 @@ def test_prompts_page_degrades_when_store_table_missing():
     out = _prompts_page({}, store_ready=False)
     assert "prompt store isn't set up yet" in out and "restart the kernel" in out
     assert "built-in" in out  # still shows the seed prompts
+
+
+# ============================ P8 console tie-ins (#74/#76/#77/#78/#123) ======================
+#
+# Each new view is a fetch→pure-builder→HTML triple; we test the pure builders over the SAME
+# event/record shapes the real backends emit. No DB — exactly like the views above.
+
+
+def _corr_ev(
+    fact, sources, originators, *, has_primary=False, extremity="notable",
+    confidence=0.5, corrected=False,
+):
+    """A `cluster.corroborated` event dict, matching the corroborate agent's output."""
+    return {
+        "fact": fact, "sources": sources, "originators": originators,
+        "independent_originators": len(originators), "has_primary": has_primary,
+        "extremity": extremity, "confidence": confidence, "corrected": corrected,
+    }
+
+
+# A two-event history where one fact CONFIRMS (1→4 independent originators) and an extraordinary
+# rumour stalls solo — enough to resolve outcomes and exercise the calibration/RL replay.
+_CONFIRMING_HISTORY = [
+    _corr_ev("Minister X resigned", ["reuters", "bbc"], [["a1"], ["a2"]], confidence=0.45),
+    _corr_ev("Minister X resigned", ["reuters", "bbc", "afp", "dpa"],
+             [["a1"], ["a2"], ["a3"], ["a4"]], confidence=0.9),
+    _corr_ev("Aliens landed", ["tabloid"], [["b1"]], extremity="extraordinary", confidence=0.2),
+]
+
+
+def test_reputation_page_renders_fold_over_corroboration_history():
+    # #74 — the REAL reputation fold (not the /api/sources proxy): trajectory, not a snapshot.
+    from maat.learning.reputation import fold_reputation
+    from maat.web.app import _reputation_page
+
+    reps = fold_reputation(_CONFIRMING_HISTORY)
+    out = _reputation_page(reps, len(_CONFIRMING_HISTORY))
+    assert "Reputation" in out and "over time" in out
+    assert "independent originator" in out  # the independence dimension is surfaced
+    assert "confirmed" in out  # the truth-over-time outcome column
+    assert "never" in out and "consensus" in out  # the anti-consensus framing is explicit
+    # the lone extraordinary claimant is flagged, not silently scored
+    assert "solo extraordinary" in out
+
+
+def test_reputation_page_empty_history():
+    from maat.web.app import _reputation_page
+
+    out = _reputation_page([], 0)
+    assert "No reputation yet" in out and "Reputation" in out
+
+
+def test_reputation_tier_cold_start_is_unrated_not_zero():
+    # §6.6 — a source with no resolved outcomes is "not yet rated", never scored on consensus.
+    from maat.learning.reputation import SourceReputation
+    from maat.web.app import _reputation_tier
+
+    cold = SourceReputation(
+        source="New Outlet", appearances=2, independent_appearances=2, independent_rate=1.0,
+        primary_appearances=0, mean_attribution_weight=1.0, solo_extraordinary=0,
+        facts_confirmed=0, facts_refuted=0, facts_unresolved=2, outcome_n=0,
+        confirmation_rate=None, _reliability_rank=-1.0,
+    )
+    assert _reputation_tier(cold) == ("not yet rated", "own")
+    hot = SourceReputation(
+        source="Reliable", appearances=10, independent_appearances=9, independent_rate=0.9,
+        primary_appearances=3, mean_attribution_weight=1.0, solo_extraordinary=0,
+        facts_confirmed=9, facts_refuted=1, facts_unresolved=0, outcome_n=10,
+        confirmation_rate=0.9, _reliability_rank=0.9,
+    )
+    assert _reputation_tier(hot)[0] == "highly reliable"
+
+
+def test_de_us_breakdown_from_article_rows():
+    # #76/#59 — country guessed from the source domain TLD; language straight off the row.
+    from maat.web.app import de_us_breakdown
+
+    arts = [
+        {"source": "bbc.co.uk", "language": "en"},
+        {"source": "lemonde.fr", "language": "fr"},
+        {"source": "spiegel.de", "language": "de"},
+    ]
+    bd, geo, lang = de_us_breakdown(arts)
+    assert 0.0 <= bd.overall <= 1.0
+    assert "GB" in geo and "FR" in geo  # TLD→country resolved
+    assert "fr" in lang and "en" in lang
+
+
+def test_calibration_page_surfaces_brier_de_us_and_health():
+    # #76 — three dashboards over the live backends (references, not rebuilds).
+    import datetime as dt
+
+    from maat.learning.calibration_prod import production_calibration
+    from maat.obs_metrics import pipeline_health
+    from maat.web.app import _calibration_page, de_us_breakdown
+
+    now = dt.datetime(2026, 6, 15, 12, 0, tzinfo=dt.timezone.utc)
+    status = production_calibration(_CONFIRMING_HISTORY, now=now)
+    bd, geo, lang = de_us_breakdown([{"source": "bbc.co.uk", "language": "en"}])
+    health = pipeline_health(
+        [{"type": "article.ingested", "created_at": now}], [], {"articles": 1, "claims": 0, "clusters": 0}
+    )
+    out = _calibration_page(status, bd, geo, lang, health)
+    assert "Brier" in out  # calibration metric (#60)
+    assert "De-US-centering" in out and "Anglo share" in out  # de-US dashboard (#59)
+    assert "Pipeline health" in out and "Alerts" in out  # observability (#61)
+
+
+def test_calibration_page_handles_no_resolved_facts():
+    import datetime as dt
+
+    from maat.learning.calibration_prod import production_calibration
+    from maat.obs_metrics import pipeline_health
+    from maat.web.app import _calibration_page, de_us_breakdown
+
+    status = production_calibration([], now=dt.datetime(2026, 6, 15, tzinfo=dt.timezone.utc))
+    bd, geo, lang = de_us_breakdown([])
+    health = pipeline_health([], [], {"articles": 0, "claims": 0, "clusters": 0})
+    out = _calibration_page(status, bd, geo, lang, health)
+    assert "Nothing has resolved yet" in out  # honest empty state, not a crash
+    assert "empty" in out  # health status badge for an empty pipeline
+
+
+def test_review_page_separates_routes_and_classifies_fresh_items():
+    # #77 — review-routed needs a human; auto-fix is safe-to-PR; untriaged items classified live.
+    import datetime as dt
+
+    from maat.web.app import _review_page, _triage_preview, coordinated_signal
+
+    review = [{
+        "text": "the confidence score is wrong", "source": "reader",
+        "triage": {"item_id": "f1", "category": "veracity-dispute", "route": "review",
+                   "confidence": 0.85, "reason": "matched", "auto_fixable": False},
+        "triaged_at": dt.datetime(2026, 6, 15, 9, 0),
+    }]
+    autofix = [{
+        "text": "blank page on load", "source": "reader",
+        "triage": {"item_id": "f2", "category": "bug", "route": "auto-fix",
+                   "confidence": 0.82, "reason": "matched", "auto_fixable": True},
+        "triaged_at": dt.datetime(2026, 6, 15, 9, 1),
+    }]
+    fresh = [_triage_preview({"item_id": "f3", "text": "the layout overlaps on mobile",
+                              "source": "reader", "submitted_at": dt.datetime(2026, 6, 15, 9, 2)})]
+    out = _review_page(review, autofix, fresh, coordinated_signal([]))
+    assert "Needs review" in out and "Safe to auto-fix" in out
+    assert "veracity dispute" in out  # category label rendered
+    assert "not yet triaged" in out  # the live-classified item is flagged as such
+    assert "untrusted" in out.lower()  # the attack-vector framing is present
+
+
+def test_coordinated_signal_flags_bursts_from_one_source():
+    # Feedback is untrusted input — a burst from one source is a candidate attack vector.
+    from maat.web.app import coordinated_signal
+
+    quiet = coordinated_signal([{"source": "a"}, {"source": "b"}, {"source": "a"}])
+    assert quiet["suspicious"] == {}  # below threshold → nothing flagged
+    loud = coordinated_signal([{"source": "botnet"}] * 6 + [{"source": "real"}])
+    assert loud["suspicious"] == {"botnet": 6}  # the burst source is surfaced
+    assert loud["total"] == 7
+
+
+def test_review_page_warns_on_coordinated_feedback():
+    from maat.web.app import _review_page, coordinated_signal
+
+    coord = coordinated_signal([{"source": "botnet"}] * 6)
+    out = _review_page([], [], [], coord)
+    assert "coordinated" in out.lower() and "botnet" in out
+
+
+def test_policy_page_shows_bounded_signoff_gated_proposal_and_grants():
+    # #78 — the RL proposal is ALWAYS unapproved; capability grants state what may auto-tune.
+    from maat.learning.rl import policy_step
+    from maat.web.app import _policy_page
+
+    proposal = policy_step(_CONFIRMING_HISTORY)
+    assert proposal.approved is False  # the contract: never auto-applied
+    out = _policy_page(proposal, len(_CONFIRMING_HISTORY))
+    assert "Policy" in out and "needs sign-off" in out
+    assert "A/B-on-replay" in out  # the weight side is justified by replay
+    assert "Capability grants" in out and "bounded self-modification" in out
+    assert "operator-gated" in out and "auto-tunable" in out  # both grant kinds shown
+    # scoring authority and source standing are operator-gated (cannot self-escalate, §5)
+    assert "Scoring thresholds" in out and "Source allow / deny" in out
+
+
+def test_policy_page_empty_history_is_a_noop_proposal():
+    from maat.learning.rl import policy_step
+    from maat.web.app import _policy_page
+
+    proposal = policy_step([])
+    assert proposal.approved is False
+    out = _policy_page(proposal, 0)
+    assert "No facts have resolved yet" in out  # nothing to replay → policy == current
+
+
+def test_weights_with_override_builds_candidate_or_none():
+    # #123 — only weight knobs are replayable; bad keys/values return None (skipped, not crash).
+    from maat.learning.calibration import Weights
+    from maat.web.app import _weights_with_override
+
+    base = Weights.defaults()
+    w = _weights_with_override("decay.notable", "0.7")
+    assert w is not None and w.decay["notable"] == 0.7
+    assert w.decay["routine"] == base.decay["routine"]  # only the one level moved
+    assert _weights_with_override("confidence.primary_lift", "0.6").primary_lift == 0.6
+    assert _weights_with_override("gate.floor", "0.3") is None  # not a weight knob
+    assert _weights_with_override("decay.notable", "not-a-number") is None  # unparseable
+    assert _weights_with_override("decay.nonexistent", "0.5") is None  # unknown level
+
+
+def test_config_page_shows_ab_replay_impact_and_revert():
+    # #123 — at sign-off the Config panel shows Brier before/after + N facts changing verdict,
+    # plus a revert control and per-knob change history.
+    import datetime as dt
+
+    from maat.learning.calibration import Weights, observations_from_history, replay_ab
+    from maat.web.app import _config_page, _weights_with_override
+
+    obs = observations_from_history(_CONFIRMING_HISTORY)
+    cand = _weights_with_override("decay.notable", "0.8")
+    ab = replay_ab(obs, base=Weights.defaults(), candidate=cand)
+    overrides = {"decay.notable": {"value": "0.8", "reason": "tune", "at": dt.datetime(2026, 6, 15, 10, 0)}}
+    history = {"decay.notable": [
+        {"value": "0.8", "actor": "operator", "reverted": False, "at": dt.datetime(2026, 6, 15, 10, 0)}
+    ]}
+    out = _config_page(overrides, {"decay.notable": ab}, history)
+    assert "A/B-on-replay" in out  # the impact is surfaced before sign-off
+    assert "change verdict" in out  # promoted/demoted breakdown
+    assert "Revert to default" in out  # the revert control
+    assert "change history" in out  # per-knob history backs the revert
+
+
+def test_config_page_backward_compatible_single_arg():
+    # The original call site (and the older test) pass only overrides — must still render.
+    import datetime as dt
+
+    from maat.web.app import _config_page
+
+    out = _config_page(
+        {"gate.floor": {"value": "0.35", "reason": "too strict", "at": dt.datetime(2026, 6, 15, 10, 0)}}
+    )
+    assert "Settings" in out and "0.35" in out and "needs sign-off" in out
+    assert "Revert to default" in out  # the revert control shows even without replay/history
+
+
+def test_replay_block_handles_no_resolved_facts_and_none():
+    from maat.learning.calibration import ReplayAB
+    from maat.web.app import _replay_block
+
+    assert _replay_block(None) == ""  # no proposal → nothing
+    empty = ReplayAB(brier_base=None, brier_candidate=None, n_scored=0, flips=0, promoted=0, demoted=0)
+    assert "no resolved facts" in _replay_block(empty)
+    scored = ReplayAB(brier_base=0.3, brier_candidate=0.2, n_scored=5, flips=2, promoted=2, demoted=0)
+    block = _replay_block(scored)
+    assert "resolved facts" in block and "0.3→0.2" in block
+    assert "2 promoted" in block and "better-calibrated" in block
+
+
+def test_nav_includes_new_p8_dashboard_tabs():
+    from maat.web.app import _nav
+
+    n = _nav("reputation")
+    for label in ("Review", "Policy", "Reputation", "Calibration"):
+        assert label in n
+    assert 'class="on"' in n  # the active tab is marked
+
+
+def _all_route_paths(routes) -> set:
+    """Collect every route path, descending into included sub-routers (FastAPI lazily wraps an
+    `include_router` call, exposing the real routes under `original_router`/`router`)."""
+    out: set = set()
+    for r in routes:
+        p = getattr(r, "path", None)
+        if p:
+            out.add(p)
+        for attr in ("original_router", "router"):
+            sub = getattr(r, attr, None)
+            if sub is not None and hasattr(sub, "routes"):
+                out |= _all_route_paths(sub.routes)
+    return out
+
+
+def test_feed_router_is_mounted_on_app():
+    # The served-feed APIRouter (serving/feed.py) must be mounted so the Apple client gets data.
+    from maat.web.app import app, feed_router
+
+    assert feed_router is not None  # the router built (FastAPI available)
+    paths = _all_route_paths(app.routes)
+    assert "/api/v2/feed" in paths and "/api/v2/story/{cluster_id}" in paths

@@ -33,6 +33,16 @@ from typing import Any
 from maat.agents.curation import Story as CurationStory, curate
 from maat.pipeline.corroborate import confidence_label
 
+# FastAPI is a hard dependency, but keep the import guarded so the pure builders above stay
+# importable in any stripped-down env. Hoisted to module scope (not deferred inside _make_router)
+# so the route parameter/return annotations resolve for OpenAPI — `from __future__ import
+# annotations` makes every annotation a forward-ref, which needs the names in module globals.
+try:  # pragma: no cover - exercised whenever FastAPI is present (the normal case)
+    from fastapi import APIRouter, HTTPException, Request
+    from fastapi.responses import JSONResponse
+except ImportError:  # pragma: no cover - FastAPI absent (pure-builder-only env)
+    APIRouter = HTTPException = Request = JSONResponse = None  # type: ignore[assignment,misc]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -367,11 +377,8 @@ def build_feed(
 
 
 def _make_router() -> Any:
-    """Build and return the APIRouter.  Deferred import so the pure module stays
-    importable without FastAPI in the test environment."""
-    from fastapi import APIRouter, HTTPException, Request
-    from fastapi.responses import JSONResponse
-
+    """Build and return the APIRouter.  FastAPI is imported at module scope (guarded) so the
+    route annotations resolve for OpenAPI; this only runs when FastAPI is present."""
     router = APIRouter(prefix="/api/v2", tags=["feed-v2"])
 
     async def _load_article_meta(pool) -> dict[str, dict[str, Any]]:
@@ -395,8 +402,8 @@ def _make_router() -> Any:
         )
         return [dict(r) for r in rows]
 
-    @router.get("/feed")
-    async def feed_endpoint(request: Request) -> JSONResponse:
+    @router.get("/feed", response_class=JSONResponse)
+    async def feed_endpoint(request: Request):
         """Served feed: stories ordered by confidence then de-US re-ranked."""
         pool = request.app.state.pool
         clusters = await _load_clusters(pool)
@@ -405,8 +412,8 @@ def _make_router() -> Any:
         payload = build_feed(clusters, claims_by_id, article_meta)
         return JSONResponse(payload)
 
-    @router.get("/story/{cluster_id}")
-    async def story_endpoint(cluster_id: str, request: Request) -> JSONResponse:
+    @router.get("/story/{cluster_id}", response_class=JSONResponse)
+    async def story_endpoint(cluster_id: str, request: Request):
         """Single story detail including full article texts."""
         pool = request.app.state.pool
         row = await pool.fetchrow(
