@@ -39,7 +39,7 @@ from maat.serving.topics import _LLM_PROMPT_TEMPLATE as TOPICS_LLM_PROMPT
 # markers literal. DO NOT edit the prompt text here — edit the Swift source and update the mirror.
 # ---------------------------------------------------------------------------
 
-# apple/Maat/Services/Summarizer.swift — `instructions:` block then `prompt` block.
+# apple/Maat/Shared/Summarizer.swift — `instructions:` block then `prompt` block.
 _SUMMARIZER_ONDEVICE = (
     "instructions:\n"
     r"""You summarise one news story for a reader in at most two sentences.
@@ -51,7 +51,7 @@ Claims:
 \(claims)"""
 )
 
-# apple/Maat/Services/Reranker.swift — `instructions:` block then `prompt` block.
+# apple/Maat/Shared/Reranker.swift — `instructions:` block then `prompt` block.
 _RERANKER_ONDEVICE = (
     "instructions:\n"
     r"""You re-rank a personal news feed for one reader against their topics of interest.
@@ -72,28 +72,55 @@ PROMPTS: list[dict] = [
     # --- active: editable backend prompts (canonical text in code; overrides go live next run) ---
     {"key": "extract", "label": "Claim extraction", "default": EXTRACT_PROMPT,
      "status": "active", "source": "maat/pipeline/extract.py",
+     "description": "Pulls the atomic factual claims out of each article as it is ingested — the "
+     "claim, not the article, is what everything downstream scores. Runs once per article.",
      "placeholders": ["{article_text}", "{source_metadata}", "{detected_language}"]},
     {"key": "classify", "label": "Fact / prediction classifier", "default": CLASSIFY_PROMPT,
      "status": "active", "source": "maat/pipeline/classify.py",
+     "description": "Sorts each extracted claim onto its axis — a present-tense fact (corroborated "
+     "against independent sources) vs a projection/prediction (tracked on the accuracy axis) — so "
+     "neither is scored the wrong way. Runs per article after extraction.",
      "placeholders": ["{article_text}", "{claims_json}"]},
     {"key": "extremity", "label": "Extraordinary-claim rater", "default": EXTREMITY_PROMPT,
      "status": "active", "source": "maat/pipeline/extremity.py",
+     "description": "Rates how extraordinary a claim is, before any evidence, on a 5-point "
+     "routine→extraordinary scale; the confidence read uses it to demand more independent "
+     "corroboration for bigger claims. Runs per fact.",
      "placeholders": ["{claim}"]},
     # --- draft: gated backend prompts, surfaced read-only for cauri review (NOT active) ---
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
+     "description": "Would turn a reader's natural-language interest ('West African politics') into "
+     "acquisition topics and filters. Gated OFF — deterministic keyword extraction runs today; the "
+     "model path awaits your review.",
      "placeholders": []},
     {"key": "curation_geotag", "label": "Curation geo-tagger", "default": CURATION_GEOTAG_PROMPT,
-     "status": "draft", "source": "maat/agents/curation.py", "placeholders": []},
+     "status": "draft", "source": "maat/agents/curation.py",
+     "description": "Would tag a story's primary country/region so curation can balance the feed's "
+     "geography and push back on Anglo-American slant. Gated OFF — pure heuristics run today; the "
+     "model path awaits your review.",
+     "placeholders": []},
     {"key": "triage_llm", "label": "Feedback-triage refinement", "default": TRIAGE_LLM_PROMPT,
-     "status": "draft", "source": "maat/agents/triage.py", "placeholders": []},
+     "status": "draft", "source": "maat/agents/triage.py",
+     "description": "Would refine how a piece of user feedback is categorised (veracity-dispute / "
+     "source-quality / bug / …) to route it to the review queue or an auto-fix. Gated OFF — the "
+     "rule-based classifier runs today; the model path awaits your review.",
+     "placeholders": []},
     # --- on-device: Apple / Foundation Models prompts, display-only mirror (READ-ONLY) ---
     {"key": "summarizer_ondevice", "label": "On-device summariser (Foundation Models)",
      "default": _SUMMARIZER_ONDEVICE, "status": "on-device",
-     "source": "apple/Maat/Services/Summarizer.swift", "placeholders": []},
+     "source": "apple/Maat/Shared/Summarizer.swift",
+     "description": "Summarises a story to the reader's taste on their own device (Apple Foundation "
+     "Models), built only from the story's own claims so it never adds facts or inflates "
+     "confidence. Falls back to a deterministic extractive summary.",
+     "placeholders": []},
     {"key": "reranker_ondevice", "label": "On-device feed re-ranker (Foundation Models)",
      "default": _RERANKER_ONDEVICE, "status": "on-device",
-     "source": "apple/Maat/Services/Reranker.swift", "placeholders": []},
+     "source": "apple/Maat/Shared/Reranker.swift",
+     "description": "Re-orders the reader's feed against their natural-language topics on their own "
+     "device (Apple Foundation Models) — relevance only, never touching confidence or truth, and "
+     "topics never leave the phone. Falls back to embedding similarity.",
+     "placeholders": []},
 ]
 PROMPTS_BY_KEY: dict[str, dict] = {p["key"]: p for p in PROMPTS}
 

@@ -276,8 +276,8 @@ def test_ondevice_mirror_matches_swift_source_verbatim():
         return out
 
     for key, rel in (
-        ("summarizer_ondevice", "apple/Maat/Services/Summarizer.swift"),
-        ("reranker_ondevice", "apple/Maat/Services/Reranker.swift"),
+        ("summarizer_ondevice", "apple/Maat/Shared/Summarizer.swift"),
+        ("reranker_ondevice", "apple/Maat/Shared/Reranker.swift"),
     ):
         entry = prompts.PROMPTS_BY_KEY[key]
         assert entry["source"] == rel  # registry pins the canonical source path
@@ -289,6 +289,26 @@ def test_ondevice_mirror_matches_swift_source_verbatim():
         mirror = entry["default"]
         assert instructions in mirror, f"{key}: instructions block drifted from {path}"
         assert prompt in mirror, f"{key}: prompt block drifted from {path}"
+
+
+def test_every_prompt_has_a_description():
+    # cauri reviews these in the console — each must say what it is for and how it is used
+    from maat import prompts
+
+    for p in prompts.PROMPTS:
+        assert p.get("description"), f"{p['key']} is missing a description"
+        assert len(p["description"]) > 30  # a real sentence, not a stub
+
+
+def test_prompts_page_renders_descriptions():
+    import html
+
+    from maat import prompts
+    from maat.web.app import _prompts_page
+
+    out = _prompts_page({}, store_ready=True)
+    for p in prompts.PROMPTS:
+        assert html.escape(p["description"]) in out  # every prompt's purpose shows on the page
 
 
 def test_active_text_falls_back_to_seed_without_pool():
