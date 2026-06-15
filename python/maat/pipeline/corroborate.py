@@ -271,6 +271,11 @@ _DECAY = {
     "extraordinary": 0.76,
 }
 
+# A primary source closes this fraction of the remaining gap to certainty; confidence is capped
+# below 1.0 — nothing is ever certain (§5.7). DRAFT — surfaced in the admin Config panel.
+_PRIMARY_LIFT = 0.5
+_CONFIDENCE_CAP = 0.97
+
 
 def confidence_read(
     independent_originators: int, has_primary: bool, extremity: str = "notable"
@@ -285,8 +290,8 @@ def confidence_read(
     decay = _DECAY.get(extremity, 0.55)  # default to "notable" if unrecognised
     base = 1.0 - decay ** max(0, independent_originators)
     if has_primary:
-        base += (1.0 - base) * 0.5
-    return round(min(base, 0.97), 2)
+        base += (1.0 - base) * _PRIMARY_LIFT
+    return round(min(base, _CONFIDENCE_CAP), 2)
 
 
 def confidence_label(
