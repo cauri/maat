@@ -8,6 +8,7 @@ from maat.learning.calibration import (
     observations_from_history,
     resolve_outcome,
     tune_decay,
+    tune_proposals,
 )
 from maat.pipeline.corroborate import confidence_read
 
@@ -79,3 +80,16 @@ def test_observations_from_history_groups_by_fact_and_keeps_initial_read():
     assert by["notable"].independent_originators == 1  # the INITIAL read, not the latest
     assert by["notable"].outcome == "confirmed"        # it accrued corroboration over the ticks
     assert by["extraordinary"].outcome == "unconfirmed"  # a lone claim that never grew
+
+
+def test_tune_proposals_target_config_keys_with_rationale():
+    # the suggestions file directly onto Config-panel knob rows (decay.<level>), with the why
+    obs = [Observation(2, False, "extraordinary", "confirmed") for _ in range(5)]
+    props = {p["key"]: p for p in tune_proposals(obs)}
+    assert "decay.extraordinary" in props
+    assert float(props["decay.extraordinary"]["value"]) < Weights.defaults().decay["extraordinary"]
+    assert "Brier" in props["decay.extraordinary"]["reason"]
+
+
+def test_tune_proposals_empty_when_nothing_resolved():
+    assert tune_proposals([]) == []

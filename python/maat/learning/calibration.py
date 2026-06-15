@@ -170,6 +170,30 @@ def tune_decay(
     return tuned, brier_score(scored, tuned)
 
 
+def tune_proposals(observations: Iterable[Observation], *, base: Weights | None = None) -> list[dict]:
+    """The decay changes the tuner would propose, as ``{key, value, reason}`` records.
+
+    Keyed to the Config registry (``decay.<level>``), so they file directly as
+    ``admin.threshold.changed`` proposals and surface on the matching knob in the Config panel.
+    The operator signs off (or not) — these are never auto-applied.
+    """
+    base = base or Weights.defaults()
+    obs = list(observations)
+    tuned, tuned_b = tune_decay(obs, base=base)
+    base_b = brier_score(obs, base)
+    n = len(_scorable(obs))
+    out: list[dict] = []
+    for level, after in tuned.decay.items():
+        before = base.decay[level]
+        if before != after:
+            out.append({
+                "key": f"decay.{level}",
+                "value": str(after),
+                "reason": f"auto-tune: {before}→{after} (Brier {base_b}→{tuned_b}, n={n} resolved facts)",
+            })
+    return out
+
+
 def _norm_fact(fact: str) -> str:
     return " ".join((fact or "").lower().split())
 

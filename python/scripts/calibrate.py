@@ -14,11 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 import asyncpg
 from dotenv import load_dotenv
 
+from maat import events
+from maat.bus import connect
 from maat.learning.calibration import (
     Observation,
     Weights,
@@ -26,6 +29,7 @@ from maat.learning.calibration import (
     calibration_bins,
     observations_from_history,
     tune_decay,
+    tune_proposals,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,6 +67,27 @@ def _report(obs: list[Observation]) -> str:
     return "\n".join(lines)
 
 
+async def _file_proposals(obs: list[Observation]) -> int:
+    """File the tuner's suggestions as admin.threshold.changed proposals (operator signs off)."""
+    proposals = tune_proposals(obs)
+    if not proposals:
+        print("\nno change to propose — the starting points already fit.")
+        return 0
+    nc = await connect()
+    for p in proposals:
+        await events.publish(
+            nc, events.ADMIN_THRESHOLD_CHANGED, p["key"],
+            events.admin_event(p["key"], actor="auto-tune", reason=p["reason"],
+                               key=p["key"], value=p["value"]),
+        )
+    await nc.flush()
+    await nc.close()
+    print(f"\nfiled {len(proposals)} proposal(s) → review + sign off in the Config panel:")
+    for p in proposals:
+        print(f"    {p['key']} → {p['value']}  ({p['reason']})")
+    return len(proposals)
+
+
 async def main() -> None:
     load_dotenv(ROOT / ".env")
     pool = await asyncpg.create_pool(
@@ -72,8 +97,11 @@ async def main() -> None:
         "select data from events where type = 'cluster.corroborated' order by id"
     )
     await pool.close()
-    events = [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
-    print(_report(observations_from_history(events)))
+    history = [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
+    obs = observations_from_history(history)
+    print(_report(obs))
+    if "--propose" in sys.argv:  # opt-in: file the suggestions as pending proposals
+        await _file_proposals(obs)
 
 
 if __name__ == "__main__":
