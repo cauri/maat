@@ -104,9 +104,8 @@ section.band{padding:62px 0;border-top:1px solid var(--line)}
 .pillars{display:grid;grid-template-columns:1fr;gap:16px;margin-top:40px}
 @media(min-width:720px){.pillars{grid-template-columns:1fr 1fr}}
 .pillar{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px 24px 22px}
-.pillar .ic{color:var(--gold);width:40px;height:40px;border:1.5px solid var(--gold-wash);
-  border-radius:11px;display:flex;align-items:center;justify-content:center;margin-bottom:14px;background:#fff}
-.pillar .ic svg{width:21px;height:21px}
+.pillar .ic{color:var(--gold);display:flex;align-items:center;margin-bottom:12px}
+.pillar .ic svg{width:28px;height:28px}
 .pillar h3{font-family:var(--serif);font-weight:600;font-size:21px;letter-spacing:-.01em;margin:0 0 7px}
 .pillar p{margin:0;color:#42402f;font-size:15.5px;line-height:1.55}
 .pillar.span2{grid-column:1/-1}
