@@ -44,9 +44,12 @@ def harvest(
             ``independent_originators`` — int count of collapsed originator groups.
             ``has_primary`` — bool, whether a primary/authoritative source was matched.
             Optional (with defaults):
-            ``extremity``  — "notable" | "extraordinary" | … (default "notable").
-            ``confidence`` — float 0–1 (default 0.0).
-            ``tenant_id``  — (default "cauri").
+            ``extremity``   — "notable" | "extraordinary" | … (default "notable").
+            ``confidence``  — float 0–1 (default 0.0).
+            ``sources``     — list[str] of source names for the cluster (default []).
+            ``originators`` — list[list[str]] collapsed originator groups (default []).
+            ``corrected``   — bool: any member claim corrected / laundering-flagged (default False).
+            ``tenant_id``   — (default "cauri").
         at: The harvest timestamp (UTC). Embedded in the event payload and used as the
             deduplication date (YYYY-MM-DD, so two runs in the same day are idempotent).
 
@@ -65,6 +68,12 @@ def harvest(
             "has_primary": bool(row["has_primary"]),
             "extremity": row.get("extremity", "notable"),
             "confidence": float(row.get("confidence", 0.0)),
+            # Sourcing detail the reputation fold needs (per-source independence + outcomes).
+            "sources": list(row.get("sources") or []),
+            "originators": list(row.get("originators") or []),
+            # Operator/reader refutation already on the member claims (corrected / laundering_flag),
+            # surfaced so resolve_outcome can see it — previously dropped before reaching calibration.
+            "corrected": bool(row.get("corrected", False)),
             "harvested_at": at.isoformat(),
         }
         events.append(

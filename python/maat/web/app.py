@@ -46,6 +46,7 @@ from maat.learning.reputation import (
     reputation_trajectories,
 )
 from maat.learning.rl import policy_step
+from maat.learning.trajectory import load_trajectory
 from maat.metrics import de_us
 from maat.obs_metrics import pipeline_health
 from maat.pipeline.corroborate import (
@@ -846,12 +847,10 @@ async def assistant_chat(req: AssistantReq) -> JSONResponse:
 
 
 async def _corroboration_history(pool) -> list[dict]:
-    """The `cluster.corroborated` event stream, oldest→newest — the input every learning fold
-    (reputation, calibration, RL) reads. Same query `scripts/calibrate_prod.py` uses."""
-    rows = await pool.fetch(
-        "select data from events where type = 'cluster.corroborated' order by id"
-    )
-    return [_jobj(r["data"]) for r in rows]
+    """The truth-over-time trajectory every learning fold (reputation, calibration, RL) reads:
+    the `cluster_snapshots` projection, oldest→newest — falling back to the legacy
+    `cluster.corroborated` stream until the first harvest. See `maat.learning.trajectory`."""
+    return await load_trajectory(pool)
 
 
 @app.get("/reputation", response_class=HTMLResponse)

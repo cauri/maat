@@ -293,12 +293,13 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope, js_seq: i64) -> R
         let d = &ev.data;
         sqlx::query(
             "insert into cluster_snapshots \
-             (cluster_id, tenant_id, snapshot_day, fact, independent_originators, has_primary, extremity, confidence, harvested_at) \
-             values ($1, $2, ($3::timestamptz)::date, $4, $5, $6, $7, $8, $3::timestamptz) \
+             (cluster_id, tenant_id, snapshot_day, fact, independent_originators, has_primary, extremity, confidence, harvested_at, sources, originators, corrected) \
+             values ($1, $2, ($3::timestamptz)::date, $4, $5, $6, $7, $8, $3::timestamptz, $9, $10, $11) \
              on conflict (cluster_id, snapshot_day) do update set \
                fact = excluded.fact, independent_originators = excluded.independent_originators, \
                has_primary = excluded.has_primary, extremity = excluded.extremity, \
-               confidence = excluded.confidence, harvested_at = excluded.harvested_at",
+               confidence = excluded.confidence, harvested_at = excluded.harvested_at, \
+               sources = excluded.sources, originators = excluded.originators, corrected = excluded.corrected",
         )
         .bind(d.get("cluster_id").and_then(|v| v.as_str()))
         .bind(&ev.tenant_id)
@@ -308,6 +309,12 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope, js_seq: i64) -> R
         .bind(d.get("has_primary").and_then(|v| v.as_bool()).unwrap_or(false))
         .bind(d.get("extremity").and_then(|v| v.as_str()).unwrap_or("notable"))
         .bind(d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0))
+        // #39 closing the loop: the reputation fold needs per-source independence (sources +
+        // collapsed originator groups); `corrected` carries the operator/reader refutation already
+        // on member claims into resolve_outcome. Default empty/false for pre-enrichment payloads.
+        .bind(Json(d.get("sources").cloned().unwrap_or_else(|| serde_json::json!([]))))
+        .bind(Json(d.get("originators").cloned().unwrap_or_else(|| serde_json::json!([]))))
+        .bind(d.get("corrected").and_then(|v| v.as_bool()).unwrap_or(false))
         .execute(&mut *tx)
         .await?;
     }
