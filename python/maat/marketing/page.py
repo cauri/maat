@@ -269,7 +269,7 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
         </svg>
         Maat
       </a>
-      <div class="meta">Ma'at — the ancient Egyptian principle of truth, balance and order, whose feather a heart was weighed against. Trust, weighed honestly, is our whole purpose.</div>
+      <div class="meta">Ma'at — the ancient Egyptian principle of truth, balance and order. Trust, weighed honestly, is our whole purpose.</div>
     </div>
     <div class="meta">
       Built in Europe<span class="dot">·</span>No trackers, no ads<br>
