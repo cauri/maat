@@ -1,6 +1,7 @@
 """Console tests (§5.7, P8) — story rollup, confidence derivation, audit render. No DB."""
 
 import datetime as dt
+import json
 
 from maat.pipeline.corroborate import confidence_read
 from maat.web.app import (
@@ -229,10 +230,14 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
         "topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent", "console_assistant"
     }
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
-    # Only the active prompts are editable; draft/on-device are read-only.
+    # #189: every backend prompt is editable — drafts are live like any other, just tagged for
+    # review. Only on-device (Swift mirrors) stay read-only / out of the editable set.
     assert prompts.EDITABLE_KEYS == frozenset(
-        {"extract", "classify", "extremity", "acquire_queries", "source_gate"}
+        {"extract", "classify", "extremity", "acquire_queries", "source_gate",
+         "topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent", "console_assistant"}
     )
+    assert "summarizer_ondevice" not in prompts.EDITABLE_KEYS
+    assert "reranker_ondevice" not in prompts.EDITABLE_KEYS
 
 
 def test_draft_prompts_imported_live_from_their_modules():
@@ -343,20 +348,22 @@ def test_prompts_page_shows_active_seed_history_and_rollback():
 
 def test_prompts_page_three_panel_nav_and_selected_agent():
     """3-panel Prompts: the LEFT nav lists every registered prompt (by label, grouped by status);
-    the MIDDLE shows the SELECTED agent's full text — editable (save form) for active, read-only
-    for draft/on-device — and a non-selected agent's body is not dumped onto the page."""
+    the MIDDLE shows the SELECTED agent's full text — editable (save form) for active AND draft
+    (#189), read-only only for on-device — and a non-selected agent's body is not dumped on the page."""
     import html as _html
 
     from maat import prompts
     from maat.web.app import _prompts_page
 
-    out = _prompts_page({}, selected="extract")
+    # All drafts pending review (no events) — the realistic default state.
+    review = {p["key"]: prompts.needs_review_given(set(), p["key"]) for p in prompts.PROMPTS}
+    out = _prompts_page({}, selected="extract", review=review)
 
     # Left nav: every prompt is a selectable link, under the short group headings.
     for p in prompts.PROMPTS:
         assert _html.escape(p["label"]) in out, p["key"]
         assert f'/prompts?key={p["key"]}' in out, p["key"]
-    for heading in ("Editable", "Draft", "On-device"):
+    for heading in ("Active", "Draft", "On-device"):
         assert heading in out
 
     # The selected ACTIVE agent shows its full seed text + the editable save form + golden test.
@@ -367,13 +374,181 @@ def test_prompts_page_three_panel_nav_and_selected_agent():
     tri_snip = _html.escape(prompts.PROMPTS_BY_KEY["triage_llm"]["default"].strip().splitlines()[0])
     assert tri_snip not in out
 
-    # Selecting a read-only (draft) agent shows its text read-only, with no save form.
-    draft = _prompts_page({}, selected="triage_llm")
+    # #189: selecting a DRAFT agent shows its text in the SAME editable block (save form), plus the
+    # 'needs review' tag + 'Mark reviewed' button. It's not a golden-eval prompt → no golden test.
+    draft = _prompts_page({}, selected="triage_llm", review=review)
     assert tri_snip in draft
-    assert "readonly" in draft and "Read-only — surfaced for review" in draft
-    assert 'action="/prompts/save"' not in draft
+    assert 'action="/prompts/save"' in draft and "readonly" not in draft
+    assert 'action="/prompts/reviewed"' in draft and "Mark reviewed" in draft
+    assert "needs review" in draft
+    assert "Test on goldens" not in draft
+
+    # Selecting an ON-DEVICE agent shows its text read-only, no save form, edit-in-Apple note.
+    od = _prompts_page({}, selected="reranker_ondevice", review=review)
+    assert "readonly" in od and 'action="/prompts/save"' not in od
+    assert "edit in the Apple app" in od
     # On-device entries are labelled as Foundation Models mirrors.
     assert "Foundation Models" in out
+
+
+# --- #189: draft prompts are live + editable, carry a "needs review" tag a button clears ---------
+
+
+class _FakeNats:
+    """Captures the events the console publishes (subject, payload) without a live bus."""
+
+    def __init__(self):
+        self.published: list[tuple[str, dict]] = []
+
+    async def publish(self, subject, payload):
+        self.published.append((subject, json.loads(payload.decode())))
+
+    async def flush(self):
+        pass
+
+
+class _ReviewPool:
+    """Pool stand-in: `reviewed` is the set of keys with an admin.prompt.reviewed event."""
+
+    def __init__(self, reviewed):
+        self._reviewed = set(reviewed)
+
+    async def fetch(self, q, *args):
+        return [{"key": k} for k in self._reviewed]  # review_map's distinct-key query
+
+    async def fetchrow(self, q, *args):
+        return (1,) if args and args[0] in self._reviewed else None  # needs_review's per-key probe
+
+
+def test_needs_review_given_only_unreviewed_drafts():
+    """Pure: a draft needs review until it's marked; active / on-device never carry the tag."""
+    from maat import prompts
+
+    assert prompts.needs_review_given(set(), "triage_llm") is True
+    assert prompts.needs_review_given({"triage_llm"}, "triage_llm") is False
+    assert prompts.needs_review_given(set(), "extract") is False  # active
+    assert prompts.needs_review_given(set(), "reranker_ondevice") is False  # on-device
+
+
+def test_review_map_and_needs_review_default_to_pending_without_pool():
+    """No pool / un-migrated events table → every draft still needs review (the safe default)."""
+    import asyncio
+
+    from maat import prompts
+
+    m = asyncio.run(prompts.review_map(None))
+    assert m["triage_llm"] is True and m["topics_enrich"] is True
+    assert m["extract"] is False and m["reranker_ondevice"] is False
+    assert asyncio.run(prompts.needs_review(None, "triage_llm")) is True
+    assert asyncio.run(prompts.needs_review(None, "extract")) is False
+
+
+def test_review_map_reflects_reviewed_events():
+    """Once a key has an admin.prompt.reviewed event, its tag clears; other drafts still pending."""
+    import asyncio
+
+    from maat import prompts
+
+    pool = _ReviewPool({"triage_llm"})
+    m = asyncio.run(prompts.review_map(pool))
+    assert m["triage_llm"] is False  # reviewed → tag cleared
+    assert m["topics_enrich"] is True  # still pending
+    assert m["extract"] is False  # active, never tagged
+    assert asyncio.run(prompts.needs_review(pool, "triage_llm")) is False
+    assert asyncio.run(prompts.needs_review(pool, "curation_geotag")) is True
+
+
+def _form_post(path: str, data: dict):
+    """POST a form to the real ASGI app, NOT following the redirect; return (status, location)."""
+    import asyncio
+
+    import httpx
+
+    from maat.web.app import app
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            r = await ac.post(path, data=data, follow_redirects=False)
+            return r.status_code, r.headers.get("location", "")
+
+    return asyncio.run(go())
+
+
+def test_reviewed_route_publishes_prompt_reviewed_event(monkeypatch):
+    """POST /prompts/reviewed clears a draft's tag by publishing admin.prompt.reviewed (key only).
+    It carries no prompt text and nothing about activation — informational only."""
+    from maat.web.app import app
+
+    nats = _FakeNats()
+    monkeypatch.setattr(app.state, "nats", nats, raising=False)
+    status, loc = _form_post("/prompts/reviewed", {"key": "triage_llm", "reason": "looks good"})
+    assert status == 303 and "/prompts" in loc
+    subjects = [s for s, _ in nats.published]
+    assert "maat.events.admin.prompt.reviewed" in subjects
+    _, payload = next(p for p in nats.published if p[0].endswith("admin.prompt.reviewed"))
+    assert payload["data"]["key"] == "triage_llm"
+    assert "text" not in payload["data"]  # no prompt text, no activation field
+
+
+def test_reviewed_route_rejects_ondevice(monkeypatch):
+    """On-device prompts (Swift mirrors) carry no review action — the route rejects, publishes nothing."""
+    from maat.web.app import app
+
+    nats = _FakeNats()
+    monkeypatch.setattr(app.state, "nats", nats, raising=False)
+    status, _ = _form_post("/prompts/reviewed", {"key": "summarizer_ondevice"})
+    assert status == 303
+    assert nats.published == []
+
+
+def test_write_routes_reject_ondevice(monkeypatch):
+    """save / restore / test refuse on-device prompts (read-only Swift mirrors) and publish nothing."""
+    from maat.web.app import app
+
+    nats = _FakeNats()
+    monkeypatch.setattr(app.state, "nats", nats, raising=False)
+    status, _ = _form_post("/prompts/save", {"key": "reranker_ondevice", "text": "x", "reason": ""})
+    assert status == 303
+    status, _ = _form_post("/prompts/restore", {"key": "reranker_ondevice", "reason": ""})
+    assert status == 303
+    status, _ = _form_post("/prompts/test", {"key": "summarizer_ondevice", "text": "x"})
+    assert status == 303
+    assert nats.published == []
+
+
+def test_no_activation_routes_exist():
+    """#189 stayed SIMPLE: there is no approve-to-activate / deactivate machinery — only the review
+    tag. The activation routes from the earlier design must not be registered."""
+    from maat.web.app import app
+
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/prompts/reviewed" in paths
+    assert "/prompts/activate" not in paths
+    assert "/prompts/deactivate" not in paths
+
+
+def test_page_draft_editable_with_review_tag_when_pending():
+    """A pending draft renders the editable block + 'needs review' badge + 'Mark reviewed' button."""
+    from maat import prompts
+    from maat.web.app import _prompts_page
+
+    review = {p["key"]: prompts.needs_review_given(set(), p["key"]) for p in prompts.PROMPTS}
+    out = _prompts_page({}, selected="triage_llm", review=review)
+    assert 'action="/prompts/save"' in out  # editable like any prompt
+    assert "needs review" in out and 'action="/prompts/reviewed"' in out and "Mark reviewed" in out
+
+
+def test_page_draft_middle_drops_tag_once_reviewed():
+    """Once a draft is reviewed, its editor panel drops the tag + button (still editable)."""
+    from maat import prompts
+    from maat.web.app import _prompts_page
+
+    review = {p["key"]: prompts.needs_review_given({"triage_llm"}, p["key"]) for p in prompts.PROMPTS}
+    out = _prompts_page({}, selected="triage_llm", review=review)
+    mid = out[out.find("p3-mid"):out.find("p3-right")]  # just the selected prompt's editor panel
+    assert 'action="/prompts/save"' in mid  # still editable
+    assert "Mark reviewed" not in mid and "needs review" not in mid  # tag cleared for this one
 
 
 def test_is_paused_reads_latest_state_per_clock():
@@ -803,18 +978,33 @@ def test_prompt_chat_graceful_when_provider_errors(monkeypatch):
     assert "unavailable" in data["error"].lower() and "529" in data["error"]
 
 
-def test_prompt_chat_rejects_non_editable_keys(monkeypatch):
-    """Draft / on-device prompts are read-only — chat refuses them and never calls the model."""
+def test_prompt_chat_rejects_only_ondevice_and_unknown_keys(monkeypatch):
+    """On-device prompts (Swift mirrors) and unknown keys are not editable — chat refuses them and
+    never calls the model. Backend drafts ARE editable now (#189), so chat works for them."""
     from maat.providers import seam
 
     def must_not_run(prompt, *, model="m", max_tokens=256):  # pragma: no cover
         raise AssertionError("claude_complete must not be called for a read-only key")
 
     monkeypatch.setattr(seam, "claude_complete", must_not_run)
-    for key in ("triage_llm", "summarizer_ondevice", "prompt_chat_agent", "nonexistent"):
+    for key in ("summarizer_ondevice", "reranker_ondevice", "nonexistent"):
         status, data = _chat_post({"key": key, "current": "x", "messages": []})
         assert status == 200, key
         assert "error" in data and "editable" in data["error"].lower(), key
+
+
+def test_prompt_chat_works_for_a_backend_draft(monkeypatch):
+    """#189: a backend DRAFT prompt is editable, so 'Improve with Claude' is available on it — the
+    route calls the model and returns its reply. (Marking it reviewed is a separate action.)"""
+    from maat.providers import seam
+
+    monkeypatch.setattr(
+        seam, "claude_complete",
+        lambda prompt, *, model="m", max_tokens=256: seam.Reply(text="refined", model=model),
+    )
+    status, data = _chat_post({"key": "triage_llm", "current": "the draft text", "messages": []})
+    assert status == 200
+    assert data.get("reply") == "refined"
 
 
 def test_prompt_chat_builder_preserves_placeholders_verbatim():
@@ -835,9 +1025,10 @@ def test_prompt_chat_builder_preserves_placeholders_verbatim():
         assert tok not in built
 
 
-def test_prompts_page_chat_panel_for_selected_editable_only():
-    """The always-open chat (right column) is wired to the SELECTED editable agent's editor; a
-    read-only selection shows a 'chat unavailable' note instead. Shared chat JS ships once."""
+def test_prompts_page_chat_panel_for_selected_editable_agent():
+    """The always-open chat (right column) is wired to the SELECTED editable agent's editor — for
+    active AND draft prompts (#189). An on-device selection shows the 'edit in the Apple app' note
+    instead. Shared chat JS ships once."""
     from maat.web.app import _doc, _prompts_page
 
     page = _doc(_prompts_page({}, selected="extract"), "prompts", "prompts")
@@ -853,15 +1044,20 @@ def test_prompts_page_chat_panel_for_selected_editable_only():
     page2 = _doc(_prompts_page({}, selected="classify"), "prompts", "prompts")
     assert 'id="ta-classify"' in page2 and "maatPromptChat('classify')" in page2
 
-    # A read-only (draft) selection: no editable textarea, shows the unavailable note.
+    # #189: a DRAFT selection is editable too — editor textarea + wired chat panel.
     draft = _doc(_prompts_page({}, selected="triage_llm"), "prompts", "prompts")
-    assert 'id="ta-triage_llm"' not in draft
-    assert "Chat is available on the editable" in draft
+    assert 'id="ta-triage_llm"' in draft and "maatPromptChat('triage_llm')" in draft
+
+    # An ON-DEVICE selection: no editable textarea, shows the edit-in-Apple note.
+    od = _doc(_prompts_page({}, selected="reranker_ondevice"), "prompts", "prompts")
+    assert 'id="ta-reranker_ondevice"' not in od
+    assert "edit in the Apple app" in od
 
 
 def test_prompt_chat_agent_prompt_in_registry_as_reviewable_draft():
-    """#159: the chat helper's own instructions are surfaced in the registry as a draft with a
-    description, so cauri can review them — and they are not part of the editable/live set."""
+    """#159/#189: the chat helper's own instructions are surfaced in the registry as a draft with a
+    description, so cauri can review them — and like every backend draft they are editable (not
+    on-device, so in EDITABLE_KEYS)."""
     from maat import prompts
 
     entry = prompts.PROMPTS_BY_KEY["prompt_chat_agent"]
@@ -869,7 +1065,7 @@ def test_prompt_chat_agent_prompt_in_registry_as_reviewable_draft():
     assert entry["source"]
     assert len(entry["description"]) > 30
     assert entry["default"].strip()  # the actual instructions are surfaced for review
-    assert "prompt_chat_agent" not in prompts.EDITABLE_KEYS  # never a live/editable override
+    assert "prompt_chat_agent" in prompts.EDITABLE_KEYS  # #189: reviewed + editable like any draft
     # The instructions keep the substitution points the console fills at chat time.
     for tok in ("{prompt_label}", "{prompt_purpose}", "{current_prompt}"):
         assert tok in prompts.PROMPT_CHAT_AGENT
