@@ -8,8 +8,11 @@
 #                            clusters). Cadence is operator-chosen via MAAT_TICK_INTERVAL.
 #   reader                 — the FastAPI app: public /api/* (incl. /api/v2 feed + image proxy) and
 #                            the loopback-only admin console
+#   marketing              — the public landing page (www.maat.press) + acquisition funnel; a
+#                            SEPARATE app from the reader, loopback-only, fronted by Caddy
 #   cat-cafe               — OTLP sink: LLM spans (token usage = spend), admin-only UI on :8800
-#   caddy                  — the public edge (80/443); exposes ONLY /api/* (see Caddyfile)
+#   caddy                  — the public edge (80/443): /api/* at api.*, the console at admin.* (WG-
+#                            gated), and the marketing site at www.maat.press (see Caddyfile)
 #
 # The reader is bound to 127.0.0.1, so the operator/admin console is reachable only via an SSH
 # tunnel — never the open net. Secrets (ANTHROPIC_API_KEY, MISTRAL_API_KEY, APIFY_API_KEY) live in
@@ -140,6 +143,11 @@ services:
     build: ./python
     image: maat-app:local
     restart: unless-stopped
+    # Same .env as the pipeline services: the "Run the pipeline" button (Activity) shells out to
+    # the acquire + corroborate jobs, so the reader needs MAAT_TOPICS / APIFY_API_KEY / etc. too.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
       # The admin console (P8, #82) publishes corrections to NATS; without this the reader
@@ -168,6 +176,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  # Public marketing site (www.maat.press): the landing page + the acquisition funnel. A SEPARATE
+  # app from the behind-the-box reader/console — they share only the bus + DB. It publishes
+  # acquisition.* events (tenant_id=public) that maat-kerneld folds for the console's /acquisition
+  # page; it never touches Postgres directly, so it needs only NATS (no DB, no LLM keys, no OTEL).
+  # Reuses the maat-app:local image the reader builds. Bound to 127.0.0.1:8080 so the host-network
+  # Caddy reaches it over the loopback (www.maat.press vhost) — never published to the open net.
+  marketing:
+    image: maat-app:local
+    restart: unless-stopped
+    environment:
+      NATS_URL: "nats://nats:4222"
+    command: ["uv", "run", "--no-dev", "uvicorn", "maat.marketing.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
       nats:
         condition: service_healthy
 
@@ -205,6 +231,7 @@ services:
       - caddyconfig:/config
     depends_on:
       - reader
+      - marketing
 
 volumes:
   pgdata:

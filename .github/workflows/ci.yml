@@ -80,9 +80,16 @@ jobs:
             rust/ "root@$DEPLOY_HOST:/root/rust/"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             deploy/docker-compose.prod.yml "root@$DEPLOY_HOST:/root/docker-compose.yml"
-          # Caddyfile too: the admin-console vhost (D32) lives here; without this scp the box keeps a
-          # stale edge config after a deploy. Caddy auto-reloads it on `compose up`.
+          # Caddyfile too: the admin-console vhost (D32) + the www.maat.press marketing vhost live
+          # here; without this scp the box keeps a stale edge config after a deploy.
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             deploy/Caddyfile "root@$DEPLOY_HOST:/root/Caddyfile"
+          # The Caddyfile is a mounted volume, so `compose up` does NOT reload Caddy — the caddy
+          # container isn't recreated when only the mounted file changes, and it keeps serving the
+          # old config (a new vhost would silently 404/TLS-error until a manual reload). So reload
+          # it explicitly after the stack is up. `|| true` keeps the deploy green if caddy is mid
+          # (re)start; the next deploy reloads again.
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "root@$DEPLOY_HOST" \
-            'cd /root && docker compose up -d --build && docker compose ps'
+            'cd /root && docker compose up -d --build \
+              && (docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile || true) \
+              && docker compose ps'

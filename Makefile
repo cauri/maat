@@ -64,6 +64,9 @@ obs-up:
 web:
 	cd python && uv run uvicorn maat.web.app:app --host 0.0.0.0 --port 8000
 
+marketing:
+	cd python && uv run uvicorn maat.marketing.app:app --host 0.0.0.0 --port 8080
+
 py-lint:
 	cd python && uv run ruff check .
 

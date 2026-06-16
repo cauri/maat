@@ -18,6 +18,8 @@ import hmac
 import html
 import json
 import os
+import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +27,7 @@ from urllib.parse import quote
 
 import asyncpg
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -312,6 +314,89 @@ async def audit(limit: int = 200, ok: str = "") -> str:
     return _doc(_audit_page(rows), "audit", "audit", flash=ok)
 
 
+@app.get("/acquisition", response_class=HTMLResponse)
+async def acquisition(ok: str = "") -> str:
+    """The maat.press acquisition funnel (event-sourced): page views, store clicks (which show
+    'coming soon'), and the launch list — folded from acquisition.* events by the kernel."""
+    pool = app.state.pool
+    try:
+        counts = {
+            r["kind"]: r["n"]
+            for r in await pool.fetch("select kind, count(*) n from acquisition_signals group by kind")
+        }
+        funnel = {
+            "views": counts.get("view", 0),
+            "clicks": counts.get("click", 0),
+            "notifies": counts.get("notify", 0),
+            "signups": await pool.fetchval("select count(*) from acquisition_signups"),
+            "beta": await pool.fetchval("select count(*) from acquisition_signups where beta"),
+        }
+        by_platform = [
+            dict(r)
+            for r in await pool.fetch(
+                "select platform, count(*) clicks from acquisition_signals "
+                "where kind = 'click' group by platform order by clicks desc"
+            )
+        ]
+        referrers = [
+            dict(r)
+            for r in await pool.fetch(
+                "select coalesce(nullif(referrer, ''), 'direct') referrer, count(*) clicks "
+                "from acquisition_signals where kind = 'click' group by 1 order by clicks desc limit 10"
+            )
+        ]
+        daily = [
+            dict(r)
+            for r in await pool.fetch(
+                "select date_trunc('day', created_at)::date as \"day\", "
+                "count(*) filter (where kind = 'view') views, "
+                "count(*) filter (where kind = 'click') clicks "
+                "from acquisition_signals where created_at > now() - interval '14 days' "
+                "group by 1 order by 1"
+            )
+        ]
+        signups = [
+            dict(r)
+            for r in await pool.fetch(
+                "select email, platform, beta, first_seen, hits from acquisition_signups "
+                "order by first_seen desc limit 500"
+            )
+        ]
+        ready = True
+    except asyncpg.UndefinedTableError:  # migration 0009 not applied yet — degrade, don't 500
+        funnel = {"views": 0, "clicks": 0, "notifies": 0, "signups": 0, "beta": 0}
+        by_platform, referrers, daily, signups, ready = [], [], [], [], False
+    return _doc(
+        _acquisition_page(funnel, by_platform, referrers, daily, signups, ready),
+        "acquisition", "acquisition", flash=ok,
+    )
+
+
+@app.get("/acquisition/signups.csv")
+async def acquisition_signups_csv():
+    """Export the launch list (the only PII this funnel holds) as CSV for the operator."""
+    pool = app.state.pool
+    try:
+        rows = await pool.fetch(
+            "select email, platform, beta, first_seen, hits from acquisition_signups "
+            "order by first_seen"
+        )
+    except asyncpg.UndefinedTableError:
+        rows = []
+    out = ["email,platform,beta,first_seen,hits"]
+    for r in rows:
+        email = (r["email"] or "").replace('"', '""')
+        out.append(
+            f'"{email}",{r["platform"] or ""},{str(bool(r["beta"])).lower()},'
+            f'{r["first_seen"]:%Y-%m-%dT%H:%M:%S},{r["hits"]}'
+        )
+    return Response(
+        "\n".join(out) + "\n",
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=maat-launch-list.csv"},
+    )
+
+
 @app.get("/eval", response_class=HTMLResponse)
 async def eval_view(ok: str = "") -> str:
     """A4a — surface the eval harness (#32) over the live projections. Includes, never rebuilds:
@@ -384,14 +469,8 @@ async def runs(ok: str = "") -> str:
     )
 
 
-@app.post("/runs/trigger")
-async def trigger_run(stage: str = Form(...), reason: str = Form("")):
-    # Record operator intent in the audit log. Execution stays a deliberate CLI/cron step until a
-    # job runner with budget guardrails (D22) is wired — the console must not silently spend API $.
-    pub = await _publish(
-        events.ADMIN_RUN_TRIGGERED, "pipeline", events.admin_event("pipeline", reason=reason, stage=stage)
-    )
-    return _redirect("/runs", "Logged. Run it yourself with the command shown." if pub else _BUS_DOWN)
+# The old per-stage "Log a run" route was removed — the console now runs the WHOLE pipeline on one
+# click (acquire → extract+classify → corroborate) via /runs/run-all, with live progress on /runs/status.
 
 
 @app.get("/clocks", response_class=HTMLResponse)
@@ -1902,6 +1981,107 @@ _STAGES = [
     ("Score corroboration", "cluster.corroborated", "make corroborate"),
 ]
 
+# ── Run the pipeline: one click runs the WHOLE flow with live per-step progress ──────────────
+# acquire (scripts/clock.py) → extract+classify drain (the always-on agents process the new
+# articles) → corroborate (recompute clusters). Each runs as a subprocess in the reader's env;
+# progress lives in _RUN, polled by /runs/status. No spend gate (cauri) — running is the point.
+_RUN: dict = {"active": False, "started": None, "finished": None, "error": None, "steps": []}
+_ROOT = Path(__file__).resolve().parents[2]  # the python/ project root (has scripts/ + maat/)
+
+
+def _run_state() -> dict:
+    """Run state with the 4 display steps always present (idle until a run starts)."""
+    if not _RUN["steps"]:
+        _RUN["steps"] = [{"label": lbl, "status": "idle"} for lbl, _e, _c in _STAGES]
+    return _RUN
+
+
+async def _run_proc(args: list[str]) -> None:
+    """Run a pipeline command as a subprocess in the reader's env; raise on a non-zero exit."""
+    proc = await asyncio.create_subprocess_exec(
+        *args, cwd=str(_ROOT),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        msg = (err or b"").decode("utf-8", "replace").strip()[-400:]
+        raise RuntimeError(msg or f"exited {proc.returncode}")
+
+
+async def _drain(max_s: int = 180, quiet_s: int = 15) -> None:
+    """Let the always-on extract+classify agents catch up on the freshly acquired articles: poll
+    the claims count, stop once it has been steady for `quiet_s` (or `max_s` elapses)."""
+    pool = getattr(app.state, "pool", None)
+    if pool is None:
+        await asyncio.sleep(min(max_s, 20))
+        return
+
+    async def _count():
+        try:
+            return await pool.fetchval("select count(*) from claims")
+        except Exception:  # noqa: BLE001
+            return None
+
+    prev, last_change, deadline = await _count(), time.monotonic(), time.monotonic() + max_s
+    while time.monotonic() < deadline:
+        await asyncio.sleep(5)
+        cur = await _count()
+        if cur != prev:
+            prev, last_change = cur, time.monotonic()
+        elif time.monotonic() - last_change >= quiet_s:
+            break
+
+
+async def _run_pipeline() -> None:
+    """Background task: run the full pipeline, updating _RUN per step as it goes."""
+    steps = _run_state()["steps"]
+
+    def mark(i, status):
+        steps[i]["status"] = status
+
+    try:
+        await _publish(events.ADMIN_RUN_TRIGGERED, "pipeline",
+                       events.admin_event("pipeline", reason="full pipeline run from console"))
+        mark(0, "running")  # Find articles
+        await _run_proc([sys.executable, "scripts/clock.py"])
+        mark(0, "done")
+        mark(1, "running")  # Pull out claims + Label claims — the agents drain automatically
+        mark(2, "running")
+        await _drain()
+        mark(1, "done")
+        mark(2, "done")
+        mark(3, "running")  # Score corroboration
+        await _run_proc([sys.executable, "-m", "maat.agents.corroborate_agent"])
+        mark(3, "done")
+    except Exception as exc:  # noqa: BLE001 - surface failure to the operator, never crash the app
+        _RUN["error"] = str(exc)
+        for s in steps:
+            if s["status"] == "running":
+                s["status"] = "error"
+    finally:
+        _RUN["active"] = False
+        _RUN["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@app.post("/runs/run-all")
+async def runs_run_all() -> JSONResponse:
+    """Kick off a full pipeline run (one at a time). Returns immediately; the UI polls /runs/status."""
+    if _RUN["active"]:
+        return JSONResponse({"already_running": True, **_run_state()})
+    _RUN.update(
+        active=True, started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        finished=None, error=None,
+        steps=[{"label": lbl, "status": "pending"} for lbl, _e, _c in _STAGES],
+    )
+    asyncio.create_task(_run_pipeline())
+    return JSONResponse(_run_state())
+
+
+@app.get("/runs/status")
+async def runs_status() -> JSONResponse:
+    """Current pipeline-run state for the Activity progress strip."""
+    return JSONResponse(_run_state())
+
 
 def stage_summary(counts: dict) -> list[dict]:
     """Map event-type aggregates {type: {n, last}} to the pipeline stages (F4). Pure."""
@@ -1920,17 +2100,13 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
         for k, v in proj.items()
     )
     srows = []
-    for s in stages:
+    for i, s in enumerate(stages):
         last = f'{s["last"]:%Y-%m-%d %H:%M}' if s["last"] else "never"
         srows.append(
-            f'<div class="srow" title="event: {html.escape(s["type"])}"><div class="sname">'
-            f'{html.escape(s["label"])}</div>'
+            f'<div class="srow-step" title="event: {html.escape(s["type"])}">'
+            f'<div class="sname">{html.escape(s["label"])}</div>'
             f'<div class="snum">{s["count"]}<span class="mut sm"> done · last {last}</span></div>'
-            f'<div class="scmd mono">{html.escape(s["cmd"])}</div>'
-            '<form class="inline" method="post" action="/runs/trigger">'
-            f'<input type="hidden" name="stage" value="{html.escape(s["label"])}">'
-            '<button title="Notes that you started this step. It does not run it — you run that '
-            'yourself, to control cost.">Log a run</button></form></div>'
+            f'<span class="step-state" id="rs-{i}"></span></div>'
         )
     dead_html = ""
     if not dead_ready:
@@ -1965,7 +2141,11 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     return (
         '<div class="ins"><a class="back" href="/">← back to feed</a>'
         '<h3 class="ih">Activity — what the system has done, and anything that failed</h3>'
-        f'<div class="mgrid">{pcells}</div><div class="bl mt">Steps</div>{"".join(srows)}'
+        f'<div class="mgrid">{pcells}</div>'
+        '<div class="bl mt">Pipeline</div>'
+        '<div class="runbar"><button id="run-btn" onclick="maatRunPipeline()">▶ Run the pipeline</button>'
+        '<span class="run-status" id="run-status"></span></div>'
+        f'{"".join(srows)}'
         f'{dead_html}<div class="bl mt">Recent activity</div>'
         f'<table class="aud"><tr><th>when</th><th title="Pipeline stage — the internal event name for what ran">step</th><th>item</th></tr>{rrows}</table>{note}</div>'
     )
@@ -2003,6 +2183,77 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
         "per-model token estimates; the exact per-call cost (and live token usage) is in cat-cafe. "
         f"Apify is the actual billed figure from its usage API. Per-call detail: {catcafe}.</div>"
         "</div>"
+    )
+
+
+def _acquisition_page(funnel, by_platform, referrers, daily, signups, ready: bool = True) -> str:
+    """The maat.press funnel for the operator (pure): KPIs, platform split, referrers, the
+    14-day trend, and the launch list. Degrades to a note when the projection isn't migrated."""
+    back = '<div class="ins"><a class="back" href="/">← back to feed</a>'
+    head = '<h3 class="ih">Acquisition — the maat.press funnel</h3>'
+    if not ready:
+        return (
+            f'{back}{head}<p class="empty">Not set up yet — restart the kernel (maat-kerneld) to '
+            'apply the latest updates. Visitors to maat.press will show up here.</p></div>'
+        )
+    views = funnel.get("views", 0) or 0
+    clicks = funnel.get("clicks", 0) or 0
+    conv = f"{round(clicks / views * 100)}%" if views else "—"
+    kpis = {
+        "page views": views,
+        "store clicks": clicks,
+        "view → click": conv,
+        "launch sign-ups": funnel.get("signups", 0) or 0,
+        "beta testers": funnel.get("beta", 0) or 0,
+    }
+    kcells = "".join(
+        f'<div class="mcell"><div class="mk">{html.escape(k)}</div><div class="mv">{v}</div></div>'
+        for k, v in kpis.items()
+    )
+    plabel = {"ios": "iPhone · App Store", "mac": "Mac"}
+    prows = "".join(
+        f'<tr><td>{html.escape(plabel.get(r["platform"], r["platform"] or "unknown"))}</td>'
+        f'<td class="mono">{r["clicks"]}</td></tr>'
+        for r in by_platform
+    ) or '<tr><td class="mut" colspan="2">No store clicks yet.</td></tr>'
+    rrows = "".join(
+        f'<tr><td>{html.escape(r["referrer"] or "direct")}</td><td class="mono">{r["clicks"]}</td></tr>'
+        for r in referrers
+    ) or '<tr><td class="mut" colspan="2">No referrers yet.</td></tr>'
+    maxc = max((d.get("clicks", 0) for d in daily), default=0) or 1
+    drows = "".join(
+        f'<tr><td class="mut">{d["day"]:%b %d}</td><td class="mono">{d.get("views", 0)}</td>'
+        f'<td class="mono">{d.get("clicks", 0)}</td>'
+        f'<td><span style="display:block;height:7px;border-radius:5px;background:var(--acc);'
+        f'min-width:2px;width:{round((d.get("clicks", 0) / maxc) * 100)}%"></span></td></tr>'
+        for d in daily
+    ) or '<tr><td class="mut" colspan="4">No activity in the last 14 days.</td></tr>'
+    srows = "".join(
+        f'<tr><td class="mono">{html.escape(s["email"])}</td>'
+        f'<td>{html.escape(s.get("platform") or "—")}</td>'
+        f'<td>{"✅" if s.get("beta") else "—"}</td>'
+        f'<td class="mut">{s["first_seen"]:%Y-%m-%d %H:%M}</td>'
+        f'<td class="mono">{s.get("hits", 1)}</td></tr>'
+        for s in signups
+    ) or '<tr><td class="mut" colspan="5">No sign-ups yet.</td></tr>'
+    csv = (
+        ' <a href="/acquisition/signups.csv" style="font-weight:600;color:var(--acc)">CSV ↓</a>'
+        if signups else ""
+    )
+    return (
+        f'{back}{head}'
+        f'<div class="mgrid">{kcells}</div>'
+        '<div class="bl mt">Store clicks by platform</div>'
+        f'<table class="aud"><tr><th>platform</th><th>clicks</th></tr>{prows}</table>'
+        '<div class="bl mt">Where clicks come from</div>'
+        f'<table class="aud"><tr><th>referrer</th><th>clicks</th></tr>{rrows}</table>'
+        '<div class="bl mt">Last 14 days</div>'
+        '<table class="aud"><tr><th>day</th><th>views</th><th>clicks</th><th></th></tr>'
+        f'{drows}</table>'
+        f'<div class="bl mt">Launch list — asked to be told at launch{csv}</div>'
+        '<table class="aud"><tr><th>email</th><th>platform</th><th>beta</th><th>first asked</th>'
+        '<th>times</th></tr>'
+        f'{srows}</table></div>'
     )
 
 
@@ -2908,6 +3159,8 @@ _NAV_TABS = [
     ("/calibration", "Calibration", "calibration", "🎯", "Is the confidence read right? Plus de-US-centering & health"),
     ("/eval", "Quality", "eval", "✅", "Automatic checks that Maat is still judging correctly"),
     ("/spend", "Spend", "spend", "💰", "What Maat has spent on AI + acquisition so far"),
+    ("/acquisition", "Acquisition", "acquisition", "📈",
+     "The maat.press marketing funnel — page views, App Store clicks, and the launch list"),
     ("/audit", "History", "audit", "🕘", "A log of every change made in this console"),
 ]
 # active-key -> (label, purpose) — the assistant's page context.
@@ -3068,5 +3321,35 @@ async function maatAssistant(){
 (function(){var i=document.getElementById('asst-in');
   if(i)i.addEventListener('keydown',function(e){
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();maatAssistant();}});})();
+
+// Activity — run the whole pipeline on one click, then poll progress and paint the per-step pills.
+var maatRunTimer=null;
+function maatPaintRun(st){
+  var btn=document.getElementById('run-btn'), status=document.getElementById('run-status');
+  (st.steps||[]).forEach(function(s,i){
+    var el=document.getElementById('rs-'+i); if(!el) return;
+    el.className='step-state '+(s.status||'idle');
+    el.textContent={pending:'waiting',running:'running…',done:'done ✓',error:'failed'}[s.status]||'';
+  });
+  if(btn) btn.disabled=!!st.active;
+  if(status){
+    if(st.active) status.textContent='Running…';
+    else if(st.error) status.textContent='Stopped: '+st.error;
+    else if(st.finished) status.textContent='Done · finished '+String(st.finished).replace('T',' ');
+    else status.textContent='';
+  }
+}
+async function maatPollRun(){
+  try{ var r=await fetch('/runs/status'); var st=await r.json(); maatPaintRun(st);
+    if(st.active){ clearTimeout(maatRunTimer); maatRunTimer=setTimeout(maatPollRun,2000); }
+  }catch(e){}
+}
+async function maatRunPipeline(){
+  var btn=document.getElementById('run-btn'); if(!btn||btn.disabled) return;
+  btn.disabled=true;
+  try{ await fetch('/runs/run-all',{method:'POST'}); }catch(e){}
+  maatPollRun();
+}
+(function(){ if(document.getElementById('run-btn')) maatPollRun(); })();  // reflect a run in progress
 </script>
 </body></html>"""
