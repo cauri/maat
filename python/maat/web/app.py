@@ -67,6 +67,7 @@ from maat.providers import seam
 from maat.serving import admin_auth
 from maat.serving import spend as spend_mod
 from maat.serving.feed import feed_router
+from maat.serving.social_api import social_router
 from maat.serving.translate import translate_text
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import record as feedback_record
@@ -109,6 +110,11 @@ app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "st
 # console reads. The router is None only if FastAPI is unavailable at import (test env guard).
 if feed_router is not None:
     app.include_router(feed_router)
+
+# Comments + pins (#49) — client-facing /api/v2 routes over the event-sourced social layer
+# (serving/social.py), folded read-time like the admin events. None only if FastAPI is absent.
+if social_router is not None:
+    app.include_router(social_router)
 
 
 # ============================ admin auth (P8, #163; D31/D32) ============================
