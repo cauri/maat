@@ -82,8 +82,10 @@ _PRIVACY_BODY = f"""
 the personal data we collect here, why, and the rights you have under the EU General Data
 Protection Regulation (GDPR). We have built this site to gather as little as possible.</p>
 
-<p><strong>This site uses no cookies, no local storage, and no third-party trackers or
-advertising.</strong> The only network requests the page makes are back to our own server.</p>
+<p><strong>This site uses no third-party trackers and no advertising.</strong> We record a little
+first-party analytics only if you accept it — a banner asks first — and the only thing we store on
+your device is that accept-or-decline choice, nothing more. The only network requests the page
+makes are back to our own server.</p>
 
 <h2>Who is responsible</h2>
 <p>The controller for the data described below is {CONTROLLER}, a company registered in {COUNTRY}.
@@ -93,9 +95,9 @@ for operator details.</p>
 
 <h2>What we collect, and why</h2>
 <dl>
-  <dt>1. Anonymous visit analytics — legal basis: our legitimate interest, GDPR Art. 6(1)(f)</dt>
-  <dd>When you load a page we record a minimal, non-identifying entry so we can gauge interest in
-  the product and improve the site:
+  <dt>1. Anonymous visit analytics — legal basis: your consent, GDPR Art. 6(1)(a)</dt>
+  <dd>Only if you accept the banner: when you load a page we record a minimal, non-identifying
+  entry so we can gauge interest in the product and improve the site:
   <ul>
     <li>the page you viewed and, if you followed a link or campaign, the referrer and any UTM tags
     in the address;</li>
@@ -105,8 +107,10 @@ for operator details.</p>
     page view with a button tap in the same visit. It is <strong>not</strong> stored on your
     device and <strong>not</strong> tied to you.</li>
   </ul>
-  We do <strong>not</strong> store your IP address with these entries, and we cannot identify you
-  from them.</dd>
+  If you decline, none of this is recorded. We remember your accept-or-decline choice on your
+  device so we don't ask again — you can change it any time by clearing this site's browser
+  storage. We do <strong>not</strong> store your IP address with these entries, and we cannot
+  identify you from them.</dd>
 
   <dt>2. The launch list — legal basis: your consent, GDPR Art. 6(1)(a)</dt>
   <dd>If you ask us to tell you when Maat launches, we store the email address you give us and,
