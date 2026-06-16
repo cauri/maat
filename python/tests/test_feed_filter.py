@@ -92,3 +92,24 @@ def test_build_deeper_expands_provenance():
     assert "ecb.europa.eu" in d["primary_sources"]  # primary source surfaced
     assert len(d["originators"]) == 2  # per-originator breakdown
     assert d["source_count"] == 3
+
+
+def test_annotate_accuracy_tags_stories_by_normalised_fact():
+    # #38 — accuracy-axis lifecycle state attached per story, matched on the normalised fact.
+    from maat.serving.feed import _annotate_accuracy
+
+    payload = {"stories": [
+        {"id": "c1", "fact": "Reyes  Resigns"},  # extra space + mixed case
+        {"id": "c2", "fact": "Tokyo summit opens"},
+    ]}
+    out = _annotate_accuracy(payload, {"reyes resigns": "resolved"})
+    assert out["stories"][0]["accuracy_state"] == "resolved"
+    assert "accuracy_state" not in out["stories"][1]  # no history → unannotated
+
+
+def test_annotate_accuracy_extracts_enum_value():
+    from maat.learning.accuracy import LifecycleState
+    from maat.serving.feed import _annotate_accuracy
+
+    out = _annotate_accuracy({"stories": [{"id": "c1", "fact": "x"}]}, {"x": LifecycleState.RESOLVED})
+    assert out["stories"][0]["accuracy_state"] == LifecycleState.RESOLVED.value

@@ -37,6 +37,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from maat.agents.curation import Story as CurationStory, curate
+from maat.learning.accuracy import lifecycle_by_fact
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.topics import parse_interest, story_matches
 
@@ -119,6 +120,20 @@ def _thread_payload(
             }
         )
     return {**payload, "threads": threads}
+
+
+def _annotate_accuracy(payload: dict, lifecycle: dict) -> dict:
+    """Tag each story with its accuracy-axis lifecycle state (#38) — how the fact has resolved
+    over time (dormant/resolving/resolved/extended/decayed), folded from the cluster.corroborated
+    history by ``maat.learning.accuracy.lifecycle_by_fact``. Additive; facts with no history stay
+    unannotated. Opt-in (``?accuracy=1``) so the default feed isn't slowed by the history fold.
+    """
+    for s in payload.get("stories", []):
+        fact = " ".join((s.get("fact") or "").lower().split())  # same normalisation as the fold
+        state = lifecycle.get(fact)
+        if state is not None:
+            s["accuracy_state"] = getattr(state, "value", state)
+    return payload
 
 
 def _jload(v: Any) -> list:
@@ -642,13 +657,24 @@ def _make_router() -> Any:
             node_edges.setdefault(e["from_id"], []).append({"kind": e["kind"], "to": e["to_id"]})
         return cluster_node, node_meta, node_edges
 
+    async def _load_corroboration_history(pool):
+        """The cluster.corroborated event stream (oldest→newest) — the trajectory accuracy folds
+        (#38). Resilient if the events table is unavailable."""
+        try:
+            rows = await pool.fetch(
+                "select data from events where type = 'cluster.corroborated' order by id"
+            )
+        except Exception:
+            return []
+        return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
+
     @router.get("/feed", response_class=JSONResponse)
-    async def feed_endpoint(request: Request, topics: str = ""):
+    async def feed_endpoint(request: Request, topics: str = "", accuracy: int = 0):
         """Served feed: stories ordered by confidence then de-US re-ranked.
 
-        Optional ``?topics=`` — a comma-separated list of natural-language interests
-        ("art, West African politics") — personalises the feed to stories matching at least
-        one interest (#50). Omitted/empty returns the full feed (backward-compatible)."""
+        ``?topics=`` (comma-separated NL interests) personalises the feed (#50).
+        ``?accuracy=1`` tags each story with its accuracy-axis lifecycle state (#38).
+        Both omitted → the full, un-annotated feed (backward-compatible)."""
         pool = request.app.state.pool
         clusters = await _load_clusters(pool)
         article_meta = await _load_article_meta(pool)
@@ -656,7 +682,14 @@ def _make_router() -> Any:
         payload = build_feed(clusters, claims_by_id, article_meta)
         payload = _filter_by_topics(payload, topics)
         cluster_node, node_meta, node_edges = await _load_story_graph(pool)
-        return JSONResponse(_thread_payload(payload, cluster_node, node_meta, node_edges))
+        payload = _thread_payload(payload, cluster_node, node_meta, node_edges)
+        if accuracy:
+            history = await _load_corroboration_history(pool)
+            if history:
+                payload = _annotate_accuracy(
+                    payload, lifecycle_by_fact(history, datetime.now(timezone.utc))
+                )
+        return JSONResponse(payload)
 
     @router.get("/story/{cluster_id}", response_class=JSONResponse)
     async def story_endpoint(cluster_id: str, request: Request, deeper: int = 0):
