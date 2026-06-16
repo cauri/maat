@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import string
 from dataclasses import dataclass
+from functools import lru_cache
 
 # ---------------------------------------------------------------------------
 # Domain model
@@ -182,36 +183,110 @@ Return a JSON object with:
 """
 
 
+def _spec_from_reply(text: str, interest: str) -> TopicSpec:
+    """Pure: parse a model's JSON reply into a TopicSpec. Raises on missing JSON so callers
+    fall back to the deterministic parse. Shared by the judge and bulk enrichment paths."""
+    import json as _json
+
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("no JSON object in reply")
+    data = _json.loads(text[start : end + 1])
+    raw_terms = [str(t).lower().strip() for t in data.get("terms", [])]
+    terms = [t for t in raw_terms if t]
+    query = str(data.get("query") or " ".join(terms[:3]) or interest.strip())
+    return TopicSpec(
+        terms=tuple(terms) if terms else _pure_parse(interest).terms,
+        raw=interest.strip(),
+        query=query,
+        sourcelang=data.get("sourcelang") or None,
+        sourcecountry=data.get("sourcecountry") or None,
+    )
+
+
 def _llm_parse(interest: str) -> TopicSpec:
-    """LLM-enriched extraction — falls back to ``_pure_parse`` on any error.
+    """LLM-enriched extraction via the JUDGE model — falls back to ``_pure_parse`` on any error.
 
     This path is disabled by default (callers must pass ``use_llm=True``).
     The prompt above is a DRAFT and must be reviewed by cauri before deployment.
     """
-    import json as _json
-
     from maat.providers.seam import claude_complete
 
     prompt = _LLM_PROMPT_TEMPLATE.replace("{interest}", interest.strip())
     try:
         reply = claude_complete(prompt, max_tokens=256)
-        text = reply.text
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end == -1:
-            raise ValueError("no JSON object in reply")
-        data = _json.loads(text[start : end + 1])
-        raw_terms = [str(t).lower().strip() for t in data.get("terms", [])]
-        terms = [t for t in raw_terms if t]
-        query = str(data.get("query") or " ".join(terms[:3]) or interest.strip())
-        return TopicSpec(
-            terms=tuple(terms) if terms else _pure_parse(interest).terms,
-            raw=interest.strip(),
-            query=query,
-            sourcelang=data.get("sourcelang") or None,
-            sourcecountry=data.get("sourcecountry") or None,
-        )
+        return _spec_from_reply(reply.text, interest)
     except Exception:  # noqa: BLE001 — network error, JSON error, key error: fall back
         return _pure_parse(interest)
+
+
+# ---------------------------------------------------------------------------
+# Hot-path topic enrichment (#189) — memoised bulk-model expansion for the feed filter.
+#
+# The personal-feed filter (serving.feed._filter_by_topics) runs on EVERY request, so it must
+# never make a per-request LLM call. ``enriched_interest`` expands a reader's free-text interest
+# into extra match terms via the BULK model, but caches the result per distinct interest — a busy
+# feed therefore pays one call per NEW interest and zero thereafter. Enrichment only UNIONS terms
+# onto the deterministic parse, so it can only add recall, never drop the keyword baseline.
+# Gated by MAAT_TOPICS_LLM (read at the feed seam); OFF → the pure parse, unchanged.
+# ---------------------------------------------------------------------------
+
+# DRAFT prompt — flag for cauri review (in-platform agent prompt fed to the bulk model).
+_TOPICS_ENRICH_PROMPT = """\
+# ROLE
+You expand a reader's news interest into match terms for filtering a news feed.
+
+# TASK
+Given one interest, return JSON only:
+  {"terms": [4-8 lowercase phrases - close synonyms and the most newsworthy
+             sub-topics a relevant headline or summary might use],
+   "query": "<space-joined top phrases>"}
+
+# RULES
+- Stay strictly on-topic; never drift to adjacent-but-different subjects.
+- Prefer noun phrases; include obvious synonyms and named sub-topics.
+- Output ONLY valid JSON, no commentary.
+
+# INTEREST
+{interest}
+"""
+# DRAFT prompt — flag for cauri review
+
+
+def _bulk_enrich(interest: str) -> TopicSpec:
+    """One bulk-model expansion of ``interest``, UNIONed with the deterministic terms. Falls back
+    to the pure parse on any error. Not cached itself — go through ``enriched_interest``."""
+    from maat.providers.seam import mistral_complete
+
+    base = _pure_parse(interest)
+    try:
+        reply = mistral_complete(_TOPICS_ENRICH_PROMPT.replace("{interest}", interest.strip()))
+        spec = _spec_from_reply(reply.text, interest)
+    except Exception:  # noqa: BLE001 — provider/network/JSON error: deterministic fallback
+        return base
+    merged = tuple(dict.fromkeys((*spec.terms, *base.terms)))  # LLM terms first, dedup, keep base
+    return TopicSpec(
+        terms=merged,
+        raw=base.raw,
+        query=spec.query or base.query,
+        sourcelang=spec.sourcelang,
+        sourcecountry=spec.sourcecountry,
+    )
+
+
+@lru_cache(maxsize=512)
+def _enriched_cached(interest_key: str) -> TopicSpec:
+    return _bulk_enrich(interest_key)
+
+
+def enriched_interest(interest: str) -> TopicSpec:
+    """Hot-path-safe LLM topic enrichment: memoised bulk-model expansion (one call per distinct
+    interest), falling back to the pure parse on any error. Used by the feed filter when
+    MAAT_TOPICS_LLM=1. Call ``_enriched_cached.cache_clear()`` to reset (tests/operator reload)."""
+    norm = (interest or "").strip().lower()
+    if not norm:
+        return TopicSpec(terms=(), raw="", query="")
+    return _enriched_cached(norm)
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import os
 import socket
 from datetime import datetime, timezone
 from typing import Any
@@ -37,12 +38,13 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from maat.agents.curation import Story as CurationStory, curate
+from maat.events import STORY_GEO_INFERRED
 from maat.learning.accuracy import lifecycle_by_fact
 from maat.learning.reputation import fold_reputation
 from maat.learning.source_learning import learn_preferences
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.source_flags import denied_sources
-from maat.serving.topics import parse_interest, story_matches
+from maat.serving.topics import enriched_interest, parse_interest, story_matches
 
 # FastAPI is a hard dependency, but keep the import guarded so the pure builders above stay
 # importable in any stripped-down env. Hoisted to module scope (not deferred inside _make_router)
@@ -60,19 +62,20 @@ except ImportError:  # pragma: no cover - FastAPI absent (pure-builder-only env)
 # ---------------------------------------------------------------------------
 
 
-def _filter_by_topics(payload: dict, topics: str) -> dict:
+def _filter_by_topics(payload: dict, topics: str, *, use_llm: bool = False) -> dict:
     """Personal-feed filter (#50): keep only stories matching the reader's NL interests.
 
     ``topics`` is a comma-separated free-text list ("art, West African politics"); each is parsed
-    to a ``TopicSpec`` (parse_interest) and matched against the story's fact + claim texts via
-    ``story_matches``. No topics → the payload is returned unchanged, so the default feed and
-    every existing client are untouched. Wires the previously-orphaned parse_interest /
-    story_matches (the curation/serving half of #50) into the live Feed API.
+    to a ``TopicSpec`` and matched against the story's fact + claim texts via ``story_matches``.
+    No topics → the payload is returned unchanged, so the default feed and every existing client
+    are untouched. ``use_llm`` (#189) swaps the pure keyword parse for the memoised bulk-model
+    enrichment (``enriched_interest``) — same matching, broader recall; the LLM call is cached per
+    interest so this stays cheap on the hot path.
     """
     wanted = [t.strip() for t in (topics or "").split(",") if t.strip()]
     if not wanted:
         return payload
-    specs = [parse_interest(t) for t in wanted]
+    specs = [enriched_interest(t) if use_llm else parse_interest(t) for t in wanted]
     kept = [
         s
         for s in payload.get("stories", [])
@@ -447,6 +450,22 @@ def _infer_country(
     return ""
 
 
+def _resolve_country(
+    claims: list[dict[str, Any]],
+    article_meta: dict[str, dict[str, Any]],
+    originators_raw: Any,
+    cluster_id: str,
+    geo_overrides: dict[str, str] | None,
+) -> str:
+    """Country for curation: the TLD/language heuristic first, then the LLM geo-tagger's
+    inference (#189) only for the gap the heuristic left blank. The heuristic stays
+    authoritative — the override never replaces a country the heuristic could place."""
+    country = _infer_country(claims, article_meta, originators_raw)
+    if not country and geo_overrides:
+        country = geo_overrides.get(cluster_id, "")
+    return country
+
+
 def _primary_source(
     cluster: dict[str, Any],
     article_meta: dict[str, dict[str, Any]],
@@ -497,6 +516,7 @@ def build_feed(
     country_cap: float = 0.25,
     source_cap: float = 0.20,
     confidence_band: float = 0.20,
+    geo_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the full feed payload: stories + de-US ordering.
 
@@ -540,8 +560,10 @@ def build_feed(
         sid = story["id"]
         stories_by_id[sid] = story
 
-        country = _infer_country(
-            story["claims"], article_meta, cluster.get("originators")
+        # #189: heuristic first, then the LLM geo-tagger fills only the gaps it left blank —
+        # a de-US ordering hint, never a veracity signal.
+        country = _resolve_country(
+            story["claims"], article_meta, cluster.get("originators"), sid, geo_overrides
         )
         source = _primary_source(cluster, article_meta)
 
@@ -727,6 +749,25 @@ def _make_router() -> Any:
             (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in rows
         )
 
+    async def _load_geo_overrides(pool):
+        """LLM-inferred {cluster_id: country} from the geo-tagger (#189), latest per cluster.
+        A de-US ordering hint that fills the heuristic's gaps — never a veracity signal. Resilient
+        (the table is the generic events log; missing/empty → no overrides → pure heuristic)."""
+        try:
+            rows = await pool.fetch(
+                "select stream_id, data from events where type = $1 order by id",
+                STORY_GEO_INFERRED,
+            )
+        except Exception:
+            return {}
+        out: dict[str, str] = {}
+        for r in rows:
+            d = json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
+            code = (d or {}).get("country") or ""
+            if code:
+                out[r["stream_id"]] = code  # later events win (latest per cluster)
+        return out
+
     @router.get("/feed", response_class=JSONResponse)
     async def feed_endpoint(
         request: Request, topics: str = "", accuracy: int = 0, reputation: int = 0
@@ -741,8 +782,15 @@ def _make_router() -> Any:
         clusters = await _load_clusters(pool)
         article_meta = await _load_article_meta(pool)
         claims_by_id = await _load_claims_by_id(pool)
-        payload = build_feed(clusters, claims_by_id, article_meta)
-        payload = _filter_by_topics(payload, topics)
+        payload = build_feed(
+            clusters, claims_by_id, article_meta, geo_overrides=await _load_geo_overrides(pool)
+        )
+        if topics.strip() and os.environ.get("MAAT_TOPICS_LLM") == "1":
+            # #189: enrich interests with the bulk model, but off the event loop — a cache MISS
+            # makes a blocking call; cache HITs (steady state) are instant. Pure path stays inline.
+            payload = await asyncio.to_thread(_filter_by_topics, payload, topics, use_llm=True)
+        else:
+            payload = _filter_by_topics(payload, topics)
         payload = _filter_denied(payload, await _load_denied(pool))  # #187: drop denied-only stories
         cluster_node, node_meta, node_edges = await _load_story_graph(pool)
         payload = _thread_payload(payload, cluster_node, node_meta, node_edges)

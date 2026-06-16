@@ -106,6 +106,13 @@ services:
       # releases the GDELT news stream misses. Costs credits per call. Spend is reported to the
       # operator and (follow-up) surfaced in the admin console. Set to 0 to pause.
       MAAT_PRIMARY_PASS: ${MAAT_PRIMARY_PASS:-1}
+      # LLM refinement paths ON (cauri sign-off, #189). Both run on the BULK model (Mistral), not
+      # the expensive judge — one call per cluster (NER) / per feedback item (triage), with the
+      # deterministic heuristic/rule pass as the fallback on any error. Spend → cat-cafe via OTLP.
+      # Set either to 0 to fall back to the pure heuristic/rule path.
+      MAAT_STORY_GRAPH_LLM: ${MAAT_STORY_GRAPH_LLM:-1}   # canonical entity spine for thread attachment (#42)
+      MAAT_TRIAGE_LLM: ${MAAT_TRIAGE_LLM:-1}             # feedback category/route refinement (#58/#189)
+      MAAT_CURATION_LLM: ${MAAT_CURATION_LLM:-1}         # geo-tag clusters the TLD/lang heuristic can't place (#189)
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
     # by compose against the host env (unset → blank), breaking `sleep ""`.
@@ -122,6 +129,8 @@ services:
           uv run --no-dev python -m maat.agents.corroborate_agent || echo "[clock] corroborate error";
           echo "[clock] story-graph (thread clusters into event-nodes, #42)";
           uv run --no-dev python -m maat.agents.story_graph_agent || echo "[clock] story-graph error";
+          echo "[clock] geotag (infer country for clusters the heuristic can't place, #189)";
+          uv run --no-dev python -m maat.agents.geotag_agent || echo "[clock] geotag error";
           echo "[clock] harvest (snapshot clusters for truth-over-time, #39)";
           uv run --no-dev python scripts/harvest.py || echo "[clock] harvest error";
           echo "[clock] triage (route submitted feedback to review/auto-fix, #58)";
@@ -158,6 +167,10 @@ services:
       # without them the chat degrades to "unavailable" rather than crashing.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       MISTRAL_API_KEY: "${MISTRAL_API_KEY:-}"
+      # Personal-feed topic enrichment ON (cauri sign-off, #189): ?topics= expands each interest
+      # via the BULK model, MEMOISED per interest so it's one call per new interest, not per request
+      # (serving.topics.enriched_interest). Set to 0 to fall back to the pure keyword filter.
+      MAAT_TOPICS_LLM: "${MAAT_TOPICS_LLM:-1}"
       # So translate + prompt-chat spans export, and /eval shows "receiving traces" + cat-cafe link.
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://cat-cafe:4318"
       # Admin-console auth (P8, #163; D31/D32) — Google OIDC + allowlist, SEPARATE from user auth.
