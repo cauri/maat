@@ -843,6 +843,38 @@ async def policy_view(ok: str = "") -> str:
     return _doc(_policy_page(proposal, len(history)), "policy", "policy", flash=ok)
 
 
+@app.post("/policy/approve")
+async def policy_approve(reason: str = Form("")):
+    # #186 — sign off the RL policy's weight changes into the live pipeline. Each targets a Config
+    # knob, so promote it via the same admin.config.promoted path as /config (#184). Source-
+    # preference changes and capability grants are NOT auto-applied here (they steer acquisition /
+    # scope — a separate, deliberately-gated lever).
+    proposal = policy_step(await _corroboration_history(app.state.pool))
+    promoted = 0
+    for ch in proposal.weight_changes:
+        if ch.get("key") in config._ENACTABLE and ch.get("value") is not None:
+            ok = await _publish(
+                events.ADMIN_CONFIG_PROMOTED,
+                ch["key"],
+                events.admin_event(
+                    ch["key"], actor="rl-policy",
+                    reason=reason or ch.get("reason") or "RL policy approval",
+                    key=ch["key"], value=str(ch["value"]),
+                ),
+            )
+            promoted += int(bool(ok))
+    if not proposal.weight_changes:
+        msg = "No weight changes to approve."
+    elif promoted:
+        msg = (
+            f"Approved — {promoted} weight change(s) promoted live (next corroboration pass). "
+            "Source-preference changes are not auto-applied."
+        )
+    else:
+        msg = _BUS_DOWN
+    return _redirect("/policy", msg)
+
+
 @app.post("/config/revert")
 async def config_revert(key: str = Form(...), reason: str = Form("")):
     # Revert a knob to its live code default (#123): re-propose the default value as a normal
@@ -2715,8 +2747,12 @@ def _policy_page(proposal, n_events: int) -> str:
         )
         weights_html = (
             '<div class="bl mt">Proposed weight changes</div>'
-            '<div class="note">These file to Settings as suggestions — sign off there to apply.</div>'
             f'<ul class="prov">{witems}</ul>'
+            '<form class="inline" method="post" action="/policy/approve">'
+            '<input class="reason" name="reason" placeholder="reason (optional)">'
+            '<button title="Sign off: promote these weight changes to the live pipeline now (same '
+            'enact path as /config). Source-preference changes are not auto-applied.">'
+            'Approve weight changes</button></form>'
         )
     else:
         weights_html = (
