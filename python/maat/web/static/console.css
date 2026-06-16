@@ -159,6 +159,17 @@ label{font-size:13px}
 .prov{margin:6px 0;padding-left:18px;font-size:13px}
 .note{flex-basis:100%;font-size:12px;color:var(--mut);line-height:1.5;margin:-2px 0 2px}
 
+/* prompt editor (the active-prompt block on /prompts): a clean vertical stack, NOT the flex
+   config rows — so the reason field and version list line up to the full column width. */
+.pedit{display:block}
+.pedit .reason{width:100%;box-sizing:border-box;margin-top:4px}
+.pedit .btnrow{margin-top:11px}
+.pedit > .deriv,.pedit > form{margin-bottom:2px}
+/* version history rows: meta fills the left and wraps; "Roll back" pins right, never squishes. */
+.vrow{display:flex;align-items:center;gap:12px;padding:9px 1px;border-top:1px solid var(--line);margin:0}
+.vrow .vmeta{flex:1;min-width:0;line-height:1.45}
+.vrow button{flex:none;white-space:nowrap;padding:5px 11px}
+
 /* config rows */
 .crow{padding:14px 0;border-top:1px solid var(--line)}
 .cinfo{min-width:0}
