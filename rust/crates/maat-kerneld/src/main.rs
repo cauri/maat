@@ -335,6 +335,33 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope, js_seq: i64) -> R
             .await?;
     }
 
+    if ev.typ == "claim.related" {
+        // Automated contradiction detection (#229): record the NLI relation between two claims.
+        // Idempotent per (claim_a, claim_b, relation); a re-run just refreshes the score.
+        let d = &ev.data;
+        sqlx::query(
+            "insert into claim_relations (tenant_id, claim_a, claim_b, relation, score) \
+             values ($1, $2::uuid, $3::uuid, $4, $5) \
+             on conflict (claim_a, claim_b, relation) do update set score = excluded.score",
+        )
+        .bind(&ev.tenant_id)
+        .bind(d.get("claim_a").and_then(|v| v.as_str()))
+        .bind(d.get("claim_b").and_then(|v| v.as_str()))
+        .bind(d.get("relation").and_then(|v| v.as_str()))
+        .bind(d.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if ev.typ == "claim.disputed" {
+        // #229: a stronger contradicting claim refutes this one — flag it so the harvester folds it
+        // into the cluster's `corrected` (→ REFUTED), the same path #227 built for operator fixes.
+        sqlx::query("update claims set disputed = true where id = $1::uuid")
+            .bind(ev.data.get("claim_id").and_then(|v| v.as_str()))
+            .execute(&mut *tx)
+            .await?;
+    }
+
     if ev.typ == "story.graph.rebuilt" {
         // Story graph (#42/#43/#44, P4): the builder rebuilds the whole graph each run and emits
         // it as one event. Project atomically — clear this tenant's prior graph, then insert the

@@ -114,6 +114,8 @@ services:
       MAAT_TRIAGE_LLM: ${MAAT_TRIAGE_LLM:-1}             # feedback category/route refinement (#58/#189)
       MAAT_CURATION_LLM: ${MAAT_CURATION_LLM:-1}         # geo-tag clusters the TLD/lang heuristic can't place (#189)
       MAAT_GROUNDING_LLM: ${MAAT_GROUNDING_LLM:-1}       # judge each primary-bearing cluster vs its primary source (#228)
+      MAAT_CONTRADICTION_NLI: ${MAAT_CONTRADICTION_NLI:-0}  # NLI contradiction detection (#229) — OFF until the model is pinned + smoke-tested
+      MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-}                 # the ONNX MNLI cross-encoder repo (set when pinned, #229)
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
     # by compose against the host env (unset → blank), breaking `sleep ""`.
@@ -134,6 +136,8 @@ services:
           uv run --no-dev python -m maat.agents.geotag_agent || echo "[clock] geotag error";
           echo "[clock] grounding (judge primary-bearing clusters vs their primary source, #228)";
           uv run --no-dev python -m maat.agents.grounding_agent || echo "[clock] grounding error";
+          echo "[clock] contradiction (NLI between a claim and its nearest neighbours, #229)";
+          uv run --no-dev python -m maat.agents.contradiction_agent || echo "[clock] contradiction error";
           echo "[clock] harvest (snapshot clusters for truth-over-time, #39)";
           uv run --no-dev python scripts/harvest.py || echo "[clock] harvest error";
           echo "[clock] triage (route submitted feedback to review/auto-fix, #58)";
