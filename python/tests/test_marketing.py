@@ -43,8 +43,12 @@ async def _run() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://mkt") as ac:
         page = await ac.get("/")
         assert page.status_code == 200
-        assert "weighted by truth" in page.text  # the headline rendered
-        assert "Download on the" in page.text  # the App Store CTA rendered
+        assert "Know which news to trust" in page.text  # the value headline rendered
+        assert "Get early access" in page.text  # access CTA, not a store/waitlist tease
+        # The "how" and the coming-soon/waitlist messaging are intentionally gone:
+        assert "Corroboration over spread" not in page.text
+        assert "Coming soon" not in page.text
+        assert "join the launch list" not in page.text
         assert 'id="beta"' in page.text  # the beta opt-in checkbox is present
         assert "beta tester" in page.text
         assert 'href="/privacy"' in page.text  # consent line links the privacy policy
