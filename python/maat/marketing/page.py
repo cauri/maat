@@ -132,6 +132,8 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:18px;justify-content:space-between;
 footer .name{max-width:46ch}
 footer .name .mark{margin-bottom:8px;font-size:18px}
 footer .meta{font-size:13px;line-height:1.7}
+footer .meta a{color:var(--mut);text-decoration:underline;text-decoration-color:var(--line)}
+footer .meta a:hover{color:var(--ink)}
 footer .dot{color:var(--gold);padding:0 6px}
 
 /* dialog */
@@ -148,6 +150,9 @@ form.notify input{flex:1;font:inherit;font-size:15px;padding:12px 13px;border:1p
 form.notify input:focus{outline:2px solid var(--gold-wash);border-color:var(--gold)}
 form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-radius:11px;
   background:var(--ink);color:#fff;cursor:pointer}
+.optin{display:flex;align-items:flex-start;gap:9px;margin:13px 2px 0;font-size:14px;
+  color:#46442f;cursor:pointer;line-height:1.4}
+.optin input{width:17px;height:17px;margin-top:1px;flex:none;accent-color:var(--gold);cursor:pointer}
 .note{font-size:13px;color:var(--mut);margin:10px 2px 0;min-height:18px}
 .note.err{color:#b3402e}
 .thanks{font-size:16px;color:var(--green);margin:6px 2px;font-weight:600}
@@ -291,6 +296,7 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
     <div class="meta">
       Built in Europe<span class="dot">·</span>No trackers, no ads<br>
       English<span class="dot">·</span>Português<span class="dot">·</span>Français<br>
+      <a href="/privacy">Privacy</a><span class="dot">·</span><a href="/imprint">Legal notice</a><br>
       &copy; 2026 Maat
     </div>
   </div>
@@ -309,8 +315,11 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
         <input type="email" name="email" placeholder="you@example.com" autocomplete="email" required>
         <button type="submit">Notify me</button>
       </form>
+      <label class="optin"><input type="checkbox" id="beta">
+        I’d also like to be a beta tester and help shape the app before launch.</label>
       <p class="note" id="notify-note"></p>
-      <p class="tiny">One email, when it launches. Nothing else.</p>
+      <p class="tiny">One email, when it launches. Nothing else. By submitting you agree to our
+        <a href="/privacy" target="_blank" rel="noopener" style="color:var(--gold)">Privacy Policy</a>.</p>
     </div>
   </div>
 </dialog>
@@ -359,13 +368,14 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
     form.addEventListener("submit", function(e){
       e.preventDefault();
       var input = form.querySelector("input[type=email]");
+      var betaBox = document.getElementById("beta");
       var note = document.getElementById("notify-note");
       var email = (input.value || "").trim();
       if(email.indexOf("@") < 1 || email.lastIndexOf(".") < email.indexOf("@")){
         note.textContent = "Please enter a valid email."; note.className = "note err"; return;
       }
       note.textContent = "Sending…"; note.className = "note";
-      send("/notify", ctx({email: email, platform: lastPlatform})).then(function(r){
+      send("/notify", ctx({email: email, platform: lastPlatform, beta: !!(betaBox && betaBox.checked)})).then(function(r){
         return r ? r.json() : {ok:true};
       }).then(function(j){
         if(j && j.ok){

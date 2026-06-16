@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from maat import events
 from maat.bus import connect as nats_connect
+from maat.marketing.legal import IMPRINT, PRIVACY
 from maat.marketing.page import PAGE
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -95,6 +96,7 @@ class Click(Signal):
 class Notify(Signal):
     email: str
     platform: str = ""
+    beta: bool = False  # explicit opt-in: the launch form's unticked "beta tester" checkbox
 
 
 def _payload(body: Signal, request: Request) -> dict:
@@ -131,6 +133,16 @@ async def index() -> str:
     return PAGE
 
 
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy() -> str:
+    return PRIVACY
+
+
+@app.get("/imprint", response_class=HTMLResponse)
+async def imprint() -> str:
+    return IMPRINT
+
+
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True}
@@ -158,5 +170,6 @@ async def notify(body: Notify, request: Request):
     data = _payload(body, request)
     data["email"] = email
     data["platform"] = norm_platform(body.platform) if body.platform else None
+    data["beta"] = bool(body.beta)
     await _emit(events.ACQUISITION_NOTIFY_REQUESTED, data)
     return {"ok": True, "message": "Thanks — we'll let you know."}

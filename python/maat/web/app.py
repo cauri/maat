@@ -326,6 +326,7 @@ async def acquisition(ok: str = "") -> str:
             "clicks": counts.get("click", 0),
             "notifies": counts.get("notify", 0),
             "signups": await pool.fetchval("select count(*) from acquisition_signups"),
+            "beta": await pool.fetchval("select count(*) from acquisition_signups where beta"),
         }
         by_platform = [
             dict(r)
@@ -354,13 +355,13 @@ async def acquisition(ok: str = "") -> str:
         signups = [
             dict(r)
             for r in await pool.fetch(
-                "select email, platform, first_seen, hits from acquisition_signups "
+                "select email, platform, beta, first_seen, hits from acquisition_signups "
                 "order by first_seen desc limit 500"
             )
         ]
         ready = True
     except asyncpg.UndefinedTableError:  # migration 0009 not applied yet — degrade, don't 500
-        funnel = {"views": 0, "clicks": 0, "notifies": 0, "signups": 0}
+        funnel = {"views": 0, "clicks": 0, "notifies": 0, "signups": 0, "beta": 0}
         by_platform, referrers, daily, signups, ready = [], [], [], [], False
     return _doc(
         _acquisition_page(funnel, by_platform, referrers, daily, signups, ready),
@@ -374,14 +375,18 @@ async def acquisition_signups_csv():
     pool = app.state.pool
     try:
         rows = await pool.fetch(
-            "select email, platform, first_seen, hits from acquisition_signups order by first_seen"
+            "select email, platform, beta, first_seen, hits from acquisition_signups "
+            "order by first_seen"
         )
     except asyncpg.UndefinedTableError:
         rows = []
-    out = ["email,platform,first_seen,hits"]
+    out = ["email,platform,beta,first_seen,hits"]
     for r in rows:
         email = (r["email"] or "").replace('"', '""')
-        out.append(f'"{email}",{r["platform"] or ""},{r["first_seen"]:%Y-%m-%dT%H:%M:%S},{r["hits"]}')
+        out.append(
+            f'"{email}",{r["platform"] or ""},{str(bool(r["beta"])).lower()},'
+            f'{r["first_seen"]:%Y-%m-%dT%H:%M:%S},{r["hits"]}'
+        )
     return Response(
         "\n".join(out) + "\n",
         media_type="text/csv",
@@ -2088,6 +2093,7 @@ def _acquisition_page(funnel, by_platform, referrers, daily, signups, ready: boo
         "store clicks": clicks,
         "view → click": conv,
         "launch sign-ups": funnel.get("signups", 0) or 0,
+        "beta testers": funnel.get("beta", 0) or 0,
     }
     kcells = "".join(
         f'<div class="mcell"><div class="mk">{html.escape(k)}</div><div class="mv">{v}</div></div>'
@@ -2114,10 +2120,11 @@ def _acquisition_page(funnel, by_platform, referrers, daily, signups, ready: boo
     srows = "".join(
         f'<tr><td class="mono">{html.escape(s["email"])}</td>'
         f'<td>{html.escape(s.get("platform") or "—")}</td>'
+        f'<td>{"✅" if s.get("beta") else "—"}</td>'
         f'<td class="mut">{s["first_seen"]:%Y-%m-%d %H:%M}</td>'
         f'<td class="mono">{s.get("hits", 1)}</td></tr>'
         for s in signups
-    ) or '<tr><td class="mut" colspan="4">No sign-ups yet.</td></tr>'
+    ) or '<tr><td class="mut" colspan="5">No sign-ups yet.</td></tr>'
     csv = (
         ' <a href="/acquisition/signups.csv" style="font-weight:600;color:var(--acc)">CSV ↓</a>'
         if signups else ""
@@ -2133,7 +2140,8 @@ def _acquisition_page(funnel, by_platform, referrers, daily, signups, ready: boo
         '<table class="aud"><tr><th>day</th><th>views</th><th>clicks</th><th></th></tr>'
         f'{drows}</table>'
         f'<div class="bl mt">Launch list — asked to be told at launch{csv}</div>'
-        '<table class="aud"><tr><th>email</th><th>platform</th><th>first asked</th><th>times</th></tr>'
+        '<table class="aud"><tr><th>email</th><th>platform</th><th>beta</th><th>first asked</th>'
+        '<th>times</th></tr>'
         f'{srows}</table></div>'
     )
 

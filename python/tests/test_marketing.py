@@ -45,6 +45,16 @@ async def _run() -> None:
         assert page.status_code == 200
         assert "weighted by truth" in page.text  # the headline rendered
         assert "Download on the" in page.text  # the App Store CTA rendered
+        assert 'id="beta"' in page.text  # the beta opt-in checkbox is present
+        assert "beta tester" in page.text
+        assert 'href="/privacy"' in page.text  # consent line links the privacy policy
+
+        # GDPR legal pages serve and carry the substance (cookieless, GDPR, rights).
+        privacy = await ac.get("/privacy")
+        assert privacy.status_code == 200 and "Privacy Policy" in privacy.text
+        assert "GDPR" in privacy.text and "no cookies" in privacy.text
+        imprint = await ac.get("/imprint")
+        assert imprint.status_code == 200 and "Legal notice" in imprint.text
 
         assert (await ac.get("/healthz")).json() == {"ok": True}
 
@@ -53,8 +63,14 @@ async def _run() -> None:
         click = await ac.post("/track/click", json={"platform": "MAC", "visitor": "v1"})
         assert click.json()["message"] == "Coming soon"
 
-        ok = await ac.post("/notify", json={"email": "Reader@Example.com ", "visitor": "v1"})
+        # Beta is an explicit opt-in: it rides the notify event only when the visitor ticked it.
+        ok = await ac.post(
+            "/notify", json={"email": "Reader@Example.com ", "visitor": "v1", "beta": True}
+        )
         assert ok.status_code == 200 and ok.json()["ok"] is True
+
+        plain = await ac.post("/notify", json={"email": "lurker@example.com"})
+        assert plain.status_code == 200 and plain.json()["ok"] is True
 
         bad = await ac.post("/notify", json={"email": "nope"})
         assert bad.status_code == 422  # invalid email rejected
@@ -67,8 +83,10 @@ async def _run() -> None:
     assert len(clicks) == 1 and clicks[0]["data"]["platform"] == "mac"  # normalized
 
     notifies = _events(bus, "acquisition.notify_requested")
-    assert len(notifies) == 1  # the invalid email did NOT publish
-    assert notifies[0]["data"]["email"] == "reader@example.com"  # trimmed + lowercased
+    assert len(notifies) == 2  # both valid emails published; the invalid one did NOT
+    by_email = {n["data"]["email"]: n["data"] for n in notifies}
+    assert by_email["reader@example.com"]["beta"] is True  # trimmed + lowercased, opted in
+    assert by_email["lurker@example.com"]["beta"] is False  # opt-in defaults off
 
 
 def test_marketing_app_serves_page_and_publishes_funnel_events():

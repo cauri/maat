@@ -51,7 +51,7 @@ def test_valid_email():
 
 
 def test_acquisition_page_kpis_conversion_and_launch_list():
-    funnel = {"views": 200, "clicks": 50, "notifies": 12, "signups": 11}
+    funnel = {"views": 200, "clicks": 50, "notifies": 12, "signups": 11, "beta": 7}
     by_platform = [{"platform": "ios", "clicks": 40}, {"platform": "mac", "clicks": 10}]
     referrers = [
         {"referrer": "news.ycombinator.com", "clicks": 18},
@@ -62,15 +62,16 @@ def test_acquisition_page_kpis_conversion_and_launch_list():
         {"day": dt.date(2026, 6, 15), "views": 80, "clicks": 20},
     ]
     signups = [
-        {"email": "reader@example.com", "platform": "ios",
+        {"email": "reader@example.com", "platform": "ios", "beta": True,
          "first_seen": dt.datetime(2026, 6, 15, 9, 0), "hits": 2},
     ]
     out = _acquisition_page(funnel, by_platform, referrers, daily, signups)
     assert "Acquisition" in out
     assert "25%" in out  # 50/200 view->click conversion, not a raw count
+    assert "beta testers" in out and ">7<" in out  # the beta KPI renders its count
     assert "iPhone · App Store" in out and "Mac" in out
     assert "news.ycombinator.com" in out
-    assert "reader@example.com" in out
+    assert "reader@example.com" in out and "✅" in out  # beta opt-in shown in the launch list
     assert "/acquisition/signups.csv" in out  # CSV export offered when there are sign-ups
 
 

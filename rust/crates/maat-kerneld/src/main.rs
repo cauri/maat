@@ -303,15 +303,17 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         if ev.typ == "acquisition.notify_requested" {
             if let Some(email) = d.get("email").and_then(|v| v.as_str()) {
                 sqlx::query(
-                    "insert into acquisition_signups (email, platform, referrer, utm_source) \
-                     values ($1, $2, $3, $4) \
+                    "insert into acquisition_signups (email, platform, referrer, utm_source, beta) \
+                     values ($1, $2, $3, $4, $5) \
                      on conflict (email) do update set last_seen = now(), \
-                       hits = acquisition_signups.hits + 1",
+                       hits = acquisition_signups.hits + 1, \
+                       beta = acquisition_signups.beta or excluded.beta",
                 )
                 .bind(email)
                 .bind(d.get("platform").and_then(|v| v.as_str()))
                 .bind(d.get("referrer").and_then(|v| v.as_str()))
                 .bind(d.get("utm_source").and_then(|v| v.as_str()))
+                .bind(d.get("beta").and_then(|v| v.as_bool()).unwrap_or(false))
                 .execute(pool)
                 .await?;
             }

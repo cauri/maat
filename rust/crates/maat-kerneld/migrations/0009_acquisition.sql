@@ -21,11 +21,14 @@ create table if not exists acquisition_signals (
 create index if not exists acquisition_signals_kind_created on acquisition_signals (kind, created_at);
 
 -- Deduped launch-notify list (one row per email), folded from acquisition.notify_requested.
+-- `beta` is an explicit opt-in (the launch form's unticked "beta tester" checkbox); once a
+-- visitor opts in it stays true across repeat submits (the fold OR-merges it).
 create table if not exists acquisition_signups (
     email      text        primary key,
     platform   text,
     referrer   text,
     utm_source text,
+    beta       boolean     not null default false,
     first_seen timestamptz not null default now(),
     last_seen  timestamptz not null default now(),
     hits       integer     not null default 1
