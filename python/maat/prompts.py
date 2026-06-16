@@ -199,20 +199,20 @@ PROMPTS: list[dict] = [
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
      "description": "Would turn a reader's natural-language interest ('West African politics') into "
-     "acquisition topics and filters. Gated OFF — deterministic keyword extraction runs today; the "
-     "model path awaits your review.",
+     "acquisition topics and filters. An optional LLM path — a deterministic keyword extraction "
+     "runs today.",
      "placeholders": []},
     {"key": "curation_geotag", "label": "Curation geo-tagger", "default": CURATION_GEOTAG_PROMPT,
      "status": "draft", "source": "maat/agents/curation.py",
      "description": "Would tag a story's primary country/region so curation can balance the feed's "
-     "geography and push back on Anglo-American slant. Gated OFF — pure heuristics run today; the "
-     "model path awaits your review.",
+     "geography and push back on Anglo-American slant. An optional LLM path — pure heuristics run "
+     "today.",
      "placeholders": []},
     {"key": "triage_llm", "label": "Feedback-triage refinement", "default": TRIAGE_LLM_PROMPT,
      "status": "draft", "source": "maat/agents/triage.py",
      "description": "Would refine how a piece of user feedback is categorised (veracity-dispute / "
-     "source-quality / bug / …) to route it to the review queue or an auto-fix. Gated OFF — the "
-     "rule-based classifier runs today; the model path awaits your review.",
+     "source-quality / bug / …) to route it to the review queue or an auto-fix. An optional LLM "
+     "path — the rule-based classifier runs today.",
      "placeholders": []},
     {"key": "prompt_chat_agent", "label": "Prompt-chat helper (console)", "default": PROMPT_CHAT_AGENT,
      "status": "draft", "source": "maat/prompts.py",
