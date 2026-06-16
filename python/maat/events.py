@@ -58,6 +58,12 @@ ADMIN_EVENT_TYPES = frozenset(
 # idempotent per (cluster_id, calendar-day).
 CLUSTER_SNAPSHOT = "cluster.snapshot"
 
+# Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
+# typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
+# maat-kerneld projects it atomically into story_nodes / story_edges / story_node_clusters /
+# claim_node_links so the feed can return THREADED stories.
+STORY_GRAPH_REBUILT = "story.graph.rebuilt"
+
 
 def admin_event(
     target: str, *, actor: str = "operator", reason: str = "", **fields: Any

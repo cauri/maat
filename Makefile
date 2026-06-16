@@ -38,6 +38,9 @@ corroborate:
 harvest:
 	cd python && uv run python scripts/harvest.py
 
+story-graph:
+	cd python && uv run python -m maat.agents.story_graph_agent
+
 eval:
 	cd python && uv run python scripts/eval.py
 

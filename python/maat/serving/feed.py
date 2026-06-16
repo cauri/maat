@@ -83,6 +83,44 @@ def _filter_by_topics(payload: dict, topics: str) -> dict:
     return {**payload, "stories": kept, "count": len(kept)}
 
 
+def _thread_payload(
+    payload: dict,
+    cluster_node: dict[str, str],
+    node_meta: dict[str, dict],
+    node_edges: dict[str, list],
+) -> dict:
+    """Attach story-graph threading (#42/#44) to a feed payload: tag each story with its
+    event-node, and add a top-level ``threads`` list grouping the clusters that belong to one
+    developing story, with their typed develops/spawns/merges edges. Additive — a client that
+    ignores ``threads`` / ``node_id`` still gets the flat feed.
+    """
+    stories = payload.get("stories", [])
+    for s in stories:
+        nid = cluster_node.get(s.get("id"))
+        if nid:
+            s["node_id"] = nid
+            s["node_headline"] = (node_meta.get(nid) or {}).get("headline")
+    threads: list[dict] = []
+    seen: set[str] = set()
+    for s in stories:
+        nid = s.get("node_id")
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        members = [t.get("id") for t in stories if t.get("node_id") == nid]
+        if len(members) < 2:
+            continue  # a single-cluster node isn't a thread worth surfacing
+        threads.append(
+            {
+                "node_id": nid,
+                "headline": (node_meta.get(nid) or {}).get("headline"),
+                "cluster_ids": members,
+                "edges": node_edges.get(nid, []),
+            }
+        )
+    return {**payload, "threads": threads}
+
+
 def _jload(v: Any) -> list:
     """Parse a JSON column that may already be decoded (asyncpg returns Python objects)."""
     if isinstance(v, str):
@@ -546,6 +584,22 @@ def _make_router() -> Any:
         )
         return [dict(r) for r in rows]
 
+    async def _load_story_graph(pool):
+        """Story-graph projection (#42/#44) for threading. Resilient: if the tables haven't been
+        migrated yet, returns empties so the feed degrades to flat (un-threaded)."""
+        try:
+            ncs = await pool.fetch("select node_id, cluster_id from story_node_clusters")
+            nodes = await pool.fetch("select id, headline from story_nodes")
+            edges = await pool.fetch("select kind, from_id, to_id from story_edges")
+        except Exception:
+            return {}, {}, {}
+        cluster_node = {r["cluster_id"]: r["node_id"] for r in ncs}
+        node_meta = {r["id"]: {"headline": r["headline"]} for r in nodes}
+        node_edges: dict[str, list] = {}
+        for e in edges:
+            node_edges.setdefault(e["from_id"], []).append({"kind": e["kind"], "to": e["to_id"]})
+        return cluster_node, node_meta, node_edges
+
     @router.get("/feed", response_class=JSONResponse)
     async def feed_endpoint(request: Request, topics: str = ""):
         """Served feed: stories ordered by confidence then de-US re-ranked.
@@ -558,7 +612,9 @@ def _make_router() -> Any:
         article_meta = await _load_article_meta(pool)
         claims_by_id = await _load_claims_by_id(pool)
         payload = build_feed(clusters, claims_by_id, article_meta)
-        return JSONResponse(_filter_by_topics(payload, topics))
+        payload = _filter_by_topics(payload, topics)
+        cluster_node, node_meta, node_edges = await _load_story_graph(pool)
+        return JSONResponse(_thread_payload(payload, cluster_node, node_meta, node_edges))
 
     @router.get("/story/{cluster_id}", response_class=JSONResponse)
     async def story_endpoint(cluster_id: str, request: Request):
