@@ -45,7 +45,7 @@ async def main() -> None:
     )
     rows = await pool.fetch(
         "select c.id, c.tenant_id, c.fact, c.independent_originators, c.has_primary,"
-        " c.extremity, c.confidence, c.sources, c.originators,"
+        " c.extremity, c.confidence, c.sources, c.originators, c.grounding,"
         " exists ("
         "   select 1 from jsonb_array_elements_text(c.claim_ids) as t(cid)"
         "   join claims cl on cl.id = t.cid::uuid"

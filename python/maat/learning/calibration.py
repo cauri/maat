@@ -66,16 +66,16 @@ _TARGET = {CONFIRMED: 1.0, REFUTED: 0.0}
 
 def resolve_outcome(
     initial_independent: int, latest_independent: int, *,
-    latest_has_primary: bool, corrected: bool, confirm_at: int = 3,
+    latest_has_primary: bool, corrected: bool, grounding: str | None = None, confirm_at: int = 3,
 ) -> str:
     """Label a fact by how its corroboration evolved — the truth-over-time signal.
 
     confirmed    — it reached independent corroboration (or its primary source surfaced);
-    refuted      — a correction / retraction attached to it;
+    refuted      — a correction / retraction attached to it, OR a primary source CONTRADICTS it (#228);
     corroborating — it gained ground but hasn't cleared the bar (not yet terminal);
     unconfirmed  — it never grew past its initial thin state.
     """
-    if corrected:
+    if corrected or grounding == "contradicted":
         return REFUTED
     if latest_independent >= confirm_at or latest_has_primary:
         return CONFIRMED
@@ -278,6 +278,7 @@ def observations_from_history(events: Iterable[Mapping]) -> list[Observation]:
             int(last.get("independent_originators", 0)),
             latest_has_primary=bool(last.get("has_primary", False)),
             corrected=any(h.get("corrected") for h in hist),
+            grounding=last.get("grounding"),
         )
         out.append(
             Observation(

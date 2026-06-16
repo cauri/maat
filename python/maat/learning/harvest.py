@@ -74,6 +74,9 @@ def harvest(
             # Operator/reader refutation already on the member claims (corrected / laundering_flag),
             # surfaced so resolve_outcome can see it — previously dropped before reaching calibration.
             "corrected": bool(row.get("corrected", False)),
+            # Primary-source grounding verdict (#228), carried into cluster_snapshots so a
+            # contradiction resolves the fact to REFUTED over time. None until the cluster is judged.
+            "grounding": row.get("grounding"),
             "harvested_at": at.isoformat(),
         }
         events.append(

@@ -22,7 +22,7 @@ from typing import Any
 # One row per (cluster, day); order by day so the per-fact fold sees oldest→newest.
 _SNAPSHOT_QUERY = (
     "select fact, independent_originators, has_primary, extremity, confidence, "
-    "sources, originators, corrected, harvested_at, cluster_id "
+    "sources, originators, corrected, grounding, harvested_at, cluster_id "
     "from cluster_snapshots order by snapshot_day, id"
 )
 _FALLBACK_QUERY = "select data from events where type = 'cluster.corroborated' order by id"
@@ -47,6 +47,7 @@ def _snapshot_to_dict(r: Any) -> dict:
         "sources": _as_list(r["sources"]),
         "originators": _as_list(r["originators"]),
         "corrected": r["corrected"],
+        "grounding": r["grounding"],
         "cluster_id": r["cluster_id"],
         "ts": ts.isoformat() if hasattr(ts, "isoformat") else ts,
     }
