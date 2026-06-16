@@ -2570,17 +2570,17 @@ def _prompt_active_block(p: dict, by_key: dict, needs_review: bool = False) -> s
     hist = ""
     if past:
         items = "".join(
-            '<form class="inline" method="post" action="/prompts/rollback">'
+            '<form class="vrow" method="post" action="/prompts/rollback">'
             f'<input type="hidden" name="key" value="{key}">'
             f'<input type="hidden" name="version" value="{v["version"]}">'
-            f'<span class="mut sm">v{v["version"]} · {v["created_at"]:%Y-%m-%d %H:%M}'
+            f'<span class="vmeta mut sm">v{v["version"]} · {v["created_at"]:%Y-%m-%d %H:%M}'
             + (f' · {html.escape(v["reason"])}' if v["reason"] else "")
-            + '</span><button title="Make this version active again">Roll back</button></form>'
+            + '</span><button class="ghost" title="Make this version active again">Roll back</button></form>'
             for v in past
         )
         hist = f'<div class="bl mt">Earlier versions</div>{items}'
     return (
-        '<div class="box" style="display:block">'
+        '<div class="box pedit">'
         f'<div class="cname">{html.escape(p["label"])} {_badge(badge, badge_cls, badge_tip)} '
         f'{review_badge} <span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
         f'<div class="deriv">{html.escape(p.get("description", ""))}</div>'
