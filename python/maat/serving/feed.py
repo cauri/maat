@@ -37,7 +37,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from maat.agents.curation import Story as CurationStory, curate
-from maat.pipeline.corroborate import confidence_label
+from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.topics import parse_interest, story_matches
 
 # FastAPI is a hard dependency, but keep the import guarded so the pure builders above stay
@@ -280,6 +280,48 @@ def build_story(
         "languages": languages,
         "hero_image_article_id": _hero_image_article_id(cluster, claims, article_meta),
         "claims": claims,
+    }
+
+
+def build_deeper(
+    cluster: dict[str, Any],
+    claims: list[dict[str, Any]],
+    article_meta: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Tier-3 'go deeper' expanded provenance (#56) — computed server-side from the existing
+    projections (no new fetch yet): a per-originator breakdown with language + primary flags, the
+    cross-language source spread, and the explicit primary-source list. Replaces the Apple client's
+    fabricated ``synthesizeDeeper`` stub with real provenance. Primary-source FETCH + cross-language
+    re-verification (the deepest tier) remains a follow-up.
+    """
+    src_lang: dict[str, str] = {}
+    for c in claims:
+        if c.get("source"):
+            src_lang[c["source"]] = c.get("language") or "en"
+    originators = []
+    for grp in build_originator_groups(cluster.get("originators"), article_meta):
+        srcs = grp["sources"]
+        originators.append(
+            {
+                "sources": srcs,
+                "collapsed": grp["collapsed"],
+                "languages": sorted({src_lang.get(s, "en") for s in srcs}),
+                "has_primary": any(is_primary_source(s) for s in srcs),
+            }
+        )
+    by_lang: dict[str, set] = {}
+    for c in claims:
+        if c.get("source"):
+            by_lang.setdefault(c.get("language") or "en", set()).add(c["source"])
+    languages = [{"language": k, "sources": sorted(v)} for k, v in sorted(by_lang.items())]
+    all_sources = sorted({c.get("source") for c in claims if c.get("source")})
+    return {
+        "originators": originators,
+        "languages": languages,
+        "primary_sources": [s for s in all_sources if is_primary_source(s)],
+        "source_count": len(all_sources),
+        "note": "Server-computed expanded provenance (Tier-3, #56). "
+        "Primary-source fetch + cross-language re-verification is the next tier.",
     }
 
 
@@ -617,8 +659,9 @@ def _make_router() -> Any:
         return JSONResponse(_thread_payload(payload, cluster_node, node_meta, node_edges))
 
     @router.get("/story/{cluster_id}", response_class=JSONResponse)
-    async def story_endpoint(cluster_id: str, request: Request):
-        """Single story detail including full article texts."""
+    async def story_endpoint(cluster_id: str, request: Request, deeper: int = 0):
+        """Single story detail including full article texts. ``?deeper=1`` adds a Tier-3
+        expanded-provenance block (#56)."""
         pool = request.app.state.pool
         row = await pool.fetchrow(
             "select id, fact, sources, originators, independent_originators, "
@@ -632,6 +675,8 @@ def _make_router() -> Any:
         claims_by_id = await _load_claims_by_id(pool)
 
         story = build_story(dict(row), claims_by_id, article_meta)
+        if deeper:  # Tier-3 "go deeper" (#56): server-computed expanded provenance
+            story["deeper"] = build_deeper(dict(row), story["claims"], article_meta)
 
         # Attach full article texts the Apple reader opens
         article_ids = list({c["article_id"] for c in story["claims"] if c.get("article_id")})

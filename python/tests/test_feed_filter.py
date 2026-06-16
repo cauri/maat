@@ -70,3 +70,25 @@ def test_thread_payload_without_graph_is_flat():
     out = _thread_payload(payload, {}, {}, {})
     assert out["threads"] == []
     assert "node_id" not in out["stories"][0]
+
+
+def test_build_deeper_expands_provenance():
+    # #56 — Tier-3 server-computed provenance: cross-language spread, primary list, originators.
+    from maat.serving.feed import build_deeper
+
+    cluster = {"originators": [["a1"], ["a2", "a3"]]}
+    claims = [
+        {"id": "c1", "source": "reuters.com", "language": "en"},
+        {"id": "c2", "source": "lemonde.fr", "language": "fr"},
+        {"id": "c3", "source": "ecb.europa.eu", "language": "en"},
+    ]
+    article_meta = {
+        "a1": {"source": "reuters.com"},
+        "a2": {"source": "lemonde.fr"},
+        "a3": {"source": "lemonde.fr"},
+    }
+    d = build_deeper(cluster, claims, article_meta)
+    assert {lang["language"] for lang in d["languages"]} == {"en", "fr"}  # cross-language spread
+    assert "ecb.europa.eu" in d["primary_sources"]  # primary source surfaced
+    assert len(d["originators"]) == 2  # per-originator breakdown
+    assert d["source_count"] == 3
