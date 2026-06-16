@@ -6,6 +6,7 @@ struct SettingsView: View {
     @Environment(TopicStore.self) private var topics
     @Environment(Analytics.self) private var analytics
     @Environment(\.dismiss) private var dismiss
+    @State private var showFeedback = false
 
     var body: some View {
         @Bindable var settings = settings
@@ -24,6 +25,17 @@ struct SettingsView: View {
                         Label("Using bundled sample feed", systemImage: "internaldrive")
                             .foregroundStyle(Palette.muted)
                     }
+                }
+
+                Section("Feedback") {
+                    Button {
+                        showFeedback = true
+                    } label: {
+                        Label("Send feedback", systemImage: "bubble.left.and.bubble.right")
+                    }
+                    Text("Tell us what's broken or what you'd like — it goes straight to the team.")
+                        .font(.caption2)
+                        .foregroundStyle(Palette.muted)
                 }
 
                 Section("On-device intelligence") {
@@ -63,6 +75,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .sheet(isPresented: $showFeedback) { FeedbackView() }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
@@ -75,5 +88,87 @@ struct SettingsView: View {
         feed.setService(settings.makeFeedService())
         await feed.refresh()
         await feed.applyRerank(FoundationModelsReranker(), topics: topics.topics)
+    }
+}
+
+/// In-app feedback composer (#210). Free text + a category, posted to the reader's intake
+/// (`/api/feedback`, #58) so it enters the triage → review/auto-fix loop. Reusable from a story
+/// detail (pass `storyID`); from Settings it's nil.
+struct FeedbackView: View {
+    @Environment(AppSettings.self) private var settings
+    @Environment(\.dismiss) private var dismiss
+
+    var storyID: String? = nil
+
+    @State private var category: FeedbackCategory = .bug
+    @State private var text = ""
+    @State private var phase: Phase = .editing
+
+    private enum Phase: Equatable { case editing, sending, failed(String) }
+
+    private var canSend: Bool {
+        phase != .sending && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Category") {
+                    Picker("Category", selection: $category) {
+                        ForEach(FeedbackCategory.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                }
+                Section("Your feedback") {
+                    TextEditor(text: $text).frame(minHeight: 140)
+                }
+                if storyID != nil {
+                    Label("Attached to the story you're reading", systemImage: "doc.text")
+                        .font(.caption)
+                        .foregroundStyle(Palette.muted)
+                }
+                if case .failed(let message) = phase {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                }
+                Section {
+                    Text("Goes straight to the Maat team — no account or personal info needed.")
+                        .font(.caption2)
+                        .foregroundStyle(Palette.muted)
+                }
+            }
+            .navigationTitle("Send feedback")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if phase == .sending {
+                        ProgressView()
+                    } else {
+                        Button("Send") { Task { await send() } }.disabled(!canSend)
+                    }
+                }
+            }
+        }
+    }
+
+    private func send() async {
+        phase = .sending
+        // Feedback should reach the team even in bundled-sample mode — fall back to the prod reader.
+        let raw = settings.apiBaseURL.isEmpty ? AppSettings.defaultAPIBaseURL : settings.apiBaseURL
+        guard let base = URL(string: raw) else {
+            phase = .failed("No reader configured.")
+            return
+        }
+        do {
+            try await APIFeedbackService(baseURL: base).submit(text: text, category: category, storyID: storyID)
+            dismiss()
+        } catch {
+            phase = .failed(error.localizedDescription)
+        }
     }
 }
