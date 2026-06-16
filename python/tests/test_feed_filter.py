@@ -142,3 +142,17 @@ def test_source_preference_dataclass_has_serialised_fields():
 
     names = {f.name for f in dataclasses.fields(SourcePreference)}
     assert {"source", "rank", "acquisition_weight", "in_diversity_floor", "low_evidence"} <= names
+
+
+def test_reputation_map_serialises_per_source():
+    # #199 — surface the real reputation fold (per source) into the feed payload.
+    from types import SimpleNamespace
+
+    from maat.serving.feed import _reputation_map
+
+    reps = [
+        SimpleNamespace(source="reuters.com", reputation=0.8765),
+        SimpleNamespace(source="blog.example", reputation=0.21),
+    ]
+    out = _reputation_map(reps)
+    assert out == {"reuters.com": 0.8765, "blog.example": 0.21}

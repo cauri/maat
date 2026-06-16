@@ -138,6 +138,13 @@ def _annotate_accuracy(payload: dict, lifecycle: dict) -> dict:
     return payload
 
 
+def _reputation_map(reps) -> dict:
+    """Per-source reputation (the §6 truthfulness-over-time fold) as {source: reputation} for the
+    feed — surfacing the learned reputation into the PRODUCT (#199), not just the operator console.
+    """
+    return {r.source: round(r.reputation, 4) for r in reps}
+
+
 def _preferences_payload(prefs) -> dict:
     """Serialise learned acquisition preferences (#35) for /api/v2/source-preferences — which
     sources have proven reliable over time, ranked by acquisition weight (diversity-floored)."""
@@ -694,12 +701,15 @@ def _make_router() -> Any:
         return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
 
     @router.get("/feed", response_class=JSONResponse)
-    async def feed_endpoint(request: Request, topics: str = "", accuracy: int = 0):
+    async def feed_endpoint(
+        request: Request, topics: str = "", accuracy: int = 0, reputation: int = 0
+    ):
         """Served feed: stories ordered by confidence then de-US re-ranked.
 
         ``?topics=`` (comma-separated NL interests) personalises the feed (#50).
         ``?accuracy=1`` tags each story with its accuracy-axis lifecycle state (#38).
-        Both omitted → the full, un-annotated feed (backward-compatible)."""
+        ``?reputation=1`` adds a {source: reputation} map (#199). Omitted → the full,
+        un-annotated feed (backward-compatible)."""
         pool = request.app.state.pool
         clusters = await _load_clusters(pool)
         article_meta = await _load_article_meta(pool)
@@ -708,12 +718,14 @@ def _make_router() -> Any:
         payload = _filter_by_topics(payload, topics)
         cluster_node, node_meta, node_edges = await _load_story_graph(pool)
         payload = _thread_payload(payload, cluster_node, node_meta, node_edges)
-        if accuracy:
+        if accuracy or reputation:
             history = await _load_corroboration_history(pool)
-            if history:
+            if history and accuracy:
                 payload = _annotate_accuracy(
                     payload, lifecycle_by_fact(history, datetime.now(timezone.utc))
                 )
+            if history and reputation:
+                payload["source_reputation"] = _reputation_map(fold_reputation(history))
         return JSONResponse(payload)
 
     @router.get("/source-preferences", response_class=JSONResponse)
