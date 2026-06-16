@@ -35,6 +35,9 @@ ingest-corpus:
 corroborate:
 	cd python && uv run python -m maat.agents.corroborate_agent
 
+harvest:
+	cd python && uv run python scripts/harvest.py
+
 eval:
 	cd python && uv run python scripts/eval.py
 

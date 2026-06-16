@@ -51,6 +51,14 @@ ADMIN_EVENT_TYPES = frozenset(
 )
 
 
+# --- Pipeline / learning projections -----------------------------------------------------
+# Point-in-time snapshot of a cluster's corroboration state, emitted by the projection-harvester
+# (scripts/harvest.py, #39) so the §8 truth-over-time / calibration loop can fold a trajectory
+# despite the kernel updating `clusters` in place. maat-kerneld folds it into cluster_snapshots,
+# idempotent per (cluster_id, calendar-day).
+CLUSTER_SNAPSHOT = "cluster.snapshot"
+
+
 def admin_event(
     target: str, *, actor: str = "operator", reason: str = "", **fields: Any
 ) -> dict[str, Any]:

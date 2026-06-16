@@ -207,6 +207,32 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .await?;
     }
 
+    if ev.typ == "cluster.snapshot" {
+        // Projection-harvester (#39): a point-in-time snapshot of a cluster's corroboration state.
+        // Idempotent per (cluster_id, calendar-day) — a second run the same day upserts, so a
+        // trajectory accrues one row/day without duplicates (the events log has no on-conflict).
+        let d = &ev.data;
+        sqlx::query(
+            "insert into cluster_snapshots \
+             (cluster_id, tenant_id, snapshot_day, fact, independent_originators, has_primary, extremity, confidence, harvested_at) \
+             values ($1, $2, ($3::timestamptz)::date, $4, $5, $6, $7, $8, $3::timestamptz) \
+             on conflict (cluster_id, snapshot_day) do update set \
+               fact = excluded.fact, independent_originators = excluded.independent_originators, \
+               has_primary = excluded.has_primary, extremity = excluded.extremity, \
+               confidence = excluded.confidence, harvested_at = excluded.harvested_at",
+        )
+        .bind(d.get("cluster_id").and_then(|v| v.as_str()))
+        .bind(&ev.tenant_id)
+        .bind(d.get("harvested_at").and_then(|v| v.as_str()))
+        .bind(d.get("fact").and_then(|v| v.as_str()))
+        .bind(d.get("independent_originators").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
+        .bind(d.get("has_primary").and_then(|v| v.as_bool()).unwrap_or(false))
+        .bind(d.get("extremity").and_then(|v| v.as_str()).unwrap_or("notable"))
+        .bind(d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0))
+        .execute(pool)
+        .await?;
+    }
+
     // --- Admin / operator-console projections (P8, F3) -------------------------------------
     // Operator fixes are events; we fold them like any other and set `corrected` so the
     // pipeline (claims.classified) will not overwrite the fix on a re-run.
