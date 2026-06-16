@@ -134,6 +134,7 @@ async def _run_all() -> None:
                 ("/eval", "Quality"),
                 ("/prompts", "Prompts"),  # P8 prompt editor renders (seeds when no edits)
                 ("/audit", "fixed a claim"),  # admin.* rendered as plain action labels
+                ("/acquisition", "Acquisition"),  # marketing funnel page renders (zeros, no rows)
                 (f"/cluster/{CLUSTER}", "rates up"),  # any($1::uuid[]) member fetch works
                 (f"/claim/{CL1}", "rates up"),  # uuid id binding works
             ]
@@ -165,7 +166,13 @@ async def _run_all() -> None:
             # degrade — not 500 (the Activity/Prompts bug). Drop the tables and re-hit.
             await pool.execute("drop table dead_letters")
             await pool.execute("drop table prompts")
-            for path, must in (("/runs", "restart the kernel"), ("/prompts", "restart the kernel")):
+            await pool.execute("drop table acquisition_signals")
+            await pool.execute("drop table acquisition_signups")
+            for path, must in (
+                ("/runs", "restart the kernel"),
+                ("/prompts", "restart the kernel"),
+                ("/acquisition", "restart the kernel"),
+            ):
                 r = await ac.get(path)
                 assert r.status_code == 200, f"{path} regressed to {r.status_code} on missing table"
                 assert must in r.text, f"{path} missing the degrade note"

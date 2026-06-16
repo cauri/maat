@@ -1,13 +1,16 @@
-# Maat public edge — terminates TLS (auto Let's Encrypt) for two hostnames:
+# Maat public edge — terminates TLS (auto Let's Encrypt) for these hostnames:
 #   • $MAAT_HOST        — PUBLIC. Serves ONLY the read API (/api/*). (api.maat.press)
 #   • $MAAT_ADMIN_HOST  — the operator/admin console. Public *name* + real cert, but served
 #                          ONLY to WireGuard source IPs (D31/D32). (admin.maat.press)
+#   • www.maat.press    — PUBLIC. The marketing landing page + acquisition funnel (a separate
+#                          loopback service); apex maat.press redirects here. No API here.
 #
 # Caddy runs on the HOST network (see docker-compose.prod.yml) so the `remote_ip` matcher sees
 # the real client address — a WireGuard peer arrives as 10.8.0.x; the public internet does not.
+# Because Caddy is host-networked it reaches every upstream over the host loopback (NOT compose
+# service names): the reader on 127.0.0.1:8000, the marketing site on 127.0.0.1:8080.
 # The admin cert is still issued over the public :80 (HTTP-01) — the A record is public, so no
-# DNS-01 / OVH-API secret is needed (D32). Upstream is the reader on 127.0.0.1:8000 (host
-# loopback; also the SSH-tunnel break-glass address). The SSH tunnel stays as break-glass.
+# DNS-01 / OVH-API secret is needed (D32). The SSH tunnel stays as break-glass.
 
 {$MAAT_HOST} {
 	encode zstd gzip
@@ -36,4 +39,18 @@
 	handle {
 		respond "Maat operator console — reachable only over the private network." 403
 	}
+}
+
+# Marketing site (www.maat.press): the public landing page + acquisition funnel. Self-contained —
+# the page only POSTs /track + /notify back to its own origin, so no API is exposed here. The admin
+# /acquisition view lives on the private console, never on this host. Upstream is the marketing
+# service on the host loopback (host-net Caddy → 127.0.0.1:8080, NOT a compose service name).
+www.maat.press {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Send the apex to www so there's one canonical home.
+maat.press {
+	redir https://www.maat.press{uri} permanent
 }
