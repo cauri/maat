@@ -105,6 +105,38 @@ def test_collapse_same_outlet_to_one_originator():
     assert len(collapse_originators(["a1", "a2"], bodies, sources)) == 1
 
 
+def test_collapse_source_variants_to_one_originator_via_identity():
+    # #36: Reuters / reuters.com / Thomson Reuters resolve to ONE canonical originator even
+    # with distinct bodies (no lexical overlap, no citation cascade). Without identity
+    # resolution this over-counts as three independent originators, inflating confidence.
+    from maat.pipeline.corroborate import collapse_originators
+
+    bodies = {
+        "a1": "The central bank raised its benchmark rate by fifty basis points on Tuesday.",
+        "a2": "Borrowing costs climbed as policymakers tightened monetary policy this week.",
+        "a3": "Officials lifted the key rate amid stubborn inflation, according to the filing.",
+    }
+    sources = {"a1": "Reuters", "a2": "reuters.com", "a3": "Thomson Reuters"}
+    assert len(collapse_originators(["a1", "a2", "a3"], bodies, sources)) == 1
+
+
+def test_collapse_co_owned_outlets_to_one_originator():
+    # #41: two co-owned outlets (operator-grouped under one owner via admin.source.grouped) are
+    # ONE independent originator, not two — a conglomerate's outlets must not double-count as
+    # corroboration. Distinct bodies, distinct sources: ownership is the only collapse signal.
+    from maat.pipeline.corroborate import collapse_originators
+    from maat.pipeline.identity import canonical_source
+
+    bodies = {
+        "a1": "The committee approved the merger after a lengthy closed-door session on Friday.",
+        "a2": "Regulators signed off on the tie-up following months of antitrust scrutiny abroad.",
+    }
+    sources = {"a1": "skynews.com", "a2": "thetimes.co.uk"}
+    assert len(collapse_originators(["a1", "a2"], bodies, sources)) == 2  # independent without grouping
+    ownership = {canonical_source("skynews.com"): "newscorp", canonical_source("thetimes.co.uk"): "newscorp"}
+    assert len(collapse_originators(["a1", "a2"], bodies, sources, ownership=ownership)) == 1
+
+
 def test_is_primary_source():
     from maat.pipeline.corroborate import is_primary_source
 

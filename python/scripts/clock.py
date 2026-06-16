@@ -29,6 +29,7 @@ from maat.acquire.source_gate import accept_source
 from maat.bus import connect
 from maat.clocks import is_paused
 from maat.events import publish
+from maat.serving.source_flags import denied_sources
 from maat.serving.topics import news_queries
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +81,13 @@ async def main() -> None:
         (r["source"] or "").lower().removeprefix("www.")
         for r in await pool.fetch("select distinct source from articles where source is not null")
     )
+    # Operator allow/deny enforcement (#187): never acquire from a denied source.
+    denied = denied_sources(
+        (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"])
+        for r in await pool.fetch(
+            "select data from events where type = 'admin.source.flagged' order by id"
+        )
+    )
     await pool.close()
 
     nc = await connect()
@@ -108,6 +116,10 @@ async def main() -> None:
                 arts = []
             for a in arts:  # GDELT gives metadata; fetch body + lead image (#1) for unseen URLs
                 if a.url in seen:
+                    continue
+                if a.domain in denied:  # operator-denied source (#187) — never acquire it
+                    seen.add(a.url)
+                    dropped += 1
                     continue
                 # Source gate: only credible publishers become articles (#sources). Judge the
                 # domain+headline BEFORE fetching the body, so we don't even pull non-news.
@@ -141,6 +153,10 @@ async def main() -> None:
                     items = []
                 for fa in items:
                     if fa.url in seen:
+                        continue
+                    if fa.domain in denied:  # operator-denied source (#187)
+                        seen.add(fa.url)
+                        dropped += 1
                         continue
                     verdict = await asyncio.to_thread(
                         accept_source, fa.domain, fa.title,

@@ -56,7 +56,10 @@ from maat.providers import seam
 from maat.serving import admin_auth
 from maat.serving import spend as spend_mod
 from maat.serving.feed import feed_router
+from maat.serving.translate import translate_text
 from maat.serving.feedback import queue as feedback_queue
+from maat.serving.feedback import record as feedback_record
+from maat.serving.feedback import record_triage as feedback_record_triage
 from maat.serving.feedback import routed_queue
 
 CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
@@ -533,7 +536,14 @@ async def config_view(ok: str = "") -> str:
              "at": r["created_at"]}
         )
     replay = await replay_for_overrides(pool, overrides)
-    return _doc(_config_page(overrides, replay, history), "config", "config", flash=ok)
+    # Active (promoted) config — what the pipeline actually reads now (#183/#184).
+    promoted_rows = await pool.fetch(
+        "select data from events where type = $1 order by id", events.ADMIN_CONFIG_PROMOTED
+    )
+    active = config.active_config(
+        (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in promoted_rows
+    )
+    return _doc(_config_page(overrides, replay, history, active), "config", "config", flash=ok)
 
 
 @app.post("/config/set")
@@ -549,6 +559,26 @@ async def config_set(key: str = Form(...), value: str = Form(...), reason: str =
         msg = "Saved as a suggestion. Nothing changed live until it's reviewed." if pub else _BUS_DOWN
     else:
         msg = "No change — pick a setting and enter a value."
+    return _redirect("/config", msg)
+
+
+@app.post("/config/promote")
+async def config_promote(key: str = Form(...), value: str = Form(...), reason: str = Form("")):
+    # #184 — sign off a proposed override into the LIVE pipeline (admin.config.promoted, which the
+    # corroborate agent folds via config.active_config). Only enactable knobs (those the pipeline
+    # actually reads today) can be promoted; model routing / weights / tier cut-points aren't wired.
+    if key not in config._ENACTABLE or not value.strip():
+        return _redirect("/config", "That setting isn't wired into the pipeline yet — can't promote.")
+    pub = await _publish(
+        events.ADMIN_CONFIG_PROMOTED,
+        key,
+        events.admin_event(key, reason=reason, key=key, value=value.strip()),
+    )
+    msg = (
+        f"Promoted — {key} = {value.strip()} is now live (takes effect on the next corroboration pass)."
+        if pub
+        else _BUS_DOWN
+    )
     return _redirect("/config", msg)
 
 
@@ -882,6 +912,22 @@ async def review_view(ok: str = "") -> str:
     )
 
 
+@app.post("/review/act")
+async def review_act(item_id: str = Form(...), action: str = Form(...), reason: str = Form("")):
+    # #188 — an operator resolves a review-queue item: record a feedback.triaged DECISION so it
+    # leaves the open queue (resolve / dismiss / route to auto-fix). Untrusted input (#77): this is
+    # the human deciding — never an auto-action.
+    routes = {"resolve": "resolved", "dismiss": "dismissed", "fix": "auto-fix"}
+    route = routes.get(action)
+    if route is None:
+        return _redirect("/review", "Unknown action.")
+    await feedback_record_triage(
+        app.state.pool, None, item_id=item_id, category="operator-decision",
+        route=route, reason=reason or f"operator {action}", auto_fixable=(route == "auto-fix"),
+    )
+    return _redirect("/review", f"Item {action} recorded.")
+
+
 @app.get("/policy", response_class=HTMLResponse)
 async def policy_view(ok: str = "") -> str:
     """A6 (#78) — RL policy control + capability grants. `learning.rl.policy_step` proposes a
@@ -891,6 +937,38 @@ async def policy_view(ok: str = "") -> str:
     history = await _corroboration_history(app.state.pool)
     proposal = policy_step(history)
     return _doc(_policy_page(proposal, len(history)), "policy", "policy", flash=ok)
+
+
+@app.post("/policy/approve")
+async def policy_approve(reason: str = Form("")):
+    # #186 — sign off the RL policy's weight changes into the live pipeline. Each targets a Config
+    # knob, so promote it via the same admin.config.promoted path as /config (#184). Source-
+    # preference changes and capability grants are NOT auto-applied here (they steer acquisition /
+    # scope — a separate, deliberately-gated lever).
+    proposal = policy_step(await _corroboration_history(app.state.pool))
+    promoted = 0
+    for ch in proposal.weight_changes:
+        if ch.get("key") in config._ENACTABLE and ch.get("value") is not None:
+            ok = await _publish(
+                events.ADMIN_CONFIG_PROMOTED,
+                ch["key"],
+                events.admin_event(
+                    ch["key"], actor="rl-policy",
+                    reason=reason or ch.get("reason") or "RL policy approval",
+                    key=ch["key"], value=str(ch["value"]),
+                ),
+            )
+            promoted += int(bool(ok))
+    if not proposal.weight_changes:
+        msg = "No weight changes to approve."
+    elif promoted:
+        msg = (
+            f"Approved — {promoted} weight change(s) promoted live (next corroboration pass). "
+            "Source-preference changes are not auto-applied."
+        )
+    else:
+        msg = _BUS_DOWN
+    return _redirect("/policy", msg)
 
 
 @app.post("/config/revert")
@@ -915,7 +993,19 @@ async def config_revert(key: str = Form(...), reason: str = Form("")):
                 key, actor="revert", reason=reason or "revert to code default", key=key, value=default
             ),
         )
-        msg = f"Reverted {key} to its built-in {default}. Filed as a suggestion — sign off to apply."
+        if key in config._ENACTABLE:
+            # #185: revert flows through the SAME enact path as promote — roll the live value back
+            # to the code default (not just a re-proposal) for knobs the pipeline reads.
+            await _publish(
+                events.ADMIN_CONFIG_PROMOTED,
+                key,
+                events.admin_event(
+                    key, actor="revert", reason="revert to code default", key=key, value=default
+                ),
+            )
+            msg = f"Reverted {key} to its built-in {default} — live now (next corroboration pass)."
+        else:
+            msg = f"Reverted {key} to its built-in {default}. Filed as a suggestion — sign off to apply."
     else:
         msg = _BUS_DOWN
     return _redirect("/config", msg)
@@ -1342,18 +1432,39 @@ class TranslateReq(BaseModel):
 
 @app.post("/api/translate")
 async def api_translate(req: TranslateReq) -> JSONResponse:
-    # Cloud fallback for §4 translate-for-display. The client translates ON-DEVICE first
-    # (Apple Translation framework); it only calls this when the on-device pair is unavailable.
-    # Real impl routes through the Source/Effect seam (maat/providers/seam.py) — model-translate,
-    # never score a translation. Stubbed echo until that route is wired, so the reader runs keyless.
-    return JSONResponse(
-        {
-            "translated": req.text,
-            "source": req.source,
-            "target": req.target,
-            "engine": "cloud-fallback-stub",
-        }
+    # Cloud fallback for §4 translate-for-display. The client translates ON-DEVICE first (Apple
+    # Translation); it only calls this when the on-device pair is unavailable. Routes through the
+    # provider seam (mistral_complete) — translate-for-display only, never scores a translation.
+    # On any provider error (incl. no MISTRAL key) it returns the original text (engine=identity),
+    # so the reader degrades gracefully and still runs keyless.
+    translated, engine = await asyncio.to_thread(
+        translate_text, req.text, req.target, req.source
     )
+    return JSONResponse(
+        {"translated": translated, "source": req.source, "target": req.target, "engine": engine}
+    )
+
+
+class FeedbackReq(BaseModel):
+    text: str
+    category_hint: str = ""
+    source: str = "reader"
+    story_id: str | None = None
+
+
+@app.post("/api/feedback")
+async def api_feedback(req: FeedbackReq) -> JSONResponse:
+    # Reader feedback intake (#58): the front door the loop was missing. Publishes a
+    # feedback.submitted event (feedback.record) that surfaces in the /review queue and that the
+    # triage agent routes to review / auto-fix. Untrusted input (#77) — a coordinated burst is
+    # surfaced on /review, never auto-actioned.
+    if not req.text.strip():
+        raise HTTPException(status_code=422, detail="empty feedback")
+    hint = (req.category_hint + (f" story:{req.story_id}" if req.story_id else "")).strip()
+    item_id = await feedback_record(
+        app.state.pool, None, text=req.text, category_hint=hint, source=req.source
+    )
+    return JSONResponse({"item_id": item_id, "status": "submitted"})
 
 
 # ── Source reputation (provisional, pre-#37) — the Apple client's Sources view reads this ──────────
@@ -2484,7 +2595,10 @@ def _knob_input(k: dict) -> str:
     return f'<input type="number" name="value" step="0.01" min="0" value="{html.escape(cur)}">'
 
 
-def _config_page(overrides: dict, replay: dict | None = None, history: dict | None = None) -> str:
+def _config_page(
+    overrides: dict, replay: dict | None = None, history: dict | None = None,
+    active: dict | None = None,
+) -> str:
     """F5 — render the knob registry grouped, with live defaults + pending proposals.
 
     For a pending weight proposal the A/B-on-replay impact (#123) is shown inline, plus a revert
@@ -2509,12 +2623,24 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
                 else _badge("minor", "own", "A lower-stakes setting")
             )
             ov = overrides.get(k["key"])
+            live_val = (active or {}).get(k["key"])
+            applied = False
             ov_html = ""
+            if live_val is not None:  # #184: what the pipeline actually uses now
+                ov_html += (
+                    f'<div class="ovr">live → <b>{html.escape(str(live_val))}</b> '
+                    '<span class="mut sm">promoted · the pipeline uses this</span></div>'
+                )
             if ov:
+                try:
+                    applied = live_val is not None and float(ov["value"]) == float(live_val)
+                except (TypeError, ValueError):
+                    applied = live_val is not None and str(ov["value"]) == str(live_val)
+                state = "applied (live)" if applied else "not applied yet"
                 extra = f' · {html.escape(ov["reason"])}' if ov.get("reason") else ""
-                ov_html = (
+                ov_html += (
                     f'<div class="ovr">suggested → <b>{html.escape(ov["value"])}</b> '
-                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · not applied yet</span></div>'
+                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · {state}</span></div>'
                 )
                 ov_html += _replay_block((replay or {}).get(k["key"]))
             ov_html += _knob_history_block(k["key"], history)
@@ -2524,6 +2650,15 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
                 '<button title="Re-propose the built-in default for this setting (logged; still '
                 'needs sign-off to go live)">Revert to default</button></form>'
             )
+            promote = ""
+            if ov and k["key"] in config._ENACTABLE and not applied:
+                promote = (
+                    '<form class="inline" method="post" action="/config/promote">'
+                    f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
+                    f'<input type="hidden" name="value" value="{html.escape(ov["value"])}">'
+                    '<button title="Sign off: apply the suggested value to the live pipeline now.">'
+                    'Promote to live</button></form>'
+                )
             tip = (
                 f'<span class="tip" data-tip="{html.escape(k["help"])}">i</span>'
                 if k.get("help") else ""
@@ -2539,7 +2674,7 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
                 f'{_knob_input(k)}'
                 '<input class="reason" name="reason" placeholder="reason (optional)">'
                 '<button title="Records your suggestion. Nothing changes live until reviewed.">'
-                f'Suggest change</button></form>{revert}</div></div>'
+                f'Suggest change</button></form>{promote}{revert}</div></div>'
             )
     out.append("</div>")
     return "".join(out)
@@ -2760,6 +2895,16 @@ _TRIAGE_LABELS = {
 }
 
 
+def _review_btn(item_id: str, action: str, label: str) -> str:
+    return (
+        '<form class="inline" method="post" action="/review/act">'
+        f'<input type="hidden" name="item_id" value="{html.escape(str(item_id))}">'
+        f'<input type="hidden" name="action" value="{action}">'
+        f'<button title="{label} this item (logged as an operator decision; leaves the queue).">'
+        f'{label}</button></form>'
+    )
+
+
 def _triage_row(it: dict, *, fresh: bool) -> str:
     """One feedback item row (works for both triaged events and live-classified previews)."""
     tri = it.get("triage") or it  # triaged events nest under 'triage'; previews are flat
@@ -2772,12 +2917,18 @@ def _triage_row(it: dict, *, fresh: bool) -> str:
                          "triage agent hasn't filed it yet") if fresh else ""
     when = it.get("submitted_at") or it.get("triaged_at")
     when_html = f'<span class="mut sm">{when:%Y-%m-%d %H:%M}</span>' if when else ""
+    iid = it.get("item_id") or tri.get("item_id") or ""
+    actions = (
+        '<div class="cact">'
+        f'{_review_btn(iid, "resolve", "Resolve")}{_review_btn(iid, "dismiss", "Dismiss")}'
+        f'{_review_btn(iid, "fix", "Route to auto-fix")}</div>'
+    ) if iid else ""
     return (
         f'<div class="mc"><div class="bs">{cat_badge}{fresh_badge} '
         f'<span class="mut sm">{html.escape(str(it.get("source", "")))} · '
         f'confidence {round(conf * 100)}% · {when_html}</span></div>'
         f'<div class="t">{html.escape(str(it.get("text", "")))}</div>'
-        f'<div class="mut sm">{html.escape(str(tri.get("reason", "")))}</div></div>'
+        f'<div class="mut sm">{html.escape(str(tri.get("reason", "")))}</div>{actions}</div>'
     )
 
 
@@ -2880,8 +3031,12 @@ def _policy_page(proposal, n_events: int) -> str:
         )
         weights_html = (
             '<div class="bl mt">Proposed weight changes</div>'
-            '<div class="note">These file to Settings as suggestions — sign off there to apply.</div>'
             f'<ul class="prov">{witems}</ul>'
+            '<form class="inline" method="post" action="/policy/approve">'
+            '<input class="reason" name="reason" placeholder="reason (optional)">'
+            '<button title="Sign off: promote these weight changes to the live pipeline now (same '
+            'enact path as /config). Source-preference changes are not auto-applied.">'
+            'Approve weight changes</button></form>'
         )
     else:
         weights_html = (

@@ -21,7 +21,7 @@ kernel-lint:
 	cd rust && cargo clippy --all-targets -- -D warnings
 
 py-setup:
-	cd python && uv sync --extra dev
+	cd python && uv sync --extra dev --extra obs
 
 py-smoke:
 	cd python && uv run python scripts/smoke_providers.py
@@ -34,6 +34,15 @@ ingest-corpus:
 
 corroborate:
 	cd python && uv run python -m maat.agents.corroborate_agent
+
+harvest:
+	cd python && uv run python scripts/harvest.py
+
+story-graph:
+	cd python && uv run python -m maat.agents.story_graph_agent
+
+triage:
+	cd python && uv run python -m maat.agents.triage
 
 eval:
 	cd python && uv run python scripts/eval.py

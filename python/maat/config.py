@@ -13,6 +13,8 @@ from the live code so the view never drifts from what the pipeline actually uses
 
 from __future__ import annotations
 
+import json
+
 from maat.pipeline.classify import CLASSIFY_MODEL
 from maat.pipeline.corroborate import (
     _CONFIDENCE_CAP,
@@ -121,3 +123,50 @@ def groups() -> list[str]:
         if k["group"] not in out:
             out.append(k["group"])
     return out
+
+
+# --- Enactment (#183/#184) ----------------------------------------------------------------
+# The knobs that map to corroborate()/confidence_read() parameters TODAY. The rest — model
+# routing, the attribution weights (weight.*), and the confidence_label tier cut-points
+# (gate.floor / tier.*) — aren't parameterised in the pipeline yet; promoting those is a follow-up.
+_ENACTABLE = frozenset(
+    {
+        "decay.routine", "decay.ordinary", "decay.notable", "decay.significant", "decay.extraordinary",
+        "confidence.primary_lift", "confidence.cap",
+        "cluster.same_fact", "cluster.duplicate_source", "cluster.min_corroboration",
+    }
+)
+
+
+def active_config(promoted_events) -> dict[str, float]:
+    """Fold `admin.config.promoted` data dicts (oldest → newest) into {key: value} for the
+    enactable knobs — the live, sign-off-gated overrides the pipeline reads instead of hardcoded
+    constants. Latest promote per key wins; only parseable numerics for known enactable keys kept.
+    """
+    out: dict[str, float] = {}
+    for e in promoted_events:
+        d = json.loads(e) if isinstance(e, str) else e
+        key, value = d.get("key"), d.get("value")
+        if key in _ENACTABLE and value is not None:
+            try:
+                out[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def pipeline_overrides(cfg: dict[str, float]) -> dict:
+    """Map a flat active-config dict to the kwargs corroborate() takes (a decay dict + scalars),
+    each falling back to its registered code default."""
+    def g(key: str) -> float:
+        return cfg.get(key, float(KNOBS_BY_KEY[key]["default"]))
+
+    extremities = ("routine", "ordinary", "notable", "significant", "extraordinary")
+    return {
+        "decay": {ex: g(f"decay.{ex}") for ex in extremities},
+        "primary_lift": g("confidence.primary_lift"),
+        "cap": g("confidence.cap"),
+        "same_fact_threshold": g("cluster.same_fact"),
+        "duplicate_source_threshold": g("cluster.duplicate_source"),
+        "min_corroboration": int(g("cluster.min_corroboration")),
+    }

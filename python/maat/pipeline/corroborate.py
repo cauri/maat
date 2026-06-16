@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from maat.pipeline.extremity import rate_extremity
+from maat.pipeline.identity import canonical_source
 from maat.providers.seam import mistral_embed
 
 
@@ -166,14 +167,27 @@ def _cites(body: str, source: str) -> bool:
 
 
 def collapse_originators(
-    article_ids: list[str], bodies: dict[str, str], sources: dict[str, str], lex_threshold: float = 0.40
+    article_ids: list[str], bodies: dict[str, str], sources: dict[str, str],
+    lex_threshold: float = 0.40, *, ownership: dict[str, str] | None = None,
 ) -> list[list[int]]:
     """Collapse near-verbatim reprints (lexical) and citation cascades (explicit attribution)
-    into single originator nodes. Independent articles on one event stay separate."""
+    into single originator nodes. Independent articles on one event stay separate.
+
+    Source identity (§6.7, #36): two articles whose sources resolve to the SAME canonical
+    originator (Reuters / reuters.com / Thomson Reuters → "reuters") are one originator, not
+    several — so wire-service reprints that differ only in source-string FORM no longer inflate
+    the independent-originator count (and thus confidence)."""
     n = len(article_ids)
     if n <= 1:
         return [[0]] if n else []
     shingles = [_shingles(bodies[a]) for a in article_ids]
+    # Canonicalise each source once (#36). The same_source check below compares canonical ids;
+    # _cites still uses the RAW source string so a body that names the outlet in full is matched.
+    canon = {a: canonical_source(sources[a]) for a in article_ids if sources.get(a) is not None}
+    # Ownership (#41): operator `admin.source.grouped` assigns co-owned outlets a shared group
+    # label (keyed by canonical source). Articles in the same ownership group are ONE originator
+    # — a conglomerate's outlets must not count as several independent corroborators.
+    owner = {a: ownership.get(canon[a]) for a in canon} if ownership else {}
     edges: list[tuple[int, int]] = []
     for i in range(n):
         for j in range(i + 1, n):
@@ -181,11 +195,14 @@ def collapse_originators(
             cascade = _cites(bodies[article_ids[i]], sources[article_ids[j]]) or _cites(
                 bodies[article_ids[j]], sources[article_ids[i]]
             )
-            # An outlet is not independent of itself: many articles from one source (one
-            # domain publishing several pieces — exposed by real GDELT data) are one originator.
-            s_i = sources.get(article_ids[i])
-            same_source = s_i is not None and s_i == sources.get(article_ids[j])
-            if lexical or cascade or same_source:
+            # An outlet is not independent of itself: articles from one source — variant
+            # source-strings resolving to the same canonical originator (#36), or co-owned
+            # outlets sharing an ownership group (#41) — are one originator, not several.
+            c_i = canon.get(article_ids[i])
+            same_source = c_i is not None and c_i == canon.get(article_ids[j])
+            o_i = owner.get(article_ids[i])
+            same_owner = o_i is not None and o_i == owner.get(article_ids[j])
+            if lexical or cascade or same_source or same_owner:
                 edges.append((i, j))
     return _components(n, edges)
 
@@ -366,6 +383,10 @@ def corroborate(
     duplicate_source_threshold: float = 0.40,
     min_corroboration: int = 2,
     extremity_of: Callable[[str], str] = rate_extremity,
+    ownership: dict[str, str] | None = None,
+    decay: dict[str, float] | None = None,
+    primary_lift: float | None = None,
+    cap: float | None = None,
 ) -> list[Corroboration]:
     """Cluster same-fact claims; count independent originators per cluster (§5.5)."""
     if not claims:
@@ -378,7 +399,9 @@ def corroborate(
         if len(members) < min_corroboration:
             continue  # uncorroborated — not a corroboration cluster
         article_ids = list(dict.fromkeys(m.article_id for m in members))
-        groups_idx = collapse_originators(article_ids, bodies, art_source, duplicate_source_threshold)
+        groups_idx = collapse_originators(
+            article_ids, bodies, art_source, duplicate_source_threshold, ownership=ownership
+        )
         originators = [[article_ids[i] for i in g] for g in groups_idx]
         ind = len(originators)
         eff = effective_originators(originators, bodies, art_source)
@@ -393,7 +416,9 @@ def corroborate(
                 independent_originators=ind,
                 has_primary=primary,
                 extremity=extremity,
-                confidence=confidence_read(eff, primary, extremity),
+                confidence=confidence_read(
+                    eff, primary, extremity, decay=decay, primary_lift=primary_lift, cap=cap
+                ),
             )
         )
     results.sort(key=lambda r: r.independent_originators, reverse=True)
@@ -411,6 +436,10 @@ def corroborate_fixed(
     extremity: str = "notable",
     *,
     duplicate_source_threshold: float = 0.40,
+    ownership: dict[str, str] | None = None,
+    decay: dict[str, float] | None = None,
+    primary_lift: float | None = None,
+    cap: float | None = None,
 ) -> Corroboration:
     """Recompute ONE cluster over a FIXED claim set (operator-decided) — no same-fact
     re-clustering, no LLM. The admin console (P8 F3) uses this when an operator splits,
@@ -435,5 +464,7 @@ def corroborate_fixed(
         independent_originators=ind,
         has_primary=primary,
         extremity=extremity,
-        confidence=confidence_read(eff, primary, extremity),
+        confidence=confidence_read(
+                    eff, primary, extremity, decay=decay, primary_lift=primary_lift, cap=cap
+                ),
     )

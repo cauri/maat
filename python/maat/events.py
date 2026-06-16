@@ -26,6 +26,7 @@ ADMIN_SOURCE_FLAGGED = "admin.source.flagged"  # A2: allow / deny a source
 ADMIN_SOURCE_GROUPED = "admin.source.grouped"  # A2: ownership / wire / copy-network grouping
 ADMIN_CLOCK_SET = "admin.clock.set"  # A1: pause / resume a clock (the next tick reads the flag)
 ADMIN_PROMPT_UPDATED = "admin.prompt.updated"  # P8: a new active version of an agent prompt
+ADMIN_CONFIG_PROMOTED = "admin.config.promoted"  # P8/#184: promote a proposed threshold to live
 # Admin-console login audit (#163; D31). The console publishes these best-effort so the audit
 # log records "who signed in, when"; auth itself is a stateless signed cookie (serving/admin_auth.py)
 # that does not depend on the bus — a publish failure never blocks (or grants) a login.
@@ -45,11 +46,25 @@ ADMIN_EVENT_TYPES = frozenset(
         ADMIN_SOURCE_GROUPED,
         ADMIN_CLOCK_SET,
         ADMIN_PROMPT_UPDATED,
+        ADMIN_CONFIG_PROMOTED,
         ADMIN_SESSION_CREATED,
         ADMIN_SESSION_REVOKED,
     }
 )
 
+
+# --- Pipeline / learning projections -----------------------------------------------------
+# Point-in-time snapshot of a cluster's corroboration state, emitted by the projection-harvester
+# (scripts/harvest.py, #39) so the §8 truth-over-time / calibration loop can fold a trajectory
+# despite the kernel updating `clusters` in place. maat-kerneld folds it into cluster_snapshots,
+# idempotent per (cluster_id, calendar-day).
+CLUSTER_SNAPSHOT = "cluster.snapshot"
+
+# Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
+# typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
+# maat-kerneld projects it atomically into story_nodes / story_edges / story_node_clusters /
+# claim_node_links so the feed can return THREADED stories.
+STORY_GRAPH_REBUILT = "story.graph.rebuilt"
 
 # --- Acquisition funnel (marketing site → operator console) -----------------------------
 # The public marketing site (maat.press) publishes these as it records the visitor funnel

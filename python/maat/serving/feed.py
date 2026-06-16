@@ -37,7 +37,12 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from maat.agents.curation import Story as CurationStory, curate
-from maat.pipeline.corroborate import confidence_label
+from maat.learning.accuracy import lifecycle_by_fact
+from maat.learning.reputation import fold_reputation
+from maat.learning.source_learning import learn_preferences
+from maat.pipeline.corroborate import confidence_label, is_primary_source
+from maat.serving.source_flags import denied_sources
+from maat.serving.topics import parse_interest, story_matches
 
 # FastAPI is a hard dependency, but keep the import guarded so the pure builders above stay
 # importable in any stripped-down env. Hoisted to module scope (not deferred inside _make_router)
@@ -53,6 +58,129 @@ except ImportError:  # pragma: no cover - FastAPI absent (pure-builder-only env)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _filter_by_topics(payload: dict, topics: str) -> dict:
+    """Personal-feed filter (#50): keep only stories matching the reader's NL interests.
+
+    ``topics`` is a comma-separated free-text list ("art, West African politics"); each is parsed
+    to a ``TopicSpec`` (parse_interest) and matched against the story's fact + claim texts via
+    ``story_matches``. No topics → the payload is returned unchanged, so the default feed and
+    every existing client are untouched. Wires the previously-orphaned parse_interest /
+    story_matches (the curation/serving half of #50) into the live Feed API.
+    """
+    wanted = [t.strip() for t in (topics or "").split(",") if t.strip()]
+    if not wanted:
+        return payload
+    specs = [parse_interest(t) for t in wanted]
+    kept = [
+        s
+        for s in payload.get("stories", [])
+        if story_matches(
+            {
+                "title": s.get("fact", ""),
+                "body": " ".join(c.get("text", "") for c in s.get("claims", [])),
+            },
+            specs,
+        )
+    ]
+    return {**payload, "stories": kept, "count": len(kept)}
+
+
+def _filter_denied(payload: dict, denied: set) -> dict:
+    """Operator source-deny enforcement (#187): drop stories sourced ENTIRELY from denied sources.
+    A story with at least one non-denied source stays — its corroboration still stands."""
+    if not denied:
+        return payload
+    kept = []
+    for s in payload.get("stories", []):
+        srcs = {src for g in s.get("originator_groups", []) for src in g.get("sources", [])}
+        if srcs and srcs <= denied:
+            continue
+        kept.append(s)
+    return {**payload, "stories": kept, "count": len(kept)}
+
+
+def _thread_payload(
+    payload: dict,
+    cluster_node: dict[str, str],
+    node_meta: dict[str, dict],
+    node_edges: dict[str, list],
+) -> dict:
+    """Attach story-graph threading (#42/#44) to a feed payload: tag each story with its
+    event-node, and add a top-level ``threads`` list grouping the clusters that belong to one
+    developing story, with their typed develops/spawns/merges edges. Additive — a client that
+    ignores ``threads`` / ``node_id`` still gets the flat feed.
+    """
+    stories = payload.get("stories", [])
+    for s in stories:
+        nid = cluster_node.get(s.get("id"))
+        if nid:
+            s["node_id"] = nid
+            s["node_headline"] = (node_meta.get(nid) or {}).get("headline")
+    threads: list[dict] = []
+    seen: set[str] = set()
+    for s in stories:
+        nid = s.get("node_id")
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        members = [t.get("id") for t in stories if t.get("node_id") == nid]
+        if len(members) < 2:
+            continue  # a single-cluster node isn't a thread worth surfacing
+        threads.append(
+            {
+                "node_id": nid,
+                "headline": (node_meta.get(nid) or {}).get("headline"),
+                "cluster_ids": members,
+                "edges": node_edges.get(nid, []),
+            }
+        )
+    return {**payload, "threads": threads}
+
+
+def _annotate_accuracy(payload: dict, lifecycle: dict) -> dict:
+    """Tag each story with its accuracy-axis lifecycle state (#38) — how the fact has resolved
+    over time (dormant/resolving/resolved/extended/decayed), folded from the cluster.corroborated
+    history by ``maat.learning.accuracy.lifecycle_by_fact``. Additive; facts with no history stay
+    unannotated. Opt-in (``?accuracy=1``) so the default feed isn't slowed by the history fold.
+    """
+    for s in payload.get("stories", []):
+        fact = " ".join((s.get("fact") or "").lower().split())  # same normalisation as the fold
+        state = lifecycle.get(fact)
+        if state is not None:
+            s["accuracy_state"] = getattr(state, "value", state)
+    return payload
+
+
+def _reputation_map(reps) -> dict:
+    """Per-source reputation (the §6 truthfulness-over-time fold) as {source: reputation} for the
+    feed — surfacing the learned reputation into the PRODUCT (#199), not just the operator console.
+    """
+    return {r.source: round(r.reputation, 4) for r in reps}
+
+
+def _preferences_payload(prefs) -> dict:
+    """Serialise learned acquisition preferences (#35) for /api/v2/source-preferences — which
+    sources have proven reliable over time, ranked by acquisition weight (diversity-floored)."""
+    return {
+        "ranked": [
+            {
+                "source": p.source,
+                "rank": p.rank,
+                "acquisition_weight": round(p.acquisition_weight, 4),
+                "confirmation_rate": p.confirmation_rate,
+                "independent_rate": round(p.independent_rate, 4),
+                "in_diversity_floor": p.in_diversity_floor,
+                "low_evidence": p.low_evidence,
+            }
+            for p in prefs.ranked
+        ],
+        "diversity_floor": sorted(prefs.diversity_floor),
+        "note": "Learned acquisition preferences (#35): which sources have proven reliable, "
+        "computed read-time from the corroboration history. ACTUATION — biasing acquisition "
+        "toward these within the diversity floor — is a flagged policy decision, not yet enforced.",
+    }
 
 
 def _jload(v: Any) -> list:
@@ -214,6 +342,48 @@ def build_story(
         "languages": languages,
         "hero_image_article_id": _hero_image_article_id(cluster, claims, article_meta),
         "claims": claims,
+    }
+
+
+def build_deeper(
+    cluster: dict[str, Any],
+    claims: list[dict[str, Any]],
+    article_meta: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Tier-3 'go deeper' expanded provenance (#56) — computed server-side from the existing
+    projections (no new fetch yet): a per-originator breakdown with language + primary flags, the
+    cross-language source spread, and the explicit primary-source list. Replaces the Apple client's
+    fabricated ``synthesizeDeeper`` stub with real provenance. Primary-source FETCH + cross-language
+    re-verification (the deepest tier) remains a follow-up.
+    """
+    src_lang: dict[str, str] = {}
+    for c in claims:
+        if c.get("source"):
+            src_lang[c["source"]] = c.get("language") or "en"
+    originators = []
+    for grp in build_originator_groups(cluster.get("originators"), article_meta):
+        srcs = grp["sources"]
+        originators.append(
+            {
+                "sources": srcs,
+                "collapsed": grp["collapsed"],
+                "languages": sorted({src_lang.get(s, "en") for s in srcs}),
+                "has_primary": any(is_primary_source(s) for s in srcs),
+            }
+        )
+    by_lang: dict[str, set] = {}
+    for c in claims:
+        if c.get("source"):
+            by_lang.setdefault(c.get("language") or "en", set()).add(c["source"])
+    languages = [{"language": k, "sources": sorted(v)} for k, v in sorted(by_lang.items())]
+    all_sources = sorted({c.get("source") for c in claims if c.get("source")})
+    return {
+        "originators": originators,
+        "languages": languages,
+        "primary_sources": [s for s in all_sources if is_primary_source(s)],
+        "source_count": len(all_sources),
+        "note": "Server-computed expanded provenance (Tier-3, #56). "
+        "Primary-source fetch + cross-language re-verification is the next tier.",
     }
 
 
@@ -518,19 +688,88 @@ def _make_router() -> Any:
         )
         return [dict(r) for r in rows]
 
+    async def _load_story_graph(pool):
+        """Story-graph projection (#42/#44) for threading. Resilient: if the tables haven't been
+        migrated yet, returns empties so the feed degrades to flat (un-threaded)."""
+        try:
+            ncs = await pool.fetch("select node_id, cluster_id from story_node_clusters")
+            nodes = await pool.fetch("select id, headline from story_nodes")
+            edges = await pool.fetch("select kind, from_id, to_id from story_edges")
+        except Exception:
+            return {}, {}, {}
+        cluster_node = {r["cluster_id"]: r["node_id"] for r in ncs}
+        node_meta = {r["id"]: {"headline": r["headline"]} for r in nodes}
+        node_edges: dict[str, list] = {}
+        for e in edges:
+            node_edges.setdefault(e["from_id"], []).append({"kind": e["kind"], "to": e["to_id"]})
+        return cluster_node, node_meta, node_edges
+
+    async def _load_corroboration_history(pool):
+        """The cluster.corroborated event stream (oldest→newest) — the trajectory accuracy folds
+        (#38). Resilient if the events table is unavailable."""
+        try:
+            rows = await pool.fetch(
+                "select data from events where type = 'cluster.corroborated' order by id"
+            )
+        except Exception:
+            return []
+        return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
+
+    async def _load_denied(pool):
+        """Currently operator-denied sources (#187), folded from admin.source.flagged. Resilient."""
+        try:
+            rows = await pool.fetch(
+                "select data from events where type = 'admin.source.flagged' order by id"
+            )
+        except Exception:
+            return set()
+        return denied_sources(
+            (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in rows
+        )
+
     @router.get("/feed", response_class=JSONResponse)
-    async def feed_endpoint(request: Request):
-        """Served feed: stories ordered by confidence then de-US re-ranked."""
+    async def feed_endpoint(
+        request: Request, topics: str = "", accuracy: int = 0, reputation: int = 0
+    ):
+        """Served feed: stories ordered by confidence then de-US re-ranked.
+
+        ``?topics=`` (comma-separated NL interests) personalises the feed (#50).
+        ``?accuracy=1`` tags each story with its accuracy-axis lifecycle state (#38).
+        ``?reputation=1`` adds a {source: reputation} map (#199). Omitted → the full,
+        un-annotated feed (backward-compatible)."""
         pool = request.app.state.pool
         clusters = await _load_clusters(pool)
         article_meta = await _load_article_meta(pool)
         claims_by_id = await _load_claims_by_id(pool)
         payload = build_feed(clusters, claims_by_id, article_meta)
+        payload = _filter_by_topics(payload, topics)
+        payload = _filter_denied(payload, await _load_denied(pool))  # #187: drop denied-only stories
+        cluster_node, node_meta, node_edges = await _load_story_graph(pool)
+        payload = _thread_payload(payload, cluster_node, node_meta, node_edges)
+        if accuracy or reputation:
+            history = await _load_corroboration_history(pool)
+            if history and accuracy:
+                payload = _annotate_accuracy(
+                    payload, lifecycle_by_fact(history, datetime.now(timezone.utc))
+                )
+            if history and reputation:
+                payload["source_reputation"] = _reputation_map(fold_reputation(history))
         return JSONResponse(payload)
 
+    @router.get("/source-preferences", response_class=JSONResponse)
+    async def source_preferences_endpoint(request: Request):
+        """Learned acquisition preferences (#35): fold the corroboration history into per-source
+        reputation, then rank sources by learned acquisition weight (diversity-floored). Wires the
+        previously-orphaned learn_preferences into a live read; acquisition actuation is flagged."""
+        pool = request.app.state.pool
+        history = await _load_corroboration_history(pool)
+        prefs = learn_preferences(fold_reputation(history))
+        return JSONResponse(_preferences_payload(prefs))
+
     @router.get("/story/{cluster_id}", response_class=JSONResponse)
-    async def story_endpoint(cluster_id: str, request: Request):
-        """Single story detail including full article texts."""
+    async def story_endpoint(cluster_id: str, request: Request, deeper: int = 0):
+        """Single story detail including full article texts. ``?deeper=1`` adds a Tier-3
+        expanded-provenance block (#56)."""
         pool = request.app.state.pool
         row = await pool.fetchrow(
             "select id, fact, sources, originators, independent_originators, "
@@ -544,6 +783,8 @@ def _make_router() -> Any:
         claims_by_id = await _load_claims_by_id(pool)
 
         story = build_story(dict(row), claims_by_id, article_meta)
+        if deeper:  # Tier-3 "go deeper" (#56): server-computed expanded provenance
+            story["deeper"] = build_deeper(dict(row), story["claims"], article_meta)
 
         # Attach full article texts the Apple reader opens
         article_ids = list({c["article_id"] for c in story["claims"] if c.get("article_id")})

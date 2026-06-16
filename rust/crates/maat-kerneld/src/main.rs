@@ -207,6 +207,91 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .await?;
     }
 
+    if ev.typ == "cluster.snapshot" {
+        // Projection-harvester (#39): a point-in-time snapshot of a cluster's corroboration state.
+        // Idempotent per (cluster_id, calendar-day) — a second run the same day upserts, so a
+        // trajectory accrues one row/day without duplicates (the events log has no on-conflict).
+        let d = &ev.data;
+        sqlx::query(
+            "insert into cluster_snapshots \
+             (cluster_id, tenant_id, snapshot_day, fact, independent_originators, has_primary, extremity, confidence, harvested_at) \
+             values ($1, $2, ($3::timestamptz)::date, $4, $5, $6, $7, $8, $3::timestamptz) \
+             on conflict (cluster_id, snapshot_day) do update set \
+               fact = excluded.fact, independent_originators = excluded.independent_originators, \
+               has_primary = excluded.has_primary, extremity = excluded.extremity, \
+               confidence = excluded.confidence, harvested_at = excluded.harvested_at",
+        )
+        .bind(d.get("cluster_id").and_then(|v| v.as_str()))
+        .bind(&ev.tenant_id)
+        .bind(d.get("harvested_at").and_then(|v| v.as_str()))
+        .bind(d.get("fact").and_then(|v| v.as_str()))
+        .bind(d.get("independent_originators").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
+        .bind(d.get("has_primary").and_then(|v| v.as_bool()).unwrap_or(false))
+        .bind(d.get("extremity").and_then(|v| v.as_str()).unwrap_or("notable"))
+        .bind(d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0))
+        .execute(pool)
+        .await?;
+    }
+
+    if ev.typ == "story.graph.rebuilt" {
+        // Story graph (#42/#43/#44, P4): the builder rebuilds the whole graph each run and emits
+        // it as one event. Project atomically — clear this tenant's prior graph, then insert the
+        // nodes, typed edges, node↔cluster threading, and claim↔node links.
+        let d = &ev.data;
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let mut tx = pool.begin().await?;
+        for t in ["story_nodes", "story_edges", "story_node_clusters", "claim_node_links"] {
+            sqlx::query(&format!("delete from {t} where tenant_id = $1"))
+                .bind(&ev.tenant_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for n in d.get("nodes").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            sqlx::query(
+                "insert into story_nodes (id, tenant_id, headline, entity_spine, first_seen, last_updated, cluster_count) \
+                 values ($1, $2, $3, $4, $5, $6, $7) on conflict (id) do update set \
+                   headline = excluded.headline, entity_spine = excluded.entity_spine, \
+                   last_updated = excluded.last_updated, cluster_count = excluded.cluster_count",
+            )
+            .bind(n.get("id").and_then(|v| v.as_str()))
+            .bind(&ev.tenant_id)
+            .bind(n.get("headline").and_then(|v| v.as_str()))
+            .bind(n.get("entity_spine").cloned().map(Json))
+            .bind(n.get("first_seen").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .bind(n.get("last_updated").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .bind(n.get("cluster_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for e in d.get("edges").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            sqlx::query("insert into story_edges (tenant_id, kind, from_id, to_id) values ($1, $2, $3, $4)")
+                .bind(&ev.tenant_id)
+                .bind(e.get("kind").and_then(|v| v.as_str()))
+                .bind(e.get("from_id").and_then(|v| v.as_str()))
+                .bind(e.get("to_id").and_then(|v| v.as_str()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        for nc in d.get("node_clusters").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            sqlx::query("insert into story_node_clusters (tenant_id, node_id, cluster_id) values ($1, $2, $3)")
+                .bind(&ev.tenant_id)
+                .bind(nc.get("node_id").and_then(|v| v.as_str()))
+                .bind(nc.get("cluster_id").and_then(|v| v.as_str()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        for l in d.get("claim_node_links").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            sqlx::query("insert into claim_node_links (tenant_id, claim_id, node_id, cluster_id) values ($1, $2, $3, $4)")
+                .bind(&ev.tenant_id)
+                .bind(l.get("claim_id").and_then(|v| v.as_str()))
+                .bind(l.get("node_id").and_then(|v| v.as_str()))
+                .bind(l.get("cluster_id").and_then(|v| v.as_str()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+    }
+
     // --- Admin / operator-console projections (P8, F3) -------------------------------------
     // Operator fixes are events; we fold them like any other and set `corrected` so the
     // pipeline (claims.classified) will not overwrite the fix on a re-run.

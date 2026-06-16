@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from functools import partial
 from pathlib import Path
@@ -18,9 +19,11 @@ from dotenv import load_dotenv
 
 from maat import prompts
 from maat.bus import connect
-from maat.events import publish
+from maat.config import active_config, pipeline_overrides
+from maat.events import ADMIN_SOURCE_GROUPED, publish
 from maat.pipeline.corroborate import ClaimRow, corroborate
 from maat.pipeline.extremity import rate_extremity
+from maat.pipeline.identity import canonical_source
 
 
 def _cluster_id(claim_ids: list[str]) -> str:
@@ -38,6 +41,25 @@ async def main() -> None:
     rows = await pool.fetch("select id, text, article_id from claims")
     # Resolve the operator's active extremity prompt (P8) before closing the pool.
     extremity_prompt = await prompts.active_text(pool, "extremity", prompts.seed_default("extremity"))
+    # Ownership grouping (#41): fold the operator's admin.source.grouped events (latest per
+    # source) into a {canonical_source: group} map so co-owned outlets collapse to one
+    # independent originator in corroboration instead of inflating the count.
+    grps = await pool.fetch(
+        "select distinct on (data->>'source') data->>'source' s, data->>'group' g "
+        "from events where type = $1 order by data->>'source', id desc",
+        ADMIN_SOURCE_GROUPED,
+    )
+    ownership = {canonical_source(r["s"]): r["g"] for r in grps if r["s"] and r["g"]}
+    # Operator config enactment (#183/#184): the pipeline runs on the PROMOTED thresholds
+    # (sign-off-gated), falling back to code defaults for anything not promoted.
+    promoted = await pool.fetch(
+        "select data from events where type = 'admin.config.promoted' order by id"
+    )
+    overrides = pipeline_overrides(
+        active_config(
+            (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in promoted
+        )
+    )
     # The clusters currently on show — so after recompute we can RETIRE only the ones that no
     # longer exist, instead of wiping the projection up front. (The recompute below takes
     # minutes — clustering + a per-cluster extremity rating — and deleting first left the feed
@@ -49,7 +71,10 @@ async def main() -> None:
         ClaimRow(id=str(r["id"]), text=r["text"], article_id=r["article_id"], source=src.get(r["article_id"], ""))
         for r in rows
     ]
-    results = corroborate(claims, bodies, extremity_of=partial(rate_extremity, prompt=extremity_prompt))
+    results = corroborate(
+        claims, bodies, extremity_of=partial(rate_extremity, prompt=extremity_prompt),
+        ownership=ownership, **overrides,
+    )
 
     # Upsert the new clusters, then retire the superseded ones — both through the kernel's own
     # events (it upserts on cluster.corroborated, deletes on cluster.removed), so the single

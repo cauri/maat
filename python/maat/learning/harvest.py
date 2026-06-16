@@ -8,16 +8,15 @@ so re-running the script on the same calendar day emits the same stream_ids and 
 treats the second publish as a no-op (same stream_id, event already in log).
 """
 
-# follow-up: register type 'cluster.snapshot' in events.py + kernel projection
-
 from __future__ import annotations
 
 import hashlib
 from datetime import datetime
 from typing import Any
 
-# Local event-type constant — not yet in events.py (see follow-up comment above).
-CLUSTER_SNAPSHOT = "cluster.snapshot"
+# Registered event type; maat-kerneld folds cluster.snapshot into the cluster_snapshots
+# projection, idempotent per (cluster_id, calendar-day) (#39).
+from maat.events import CLUSTER_SNAPSHOT
 
 
 def _snapshot_id(cluster_id: str, harvest_date: str) -> str:

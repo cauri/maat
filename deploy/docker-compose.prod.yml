@@ -120,6 +120,12 @@ services:
           sleep "$${MAAT_TICK_DRAIN}";
           echo "[clock] corroborate (recompute clusters)";
           uv run --no-dev python -m maat.agents.corroborate_agent || echo "[clock] corroborate error";
+          echo "[clock] story-graph (thread clusters into event-nodes, #42)";
+          uv run --no-dev python -m maat.agents.story_graph_agent || echo "[clock] story-graph error";
+          echo "[clock] harvest (snapshot clusters for truth-over-time, #39)";
+          uv run --no-dev python scripts/harvest.py || echo "[clock] harvest error";
+          echo "[clock] triage (route submitted feedback to review/auto-fix, #58)";
+          uv run --no-dev python -m maat.agents.triage || echo "[clock] triage error";
           echo "[clock] tick done; sleeping $${MAAT_TICK_INTERVAL}s";
           sleep "$${MAAT_TICK_INTERVAL}";
         done
