@@ -44,7 +44,7 @@ async def _run() -> None:
         page = await ac.get("/")
         assert page.status_code == 200
         assert "Know which news to trust" in page.text  # the value headline rendered
-        assert "Get early access" in page.text  # access CTA, not a store/waitlist tease
+        assert "Download on the" in page.text and "App Store" in page.text  # store button restored
         # The "how" and the coming-soon/waitlist messaging are intentionally gone:
         assert "Corroboration over spread" not in page.text
         assert "Coming soon" not in page.text
@@ -52,11 +52,12 @@ async def _run() -> None:
         assert 'id="beta"' in page.text  # the beta opt-in checkbox is present
         assert "beta tester" in page.text
         assert 'href="/privacy"' in page.text  # consent line links the privacy policy
+        assert 'id="consent"' in page.text and "Accept" in page.text  # GDPR consent banner
 
-        # GDPR legal pages serve and carry the substance (cookieless, GDPR, rights).
+        # GDPR legal pages serve and carry the substance (GDPR, rights, consent-based analytics).
         privacy = await ac.get("/privacy")
         assert privacy.status_code == 200 and "Privacy Policy" in privacy.text
-        assert "GDPR" in privacy.text and "no cookies" in privacy.text
+        assert "GDPR" in privacy.text and "third-party trackers" in privacy.text
         imprint = await ac.get("/imprint")
         assert imprint.status_code == 200 and "Legal notice" in imprint.text
 

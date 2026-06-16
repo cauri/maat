@@ -53,13 +53,17 @@ header.bar .wrap{display:flex;align-items:center;justify-content:space-between;h
 .bar .pill{display:none}
 @media(min-width:680px){.bar .pill{display:inline-flex}}
 
-/* primary button */
-.cta{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:#fff;
+/* App Store button */
+.appstore{display:inline-flex;align-items:center;gap:10px;background:var(--ink);color:#fff;
   text-decoration:none;border:0;cursor:pointer;font:600 15px/1 var(--sans);
-  padding:14px 22px;border-radius:12px;transition:transform .12s ease,box-shadow .12s ease;
+  padding:13px 20px;border-radius:12px;transition:transform .12s ease,box-shadow .12s ease;
   box-shadow:0 1px 2px rgba(0,0,0,.18)}
-.cta:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.16)}
-.cta.pill{padding:10px 16px;border-radius:10px;font-size:14px}
+.appstore:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.16)}
+.appstore .apple{width:18px;height:18px;flex:none}
+.appstore small{display:block;font-size:10px;font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;opacity:.72;margin-bottom:2px}
+.appstore b{font-size:15px;font-weight:600}
+.appstore.pill{padding:9px 16px;border-radius:10px}
 .cta-note{margin:12px 0 0;font-size:13px;color:var(--mut)}
 .cta-note b{color:var(--ink);font-weight:600}
 
@@ -145,6 +149,18 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
   font-size:22px;line-height:1;cursor:pointer;padding:6px}
 .modal-wrap{position:relative}
 .tiny{font-size:12px;color:var(--mut);margin-top:14px}
+
+/* consent / cookie banner */
+.consent{position:fixed;left:0;right:0;bottom:0;z-index:60;background:var(--card);
+  border-top:1px solid var(--line);box-shadow:0 -10px 34px -22px rgba(40,32,12,.55)}
+.consent[hidden]{display:none}
+.consent .wrap{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:14px 22px}
+.consent p{margin:0;flex:1 1 300px;font-size:13.5px;line-height:1.5;color:#46442f}
+.consent p a{color:var(--gold)}
+.consent .btns{display:flex;gap:8px;flex:none}
+.consent button{font:600 14px/1 var(--sans);padding:11px 18px;border-radius:10px;cursor:pointer;border:1px solid var(--line)}
+.consent .accept{background:var(--ink);color:#fff;border-color:var(--ink)}
+.consent .decline{background:#fff;color:var(--ink)}
 </style>
 </head>
 <body>
@@ -159,7 +175,10 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
     </a>
     <nav>
       <a href="#why">Why Maat</a>
-      <button class="cta pill" data-cta="nav" type="button">Get early access</button>
+      <button class="appstore pill" data-cta="ios" type="button">
+        <svg class="apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C73.3 141.2 24 184.8 24 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+        <b>Download</b>
+      </button>
     </nav>
   </div>
 </header>
@@ -172,8 +191,11 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
           <p class="kicker">A veracity-weighted news feed</p>
           <h1>Know which news to trust.</h1>
           <p class="lede">Maat scores how reliable each source is — built from how accurate their reporting proves over time — and puts that signal on every story. Read the news knowing what stands up.</p>
-          <button class="cta" data-cta="hero" type="button">Get early access</button>
-          <p class="cta-note"><b>For iPhone &amp; Mac.</b> Be among the first to read it.</p>
+          <button class="appstore" data-cta="ios" type="button">
+            <svg class="apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C73.3 141.2 24 184.8 24 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+            <span><small>Download on the</small><b>App Store</b></span>
+          </button>
+          <p class="cta-note"><b>iPhone &amp; Mac.</b></p>
         </div>
         <div>
           <div class="demo" aria-hidden="true">
@@ -229,8 +251,11 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
   <section class="band close-cta">
     <div class="wrap">
       <h2>Read the news knowing what to trust.</h2>
-      <button class="cta" data-cta="footer" type="button">Get early access</button>
-      <p class="cta-note"><b>For iPhone &amp; Mac.</b> Be among the first to read it.</p>
+      <button class="appstore" data-cta="ios" type="button">
+        <svg class="apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C73.3 141.2 24 184.8 24 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+        <span><small>Download on the</small><b>App Store</b></span>
+      </button>
+      <p class="cta-note"><b>iPhone &amp; Mac.</b></p>
     </div>
   </section>
 </main>
@@ -263,19 +288,29 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
         <path d="M20 4C11 5 6 10 5 18c5 1 9-1 12-5M9 14c2-3 5-5 9-6M5 18l-2 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
       <h3>Get early access</h3>
-      <p>Leave your email and we'll send your invitation to Maat.</p>
+      <p>Maat isn't on the App Store just yet. Leave your email and we'll send you the link the moment it's live.</p>
       <form class="notify" id="notify" novalidate>
         <input type="email" name="email" placeholder="you@example.com" autocomplete="email" required>
-        <button type="submit">Request access</button>
+        <button type="submit">Notify me</button>
       </form>
       <label class="optin"><input type="checkbox" id="beta">
         I'd also like to be a beta tester and help shape Maat before launch.</label>
       <p class="note" id="notify-note"></p>
-      <p class="tiny">We'll only use your email to get you access. Nothing else. By submitting you agree to our
+      <p class="tiny">We'll only use your email to send you that link. Nothing else. By submitting you agree to our
         <a href="/privacy" target="_blank" rel="noopener" style="color:var(--gold)">Privacy Policy</a>.</p>
     </div>
   </div>
 </dialog>
+
+<div class="consent" id="consent" hidden>
+  <div class="wrap">
+    <p>We use minimal, first-party analytics to understand how people find Maat — no third-party trackers, no ads. Your choice. <a href="/privacy" target="_blank" rel="noopener">Privacy&nbsp;Policy</a>.</p>
+    <div class="btns">
+      <button class="decline" id="consent-no" type="button">Decline</button>
+      <button class="accept" id="consent-yes" type="button">Accept</button>
+    </div>
+  </div>
+</div>
 
 <script>
 (function(){
@@ -299,11 +334,21 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
         body: JSON.stringify(body), keepalive:true});
     }catch(e){ return Promise.resolve(null); }
   }
-  send("/track/view", ctx());
+  // Consent (GDPR): record first-party analytics only if the visitor accepts. The only thing we
+  // store on the device is that choice. Email submissions are separate (the visitor opts in).
+  function consentVal(){ try{ return localStorage.getItem("maat_consent"); }catch(e){ return null; } }
+  function analyticsOn(){ return consentVal() === "yes"; }
+  var banner = document.getElementById("consent");
+  function setConsent(v){ try{ localStorage.setItem("maat_consent", v); }catch(e){} if(banner){ banner.hidden = true; } }
+  if(consentVal() === "yes"){ send("/track/view", ctx()); }
+  else if(consentVal() === null && banner){ banner.hidden = false; }
+  var cYes = document.getElementById("consent-yes"), cNo = document.getElementById("consent-no");
+  if(cYes){ cYes.addEventListener("click", function(){ setConsent("yes"); send("/track/view", ctx()); }); }
+  if(cNo){ cNo.addEventListener("click", function(){ setConsent("no"); }); }
 
   var dlg = document.getElementById("access");
   function openAccess(where){
-    send("/track/click", ctx({platform: where || "hero"}));
+    if(analyticsOn()){ send("/track/click", ctx({platform: where || "hero"})); }
     if(dlg && dlg.showModal){ try{ dlg.showModal(); }catch(e){} }
   }
   [].forEach.call(document.querySelectorAll("[data-cta]"), function(b){
@@ -330,7 +375,7 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
         return r ? r.json() : {ok:true};
       }).then(function(j){
         if(j && j.ok){
-          form.outerHTML = "<p class='thanks'>You're on the list — we'll be in touch with your access.</p>";
+          form.outerHTML = "<p class='thanks'>Thanks — we'll send you the link the moment Maat is live.</p>";
         } else {
           note.textContent = (j && j.error) || "Something went wrong — try again."; note.className = "note err";
         }
