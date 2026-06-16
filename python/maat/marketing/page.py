@@ -4,20 +4,26 @@ Embedded as a string for the same reason the console keeps `_DOC` inline: it shi
 package, no static-file mounting or build step. The page is first-party and cookieless — the
 only network calls it makes are POSTs back to this same service (/track/view, /track/click,
 /notify). No third-party trackers, no ad scripts (D9 — EU-sovereign, privacy by default).
+
+Copy rule (cauri): say WHAT Maat does — it scores how reliable each source is, built from how
+accurate their reporting proves over time, and surfaces that on every story — speaking to the
+value for the reader. Never say HOW (corroboration, independent originators, primary sources,
+the anti-spread weighting): that method is private and describing it would help bad actors game
+it. Maat reads the news in every language; never claim a fixed short list.
 """
 
-# The visitor funnel is recorded by the inline script at the bottom: a page view on load, a
-# "Download on the App Store" tap (which opens the coming-soon dialog), and an optional
-# launch-notify email. Each posts JSON to this service; the service publishes the event.
+# The visitor funnel is recorded by the inline script at the bottom: a page view on load, an
+# early-access tap (which opens the access dialog), and an optional email + beta opt-in. Each
+# posts JSON to this service; the service publishes the event.
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Maat — news weighted by truth, not volume</title>
-<meta name="description" content="Maat reads across the open web in English, Portuguese and French, scores how well each story holds up — corroboration over spread — and attaches a confidence read to everything it surfaces.">
-<meta property="og:title" content="Maat — news weighted by truth, not volume">
-<meta property="og:description" content="Corroboration over spread. A confidence read on every story. A genuinely wider lens.">
+<title>Maat — know which news to trust</title>
+<meta name="description" content="Maat scores how reliable each news source is — built from how accurate their reporting proves over time — and puts that signal on every story, so you can read the news knowing what stands up.">
+<meta property="og:title" content="Maat — know which news to trust">
+<meta property="og:description" content="A reliability score on every source, earned by being accurate over time. Read the news knowing what holds up — in every language, from across the world.">
 <meta property="og:type" content="website">
 <style>
 :root{
@@ -47,20 +53,15 @@ header.bar .wrap{display:flex;align-items:center;justify-content:space-between;h
 .bar .pill{display:none}
 @media(min-width:680px){.bar .pill{display:inline-flex}}
 
-/* buttons */
-.appstore{display:inline-flex;align-items:center;gap:10px;background:var(--ink);color:#fff;
+/* primary button */
+.cta{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:#fff;
   text-decoration:none;border:0;cursor:pointer;font:600 15px/1 var(--sans);
-  padding:13px 20px;border-radius:12px;transition:transform .12s ease,box-shadow .12s ease;
+  padding:14px 22px;border-radius:12px;transition:transform .12s ease,box-shadow .12s ease;
   box-shadow:0 1px 2px rgba(0,0,0,.18)}
-.appstore:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.16)}
-.appstore .apple{width:18px;height:18px;flex:none}
-.appstore small{display:block;font-size:10px;font-weight:600;letter-spacing:.08em;
-  text-transform:uppercase;opacity:.72;margin-bottom:2px}
-.appstore b{font-size:15px;font-weight:600}
-.appstore.pill{padding:9px 16px;border-radius:10px}
-.ghost{display:inline-block;margin-top:14px;color:var(--mut);font-size:14px;
-  text-decoration:underline;text-decoration-color:var(--line);cursor:pointer}
-.ghost:hover{color:var(--ink)}
+.cta:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.16)}
+.cta.pill{padding:10px 16px;border-radius:10px;font-size:14px}
+.cta-note{margin:12px 0 0;font-size:13px;color:var(--mut)}
+.cta-note b{color:var(--ink);font-weight:600}
 
 /* hero */
 .hero{padding:64px 0 28px}
@@ -70,32 +71,29 @@ header.bar .wrap{display:flex;align-items:center;justify-content:space-between;h
   color:var(--gold);margin:0 0 18px}
 h1{font-family:var(--serif);font-weight:600;font-size:clamp(34px,5.2vw,58px);line-height:1.04;
   letter-spacing:-.015em;margin:0 0 18px}
-.lede{font-size:clamp(17px,2.1vw,20px);color:#3a382f;margin:0 0 26px;max-width:33ch}
-.cta-note{margin:12px 0 0;font-size:13px;color:var(--mut)}
-.cta-note b{color:var(--ink);font-weight:600}
+.lede{font-size:clamp(17px,2.1vw,20px);color:#3a382f;margin:0 0 26px;max-width:34ch}
 
 /* hero story-card mock */
 .demo{background:var(--card);border:1px solid var(--line);border-radius:18px;
   padding:22px 22px 18px;box-shadow:0 24px 60px -30px rgba(40,32,12,.45);max-width:430px}
-.demo .src{font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--mut)}
-.demo h3{font-family:var(--serif);font-weight:600;font-size:21px;line-height:1.22;margin:7px 0 14px}
+.demo .src{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;
+  letter-spacing:.07em;text-transform:uppercase;color:var(--mut)}
+.demo .src .score{color:var(--green);background:var(--green-wash);padding:2px 8px;border-radius:20px}
+.demo h3{font-family:var(--serif);font-weight:600;font-size:21px;line-height:1.22;margin:9px 0 14px}
 .conf{display:flex;align-items:center;gap:10px;margin:0 0 4px}
 .conf .pct{font-weight:700;font-variant-numeric:tabular-nums;color:var(--green);min-width:42px}
-/* the confidence meter — a distinct class from header.bar so it can't collapse the sticky header */
+/* the reliability meter — a distinct class from header.bar so it can't collapse the sticky header */
 .meter{flex:1;height:8px;background:#ece7da;border-radius:6px;overflow:hidden}
 .meter i{display:block;height:100%;width:92%;background:var(--green);border-radius:6px}
 .conf .lab{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
   color:var(--green);background:var(--green-wash);padding:2px 9px;border-radius:20px}
-.demo .why{font-size:13px;color:var(--mut);margin:12px 0 14px}
-.chips{display:flex;flex-wrap:wrap;gap:6px}
-.chip{font-size:12px;font-weight:600;padding:3px 10px;border-radius:20px;background:#f1ede2;color:#55513f}
-.chip.primary{background:var(--gold-wash);color:#7a5618}
+.demo .why{font-size:13px;color:var(--mut);margin:12px 0 2px}
 
 /* section rhythm */
 section.band{padding:62px 0;border-top:1px solid var(--line)}
 .eyebrow{font-size:13px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--gold);margin:0 0 12px;text-align:center}
 .band h2{font-family:var(--serif);font-weight:600;font-size:clamp(26px,3.6vw,38px);line-height:1.12;
-  letter-spacing:-.01em;margin:0 auto 12px;text-align:center;max-width:18ch}
+  letter-spacing:-.01em;margin:0 auto 12px;text-align:center;max-width:20ch}
 .band .sub{text-align:center;color:var(--mut);max-width:60ch;margin:0 auto 8px;font-size:17px}
 
 /* pillars */
@@ -108,19 +106,6 @@ section.band{padding:62px 0;border-top:1px solid var(--line)}
 .pillar h3{font-family:var(--serif);font-weight:600;font-size:21px;letter-spacing:-.01em;margin:0 0 7px}
 .pillar p{margin:0;color:#42402f;font-size:15.5px;line-height:1.55}
 .pillar.span2{grid-column:1/-1}
-
-/* spread explainer */
-.spread{display:grid;grid-template-columns:1fr;gap:26px;align-items:center;margin-top:36px}
-@media(min-width:820px){.spread{grid-template-columns:1fr 1fr;gap:48px}}
-.spread .lead{font-family:var(--serif);font-size:22px;line-height:1.4;letter-spacing:-.005em}
-.spread .lead b{color:var(--gold)}
-.collapse{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
-.echo{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px}
-.echo span{width:13px;height:13px;border-radius:3px;background:#e7e1d3}
-.echo span.o{background:var(--gold)}
-.collapse .row{display:flex;align-items:center;justify-content:space-between;font-size:14px;color:var(--mut);
-  padding-top:12px;border-top:1px dashed var(--line)}
-.collapse .row b{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}
 
 /* closing */
 .close-cta{text-align:center}
@@ -174,11 +159,7 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
     </a>
     <nav>
       <a href="#why">Why Maat</a>
-      <a href="#how">How it judges</a>
-      <button class="appstore pill" data-cta="ios" type="button">
-        <svg class="apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C73.3 141.2 24 184.8 24 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
-        <b>Download</b>
-      </button>
+      <button class="cta pill" data-cta="nav" type="button">Get early access</button>
     </nav>
   </div>
 </header>
@@ -189,30 +170,21 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
       <div class="grid">
         <div>
           <p class="kicker">A veracity-weighted news feed</p>
-          <h1>News weighted by truth, not volume.</h1>
-          <p class="lede">Maat reads across the open web in English, Portuguese and French, scores how well each story actually holds up — corroboration over spread — and attaches a confidence read to everything it surfaces.</p>
-          <button class="appstore" data-cta="ios" type="button">
-            <svg class="apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C73.3 141.2 24 184.8 24 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
-            <span><small>Download on the</small><b>App Store</b></span>
-          </button>
-          <p class="cta-note"><b>iPhone &amp; Mac.</b> Coming soon — <span class="ghost" data-cta="mac">join the launch list</span>.</p>
+          <h1>Know which news to trust.</h1>
+          <p class="lede">Maat scores how reliable each source is — built from how accurate their reporting proves over time — and puts that signal on every story. Read the news knowing what stands up.</p>
+          <button class="cta" data-cta="hero" type="button">Get early access</button>
+          <p class="cta-note"><b>For iPhone &amp; Mac.</b> Be among the first to read it.</p>
         </div>
         <div>
           <div class="demo" aria-hidden="true">
-            <div class="src">Corroborated · 6 languages</div>
+            <div class="src">Le Monde <span class="score">96% reliable source</span></div>
             <h3>Coalition agrees framework to slow cross-border arms flow</h3>
             <div class="conf">
               <span class="pct">92%</span>
               <span class="meter"><i></i></span>
-              <span class="lab">Well corroborated</span>
+              <span class="lab">Trust this</span>
             </div>
-            <div class="why">3 independent originators · 1 primary source · weighed against prior</div>
-            <div class="chips">
-              <span class="chip primary">Filed document · primary</span>
-              <span class="chip">AFP</span>
-              <span class="chip">Folha de S.Paulo</span>
-              <span class="chip">Le Monde</span>
-            </div>
+            <div class="why">Scored on this source's track record of accurate reporting.</div>
           </div>
         </div>
       </div>
@@ -222,49 +194,33 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
   <section class="band" id="why">
     <div class="wrap">
       <p class="eyebrow">Why Maat</p>
-      <h2>Built to trust corroborated truth over loud consensus.</h2>
-      <p class="sub">Most feeds rank by reach. Maat asks a different question of every story: how well does it actually hold up?</p>
+      <h2>The news, with a reliability score you can see.</h2>
+      <p class="sub">Most feeds rank by reach. Maat asks the only question that matters of every story: can you trust it?</p>
       <div class="pillars">
         <div class="pillar">
           <div class="n">1</div>
-          <h3>Loud isn't true</h3>
-          <p>Maat counts how many <em>independent</em> sources stand a story up. Wire reprints, citation cascades and same-owner outlets collapse to a single voice — thirty echoes of one unverified figure count as one thin thread, not thirty.</p>
+          <h3>A reliability score on every source</h3>
+          <p>Maat rates how much you can trust each outlet — and, soon, the individual writers and contributors behind a story. No more guessing who's worth believing.</p>
         </div>
         <div class="pillar">
           <div class="n">2</div>
-          <h3>A confidence read on every story</h3>
-          <p>Not a black box, and not a feed someone curated for you. Every story carries a confidence read you can see — and open, to find exactly why it's rated the way it is.</p>
+          <h3>Reputation is earned, not assumed</h3>
+          <p>Sources earn their score by being right. The ones with a track record of accurate reporting rise; the ones that keep getting it wrong fall. Trust follows the truth — over time, not the loudest moment.</p>
         </div>
         <div class="pillar">
           <div class="n">3</div>
-          <h3>A genuinely wider lens</h3>
-          <p>Most apps quietly centre the US and the Anglo-American press. Maat weights against that, drawing on sources across languages and regions, so world news reads like the world — not one corner of it.</p>
+          <h3>A trust read on every story</h3>
+          <p>Every story carries a clear, visible signal of how much it holds up — so you can tell at a glance what to rely on, instead of guessing or taking it on faith.</p>
         </div>
         <div class="pillar">
           <div class="n">4</div>
-          <h3>Sources earn trust by being right</h3>
-          <p>Maat tracks whether sources tell the truth over time — judged against what actually proved out, never against the consensus of the moment. The outlet that breaks a true story early is rewarded, not punished for leaving the herd.</p>
+          <h3>The whole world, every language</h3>
+          <p>Maat reads the news in every language, from sources across the globe — so you see the full picture, not just the English-language press or one corner of the world.</p>
         </div>
         <div class="pillar span2">
           <div class="n">5</div>
           <h3>Yours, and private</h3>
-          <p>Tell Maat your topics in plain language. It tunes the feed and re-ranks to your taste on your own device — your reading stays with you. Built in Europe, with no trackers and no ads.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="band" id="how">
-    <div class="wrap">
-      <p class="eyebrow">How it judges</p>
-      <h2>Corroboration over spread.</h2>
-      <div class="spread">
-        <p class="lead">A hundred outlets reprinting one wire story isn't a hundred witnesses. It's <b>one</b>. Maat finds the independent originators behind a claim and weights primary sources — a named official, a filed document, on-the-ground reporting — above any amount of secondary repetition.</p>
-        <div class="collapse">
-          <div class="echo">
-            <span class="o"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
-          </div>
-          <div class="row"><span>30 outlets carried it</span><b>1 original thread</b></div>
+          <p>Tell Maat your interests in plain language; it tunes your feed to your taste on your own device — your reading stays with you. Built in Europe, with no trackers and no ads.</p>
         </div>
       </div>
     </div>
@@ -272,12 +228,9 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
 
   <section class="band close-cta">
     <div class="wrap">
-      <h2>Read the news by how well it holds up.</h2>
-      <button class="appstore" data-cta="ios" type="button">
-        <svg class="apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C73.3 141.2 24 184.8 24 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
-        <span><small>Download on the</small><b>App Store</b></span>
-      </button>
-      <p class="cta-note"><b>iPhone &amp; Mac.</b> Coming soon — <span class="ghost" data-cta="mac">join the launch list</span>.</p>
+      <h2>Read the news knowing what to trust.</h2>
+      <button class="cta" data-cta="footer" type="button">Get early access</button>
+      <p class="cta-note"><b>For iPhone &amp; Mac.</b> Be among the first to read it.</p>
     </div>
   </section>
 </main>
@@ -291,34 +244,34 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
         </svg>
         Maat
       </a>
-      <div class="meta">Ma'at — the ancient Egyptian principle of truth, balance and order, whose feather a heart was weighed against. The claim, not the headline, is our unit.</div>
+      <div class="meta">Ma'at — the ancient Egyptian principle of truth, balance and order, whose feather a heart was weighed against. Trust, weighed honestly, is our whole purpose.</div>
     </div>
     <div class="meta">
       Built in Europe<span class="dot">·</span>No trackers, no ads<br>
-      English<span class="dot">·</span>Português<span class="dot">·</span>Français<br>
+      Every language, from across the world<br>
       <a href="/privacy">Privacy</a><span class="dot">·</span><a href="/imprint">Legal notice</a><br>
       &copy; 2026 Maat
     </div>
   </div>
 </footer>
 
-<dialog id="soon" aria-label="Coming soon">
+<dialog id="access" aria-label="Get early access">
   <div class="modal-wrap">
     <button class="x" data-close type="button" aria-label="Close">&times;</button>
     <div class="modal">
       <svg class="feather" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="color:var(--gold)">
         <path d="M20 4C11 5 6 10 5 18c5 1 9-1 12-5M9 14c2-3 5-5 9-6M5 18l-2 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <h3>Coming soon</h3>
-      <p>Maat is in private development. Want us to tell you the moment it's on the App Store?</p>
+      <h3>Get early access</h3>
+      <p>Leave your email and we'll send your invitation to Maat.</p>
       <form class="notify" id="notify" novalidate>
         <input type="email" name="email" placeholder="you@example.com" autocomplete="email" required>
-        <button type="submit">Notify me</button>
+        <button type="submit">Request access</button>
       </form>
       <label class="optin"><input type="checkbox" id="beta">
-        I’d also like to be a beta tester and help shape the app before launch.</label>
+        I'd also like to be a beta tester and help shape Maat before launch.</label>
       <p class="note" id="notify-note"></p>
-      <p class="tiny">One email, when it launches. Nothing else. By submitting you agree to our
+      <p class="tiny">We'll only use your email to get you access. Nothing else. By submitting you agree to our
         <a href="/privacy" target="_blank" rel="noopener" style="color:var(--gold)">Privacy Policy</a>.</p>
     </div>
   </div>
@@ -328,7 +281,6 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
 (function(){
   var V = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now();
   var params = new URLSearchParams(location.search);
-  var lastPlatform = "ios";
   function ctx(extra){
     var d = {
       path: location.pathname,
@@ -349,14 +301,13 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
   }
   send("/track/view", ctx());
 
-  var dlg = document.getElementById("soon");
-  function openSoon(platform){
-    lastPlatform = platform || "ios";
-    send("/track/click", ctx({platform: lastPlatform}));
+  var dlg = document.getElementById("access");
+  function openAccess(where){
+    send("/track/click", ctx({platform: where || "hero"}));
     if(dlg && dlg.showModal){ try{ dlg.showModal(); }catch(e){} }
   }
   [].forEach.call(document.querySelectorAll("[data-cta]"), function(b){
-    b.addEventListener("click", function(e){ e.preventDefault(); openSoon(b.getAttribute("data-cta")); });
+    b.addEventListener("click", function(e){ e.preventDefault(); openAccess(b.getAttribute("data-cta")); });
   });
   [].forEach.call(document.querySelectorAll("[data-close]"), function(b){
     b.addEventListener("click", function(){ if(dlg) dlg.close(); });
@@ -375,11 +326,11 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
         note.textContent = "Please enter a valid email."; note.className = "note err"; return;
       }
       note.textContent = "Sending…"; note.className = "note";
-      send("/notify", ctx({email: email, platform: lastPlatform, beta: !!(betaBox && betaBox.checked)})).then(function(r){
+      send("/notify", ctx({email: email, beta: !!(betaBox && betaBox.checked)})).then(function(r){
         return r ? r.json() : {ok:true};
       }).then(function(j){
         if(j && j.ok){
-          form.outerHTML = "<p class='thanks'>Thanks — we'll let you know the moment it's live.</p>";
+          form.outerHTML = "<p class='thanks'>You're on the list — we'll be in touch with your access.</p>";
         } else {
           note.textContent = (j && j.error) || "Something went wrong — try again."; note.className = "note err";
         }
