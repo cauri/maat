@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from functools import partial
 from pathlib import Path
@@ -18,6 +19,7 @@ from dotenv import load_dotenv
 
 from maat import prompts
 from maat.bus import connect
+from maat.config import active_config, pipeline_overrides
 from maat.events import ADMIN_SOURCE_GROUPED, publish
 from maat.pipeline.corroborate import ClaimRow, corroborate
 from maat.pipeline.extremity import rate_extremity
@@ -48,6 +50,16 @@ async def main() -> None:
         ADMIN_SOURCE_GROUPED,
     )
     ownership = {canonical_source(r["s"]): r["g"] for r in grps if r["s"] and r["g"]}
+    # Operator config enactment (#183/#184): the pipeline runs on the PROMOTED thresholds
+    # (sign-off-gated), falling back to code defaults for anything not promoted.
+    promoted = await pool.fetch(
+        "select data from events where type = 'admin.config.promoted' order by id"
+    )
+    overrides = pipeline_overrides(
+        active_config(
+            (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in promoted
+        )
+    )
     # Batch recompute: reset the clusters projection so a re-run REPLACES rather than
     # accumulates. Cluster ids are keyed on their claim_ids, so a changed claim set (or
     # changed collapse) would otherwise leave orphan clusters behind.
@@ -59,7 +71,8 @@ async def main() -> None:
         for r in rows
     ]
     results = corroborate(
-        claims, bodies, extremity_of=partial(rate_extremity, prompt=extremity_prompt), ownership=ownership
+        claims, bodies, extremity_of=partial(rate_extremity, prompt=extremity_prompt),
+        ownership=ownership, **overrides,
     )
 
     nc = await connect()

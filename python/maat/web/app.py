@@ -456,7 +456,14 @@ async def config_view(ok: str = "") -> str:
              "at": r["created_at"]}
         )
     replay = await replay_for_overrides(pool, overrides)
-    return _doc(_config_page(overrides, replay, history), "config", "config", flash=ok)
+    # Active (promoted) config — what the pipeline actually reads now (#183/#184).
+    promoted_rows = await pool.fetch(
+        "select data from events where type = $1 order by id", events.ADMIN_CONFIG_PROMOTED
+    )
+    active = config.active_config(
+        (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in promoted_rows
+    )
+    return _doc(_config_page(overrides, replay, history, active), "config", "config", flash=ok)
 
 
 @app.post("/config/set")
@@ -472,6 +479,26 @@ async def config_set(key: str = Form(...), value: str = Form(...), reason: str =
         msg = "Saved as a suggestion. Nothing changed live until it's reviewed." if pub else _BUS_DOWN
     else:
         msg = "No change — pick a setting and enter a value."
+    return _redirect("/config", msg)
+
+
+@app.post("/config/promote")
+async def config_promote(key: str = Form(...), value: str = Form(...), reason: str = Form("")):
+    # #184 — sign off a proposed override into the LIVE pipeline (admin.config.promoted, which the
+    # corroborate agent folds via config.active_config). Only enactable knobs (those the pipeline
+    # actually reads today) can be promoted; model routing / weights / tier cut-points aren't wired.
+    if key not in config._ENACTABLE or not value.strip():
+        return _redirect("/config", "That setting isn't wired into the pipeline yet — can't promote.")
+    pub = await _publish(
+        events.ADMIN_CONFIG_PROMOTED,
+        key,
+        events.admin_event(key, reason=reason, key=key, value=value.strip()),
+    )
+    msg = (
+        f"Promoted — {key} = {value.strip()} is now live (takes effect on the next corroboration pass)."
+        if pub
+        else _BUS_DOWN
+    )
     return _redirect("/config", msg)
 
 
@@ -2256,7 +2283,10 @@ def _knob_input(k: dict) -> str:
     return f'<input type="number" name="value" step="0.01" min="0" value="{html.escape(cur)}">'
 
 
-def _config_page(overrides: dict, replay: dict | None = None, history: dict | None = None) -> str:
+def _config_page(
+    overrides: dict, replay: dict | None = None, history: dict | None = None,
+    active: dict | None = None,
+) -> str:
     """F5 — render the knob registry grouped, with live defaults + pending proposals.
 
     For a pending weight proposal the A/B-on-replay impact (#123) is shown inline, plus a revert
@@ -2281,12 +2311,24 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
                 else _badge("minor", "own", "A lower-stakes setting")
             )
             ov = overrides.get(k["key"])
+            live_val = (active or {}).get(k["key"])
+            applied = False
             ov_html = ""
+            if live_val is not None:  # #184: what the pipeline actually uses now
+                ov_html += (
+                    f'<div class="ovr">live → <b>{html.escape(str(live_val))}</b> '
+                    '<span class="mut sm">promoted · the pipeline uses this</span></div>'
+                )
             if ov:
+                try:
+                    applied = live_val is not None and float(ov["value"]) == float(live_val)
+                except (TypeError, ValueError):
+                    applied = live_val is not None and str(ov["value"]) == str(live_val)
+                state = "applied (live)" if applied else "not applied yet"
                 extra = f' · {html.escape(ov["reason"])}' if ov.get("reason") else ""
-                ov_html = (
+                ov_html += (
                     f'<div class="ovr">suggested → <b>{html.escape(ov["value"])}</b> '
-                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · not applied yet</span></div>'
+                    f'<span class="mut sm">{ov["at"]:%Y-%m-%d %H:%M}{extra} · {state}</span></div>'
                 )
                 ov_html += _replay_block((replay or {}).get(k["key"]))
             ov_html += _knob_history_block(k["key"], history)
@@ -2296,6 +2338,15 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
                 '<button title="Re-propose the built-in default for this setting (logged; still '
                 'needs sign-off to go live)">Revert to default</button></form>'
             )
+            promote = ""
+            if ov and k["key"] in config._ENACTABLE and not applied:
+                promote = (
+                    '<form class="inline" method="post" action="/config/promote">'
+                    f'<input type="hidden" name="key" value="{html.escape(k["key"])}">'
+                    f'<input type="hidden" name="value" value="{html.escape(ov["value"])}">'
+                    '<button title="Sign off: apply the suggested value to the live pipeline now.">'
+                    'Promote to live</button></form>'
+                )
             tip = (
                 f'<span class="tip" data-tip="{html.escape(k["help"])}">i</span>'
                 if k.get("help") else ""
@@ -2311,7 +2362,7 @@ def _config_page(overrides: dict, replay: dict | None = None, history: dict | No
                 f'{_knob_input(k)}'
                 '<input class="reason" name="reason" placeholder="reason (optional)">'
                 '<button title="Records your suggestion. Nothing changes live until reviewed.">'
-                f'Suggest change</button></form>{revert}</div></div>'
+                f'Suggest change</button></form>{promote}{revert}</div></div>'
             )
     out.append("</div>")
     return "".join(out)

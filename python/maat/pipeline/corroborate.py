@@ -384,6 +384,9 @@ def corroborate(
     min_corroboration: int = 2,
     extremity_of: Callable[[str], str] = rate_extremity,
     ownership: dict[str, str] | None = None,
+    decay: dict[str, float] | None = None,
+    primary_lift: float | None = None,
+    cap: float | None = None,
 ) -> list[Corroboration]:
     """Cluster same-fact claims; count independent originators per cluster (§5.5)."""
     if not claims:
@@ -413,7 +416,9 @@ def corroborate(
                 independent_originators=ind,
                 has_primary=primary,
                 extremity=extremity,
-                confidence=confidence_read(eff, primary, extremity),
+                confidence=confidence_read(
+                    eff, primary, extremity, decay=decay, primary_lift=primary_lift, cap=cap
+                ),
             )
         )
     results.sort(key=lambda r: r.independent_originators, reverse=True)
@@ -432,6 +437,9 @@ def corroborate_fixed(
     *,
     duplicate_source_threshold: float = 0.40,
     ownership: dict[str, str] | None = None,
+    decay: dict[str, float] | None = None,
+    primary_lift: float | None = None,
+    cap: float | None = None,
 ) -> Corroboration:
     """Recompute ONE cluster over a FIXED claim set (operator-decided) — no same-fact
     re-clustering, no LLM. The admin console (P8 F3) uses this when an operator splits,
@@ -456,5 +464,7 @@ def corroborate_fixed(
         independent_originators=ind,
         has_primary=primary,
         extremity=extremity,
-        confidence=confidence_read(eff, primary, extremity),
+        confidence=confidence_read(
+                    eff, primary, extremity, decay=decay, primary_lift=primary_lift, cap=cap
+                ),
     )
