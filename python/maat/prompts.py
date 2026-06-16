@@ -244,11 +244,21 @@ PROMPTS: list[dict] = [
 ]
 PROMPTS_BY_KEY: dict[str, dict] = {p["key"]: p for p in PROMPTS}
 
-# The editable subset — only these may be saved, restored, rolled back, or tested. Draft and
-# on-device prompts are surfaced for review but never become a live override.
+# Editable subset — these may be saved, restored, rolled back, or tested. Everything EXCEPT
+# on-device: the Apple prompts are Swift mirrors, display-only. Draft prompts are editable like any
+# other (#189) — they are LIVE, just tagged "needs review" until the operator clears the tag.
 EDITABLE_KEYS: frozenset[str] = frozenset(
-    p["key"] for p in PROMPTS if p["status"] == "active"
+    p["key"] for p in PROMPTS if p["status"] != "on-device"
 )
+
+# Prompts with a golden eval corpus — only these expose "Test on goldens"; the rest have no fixtures.
+GOLDEN_EVAL_KEYS: frozenset[str] = frozenset({"extract", "classify", "extremity"})
+
+
+def seed_status(key: str) -> str:
+    """The in-code status for a prompt (active / draft / on-device). Pure."""
+    p = PROMPTS_BY_KEY.get(key)
+    return p["status"] if p else ""
 
 
 def seed_default(key: str) -> str:
@@ -278,3 +288,51 @@ async def active_text(pool, key: str, default: str) -> str:
     except Exception:  # noqa: BLE001 - prompts table may not exist yet; fall back to the seed
         return default
     return row["text"] if row and row["text"] else default
+
+
+# ---------------------------------------------------------------------------
+# Review tag (#189) — a draft-seed prompt is LIVE like any other, but carries a "needs review"
+# marker until the operator clears it. Purely informational: it never gates whether a path runs.
+# Persisted as an ``admin.prompt.reviewed`` event read at runtime (like ``clocks.is_paused`` reads
+# ``admin.clock.set``) — no kernel projection, no migration.
+# ---------------------------------------------------------------------------
+
+
+def needs_review_given(reviewed_keys: set[str], key: str) -> bool:
+    """Pure: does `key` still need review? True when its seed status is "draft" and the operator has
+    not yet marked it reviewed (`key` absent from `reviewed_keys`). Active/on-device never need it."""
+    return seed_status(key) == "draft" and key not in reviewed_keys
+
+
+async def review_map(pool) -> dict[str, bool]:
+    """``{key: needs_review}`` for every registered prompt, in one pass. A draft-seed prompt needs
+    review until an ``admin.prompt.reviewed`` event exists for it. Resilient: no pool / un-migrated
+    events table → every draft still needs review (the safe default)."""
+    reviewed: set[str] = set()
+    if pool is not None:
+        try:
+            rows = await pool.fetch(
+                "select distinct data->>'key' as key from events "
+                "where type = 'admin.prompt.reviewed'"
+            )
+            reviewed = {r["key"] for r in rows if r["key"]}
+        except Exception:  # noqa: BLE001 - events table may not exist yet; treat nothing as reviewed
+            reviewed = set()
+    return {p["key"]: needs_review_given(reviewed, p["key"]) for p in PROMPTS}
+
+
+async def needs_review(pool, key: str) -> bool:
+    """Whether `key` still shows the "needs review" tag — its seed is a draft and no
+    ``admin.prompt.reviewed`` event exists for it yet. Resilient (see ``review_map``)."""
+    if seed_status(key) != "draft":
+        return False
+    if pool is None:
+        return True
+    try:
+        row = await pool.fetchrow(
+            "select 1 from events where type = 'admin.prompt.reviewed' and data->>'key' = $1 limit 1",
+            key,
+        )
+    except Exception:  # noqa: BLE001 - events table may not exist yet; still needs review
+        return True
+    return row is None
