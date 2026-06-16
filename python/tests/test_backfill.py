@@ -16,6 +16,7 @@ from maat.learning.backfill import (
     BiasReport,
     StratumInfo,
     bias_summary,
+    cap_per_stratum,
     correction_weights,
     strata_distribution,
 )
@@ -342,3 +343,37 @@ class TestEightyPercentUSEnglishSkew:
     def test_bias_report_strata_count(self):
         # 4 distinct strata: en/us, fr/fr, de/de, ar/eg
         assert self.report.n_strata == 4
+
+
+# ---------------------------------------------------------------------------
+# cap_per_stratum — the de-slanting SELECTION (#40, §6.5) the backfill driver applies
+# ---------------------------------------------------------------------------
+
+class TestCapPerStratum:
+    def test_empty_and_noop_cap(self):
+        assert cap_per_stratum([], cap=5) == []
+        arts = [_art("en", "us")] * 3
+        assert cap_per_stratum(arts, cap=0) == arts  # cap<=0 → no-op (copy)
+
+    def test_caps_overrepresented_major_keeps_long_tail(self):
+        # 8 en/us majors + 2 fr/fr + 1 ar/eg long-tail; cap at 3.
+        arts = [_art("en", "us")] * 8 + [_art("fr", "fr")] * 2 + [_art("ar", "eg")]
+        kept = cap_per_stratum(arts, cap=3)
+        dist = strata_distribution(kept)
+        assert dist[("en", "us")] == 3       # the major is capped down
+        assert dist[("fr", "fr")] == 2       # long tail (≤cap) passes through untouched
+        assert dist[("ar", "eg")] == 1
+
+    def test_deterministic_keeps_input_order_first_n(self):
+        arts = [
+            _art("en", "us", id=0), _art("en", "us", id=1),
+            _art("en", "us", id=2), _art("fr", "fr", id=3),
+        ]
+        kept = cap_per_stratum(arts, cap=2)
+        assert [a["id"] for a in kept] == [0, 1, 3]  # first two en/us + the fr/fr
+
+    def test_cap_reduces_dominant_share(self):
+        arts = _make_skewed_corpus(80, 20)
+        before = bias_summary(arts).most_overrepresented_fraction
+        after = bias_summary(cap_per_stratum(arts, cap=5)).most_overrepresented_fraction
+        assert after < before  # the English-language major no longer dominates the replay
