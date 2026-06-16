@@ -24,7 +24,12 @@ MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
 MISTRAL_EMBED_URL = "https://api.mistral.ai/v1/embeddings"
 
 # Defaults; callers override per call (the whole point of the seam).
-CLAUDE_JUDGE = "claude-haiku-4-5-20251001"  # cheap default; the hard-judgement model is set per stage
+# cauri: the "judge" default → Opus (was Haiku — "haiku is terrible"). This backs the careful
+# non-pipeline calls that take the seam default — acquisition query-gen (news_queries), the
+# source-credibility gate, and the console assistant — all low-volume, so Opus here is cheap. The
+# veracity PIPELINE stages pin their own model (extract/classify/extremity = Sonnet) and are
+# unaffected by this default.
+CLAUDE_JUDGE = "claude-opus-4-8"
 MISTRAL_BULK = "mistral-small-latest"
 MISTRAL_EMBED = "mistral-embed"
 
