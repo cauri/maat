@@ -10,13 +10,14 @@ below before relying on these pages legally, and have counsel glance at them. Ev
 static HTML served by maat.marketing.app (GET /privacy, GET /imprint).
 """
 
-# --- Controller identity (FILL THESE before public reliance) ----------------------------------
-ORG = "Maat"
+# --- Controller identity --------------------------------------------------------------------
+ORG = "Maat"  # the product / trading name
 CONTACT_EMAIL = "privacy@maat.press"  # must be made deliverable (forward/route) before launch
 HOSTING = "Hetzner Online GmbH (Germany, EU)"
-# TODO(cauri): the formal data-controller legal name + registered postal address. Left soft on
-# purpose — I won't invent a legal entity. An EU imprint (esp. German TMG §5) wants a real address.
-CONTROLLER = "Maat (operator — formal entity details to be confirmed)"
+CONTROLLER = "cauri OÜ"  # the legal entity (data controller), an Estonian private limited company
+COUNTRY = "Estonia"
+# TODO(cauri): registered postal address + company registration code (registrikood). An EU imprint
+# wants both — they show as "to be added" until filled.
 POSTAL = "Available on request via the contact address above."
 UPDATED = "16 June 2026"
 
@@ -85,8 +86,8 @@ Protection Regulation (GDPR). We have built this site to gather as little as pos
 advertising.</strong> The only network requests the page makes are back to our own server.</p>
 
 <h2>Who is responsible</h2>
-<p>The controller for the data described below is {CONTROLLER}. For anything to do with your
-privacy — including any of the rights listed further down — write to
+<p>The controller for the data described below is {CONTROLLER}, a company registered in {COUNTRY}.
+For anything to do with your privacy — including any of the rights listed further down — write to
 <a href="mailto:{CONTACT_EMAIL}">{CONTACT_EMAIL}</a>. See our <a href="/imprint">Legal notice</a>
 for operator details.</p>
 
@@ -141,12 +142,13 @@ _IMPRINT_BODY = f"""
 <h1>Legal notice</h1>
 <p class="updated">Last updated: {UPDATED}</p>
 
-<div class="note">Draft — formal company registration details will be completed here. For any
-legal or data-protection matter in the meantime, use the contact address below.</div>
+<div class="note">Registered postal address and company registration code (registrikood) will
+be added here. For any legal or data-protection matter in the meantime, use the contact address
+below.</div>
 
 <dl>
   <dt>Service</dt><dd>maat.press</dd>
-  <dt>Operator</dt><dd>{CONTROLLER}</dd>
+  <dt>Operator</dt><dd>{CONTROLLER}, a private limited company (osaühing) registered in {COUNTRY}</dd>
   <dt>Contact</dt><dd><a href="mailto:{CONTACT_EMAIL}">{CONTACT_EMAIL}</a></dd>
   <dt>Postal address</dt><dd>{POSTAL}</dd>
   <dt>Hosting provider</dt><dd>{HOSTING}</dd>
