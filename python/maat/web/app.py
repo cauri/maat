@@ -445,7 +445,8 @@ async def spend_view(ok: str = "") -> str:
     )
     apify_usd = await asyncio.to_thread(spend_mod.apify_spend_usd)  # blocking httpx → off-loop
     otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-    return _doc(_spend_page(rows, llm_total, apify_usd, otlp), "spend", "spend", flash=ok)
+    budget = spend_mod.cap_status(await _today_spend_usd(pool), spend_mod.daily_cap_usd())
+    return _doc(_spend_page(rows, llm_total, apify_usd, otlp, budget), "spend", "spend", flash=ok)
 
 
 @app.get("/runs", response_class=HTMLResponse)
@@ -2008,7 +2009,9 @@ _STAGES = [
 # ── Run the pipeline: one click runs the WHOLE flow with live per-step progress ──────────────
 # acquire (scripts/clock.py) → extract+classify drain (the always-on agents process the new
 # articles) → corroborate (recompute clusters). Each runs as a subprocess in the reader's env;
-# progress lives in _RUN, polled by /runs/status. No spend gate (cauri) — running is the point.
+# progress lives in _RUN, polled by /runs/status. A DAILY SPEND CAP (#195, cauri: default $5/day,
+# MAAT_DAILY_CAP_USD) gates the START of a run: once today's estimated LLM spend reaches the cap,
+# the console refuses to kick off another run so a stuck loop can't burn the budget.
 _RUN: dict = {"active": False, "started": None, "finished": None, "error": None, "steps": []}
 _ROOT = Path(__file__).resolve().parents[2]  # the python/ project root (has scripts/ + maat/)
 
@@ -2087,18 +2090,62 @@ async def _run_pipeline() -> None:
         _RUN["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+async def _today_spend_usd(pool) -> float:
+    """Estimated USD spent on LLM pipeline calls TODAY (UTC), from today's event log — the daily
+    cap's cost signal (#195). The dominant Haiku/Sonnet stages (extract/classify/extremity);
+    embeddings are negligible and excluded. Same estimator as /spend, date-scoped. cat-cafe is exact."""
+    counts = {
+        r["type"]: r["n"]
+        for r in await pool.fetch(
+            "select type, count(*) n from events where type in "
+            "('claims.extracted','claims.classified','cluster.corroborated') "
+            "and created_at >= date_trunc('day', now() at time zone 'utc') group by type"
+        )
+    }
+    _, total = spend_mod.estimate_llm_spend(
+        extract_calls=counts.get("claims.extracted", 0),
+        classify_calls=counts.get("claims.classified", 0),
+        extremity_calls=counts.get("cluster.corroborated", 0),
+        embed_claims=0,
+    )
+    return total
+
+
 @app.post("/runs/run-all")
 async def runs_run_all() -> JSONResponse:
-    """Kick off a full pipeline run (one at a time). Returns immediately; the UI polls /runs/status."""
+    """Kick off a full pipeline run (one at a time). Returns immediately; the UI polls /runs/status.
+
+    Budget guard (#195): refuses to start once today's estimated spend has reached the daily cap
+    (default $5, MAAT_DAILY_CAP_USD); the refusal is recorded in the audit log and surfaced to the
+    operator via the run state's error line."""
     if _RUN["active"]:
         return JSONResponse({"already_running": True, **_run_state()})
+    today = await _today_spend_usd(app.state.pool)
+    cap = spend_mod.daily_cap_usd()
+    budget = spend_mod.cap_status(today, cap)
+    if not budget["allowed"]:
+        await _publish(
+            events.ADMIN_RUN_TRIGGERED, "pipeline",
+            events.admin_event(
+                "pipeline", reason=f"blocked by daily cap ${cap:.2f} (today ≈ ${today:.2f})",
+                blocked=True,
+            ),
+        )
+        _RUN.update(
+            active=False,
+            error=f"Daily spend cap ${cap:.2f} reached (today ≈ ${today:.2f}). Run skipped — "
+            "raise MAAT_DAILY_CAP_USD or wait for tomorrow (UTC).",
+            finished=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            steps=[{"label": lbl, "status": "idle"} for lbl, _e, _c in _STAGES],
+        )
+        return JSONResponse({"blocked": True, "budget": budget, **_run_state()})
     _RUN.update(
         active=True, started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        finished=None, error=None,
+        finished=None, error=None, budget=budget,
         steps=[{"label": lbl, "status": "pending"} for lbl, _e, _c in _STAGES],
     )
     asyncio.create_task(_run_pipeline())
-    return JSONResponse(_run_state())
+    return JSONResponse({"budget": budget, **_run_state()})
 
 
 @app.get("/runs/status")
@@ -2175,7 +2222,7 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     )
 
 
-def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
+def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | None = None) -> str:
     apify_cell = f"${apify_usd:,.2f}" if apify_usd is not None else "—"
     grand = llm_total + (apify_usd or 0.0)
     cells = (
@@ -2183,6 +2230,27 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
         f'<div class="mcell"><div class="mk">AI / LLM (est.)</div><div class="mv">${llm_total:,.2f}</div></div>'
         f'<div class="mcell"><div class="mk">Apify (actual)</div><div class="mv">{apify_cell}</div></div>'
     )
+    budget_line = ""
+    if budget:
+        today = budget.get("today_usd", 0.0)
+        if budget.get("capped"):
+            cap = budget.get("cap_usd", 0.0)
+            remaining = budget.get("remaining_usd", 0.0)
+            state = (
+                '<span class="b ok">runs allowed</span>' if budget.get("allowed")
+                else '<span class="b warn">runs paused — cap reached</span>'
+            )
+            budget_line = (
+                f'<div class="mut sm mt">Daily run cap (#195): today ≈ <b>${today:,.2f}</b> of '
+                f'<b>${cap:,.2f}</b> — ${remaining:,.2f} left. {state}. '
+                "Operator runs are blocked once today's estimate reaches the cap "
+                "(<span class=\"mono\">MAAT_DAILY_CAP_USD</span>; UTC day).</div>"
+            )
+        else:
+            budget_line = (
+                f'<div class="mut sm mt">Daily run cap (#195): <b>uncapped</b> '
+                f'(today ≈ ${today:,.2f}; set <span class="mono">MAAT_DAILY_CAP_USD</span> to enable).</div>'
+            )
     srows = "".join(
         f'<tr><td>{html.escape(r.stage)}</td><td class="mono mut">{html.escape(r.model)}</td>'
         f'<td style="text-align:right">{r.calls:,}</td>'
@@ -2206,6 +2274,7 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
         '<div class="mut sm mt">LLM figures are <b>estimated</b> from cumulative call counts × '
         "per-model token estimates; the exact per-call cost (and live token usage) is in cat-cafe. "
         f"Apify is the actual billed figure from its usage API. Per-call detail: {catcafe}.</div>"
+        f"{budget_line}"
         "</div>"
     )
 

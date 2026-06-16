@@ -171,6 +171,10 @@ services:
       # via the BULK model, MEMOISED per interest so it's one call per new interest, not per request
       # (serving.topics.enriched_interest). Set to 0 to fall back to the pure keyword filter.
       MAAT_TOPICS_LLM: "${MAAT_TOPICS_LLM:-1}"
+      # Daily spend cap for operator-triggered pipeline runs (#195, cauri: default $5/day). The
+      # console refuses to start a run once today's estimated LLM spend reaches this; set to 0 to
+      # disable the gate (uncapped).
+      MAAT_DAILY_CAP_USD: "${MAAT_DAILY_CAP_USD:-5}"
       # So translate + prompt-chat spans export, and /eval shows "receiving traces" + cat-cafe link.
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://cat-cafe:4318"
       # Admin-console auth (P8, #163; D31/D32) — Google OIDC + allowlist, SEPARATE from user auth.
