@@ -16,27 +16,27 @@ class _Reply:
 
 
 # --- pure LLM call -------------------------------------------------------------------------
-# Patch the name bound in the geotag module (it imports mistral_complete at module load), so the
+# Patch the name bound in the geotag module (it imports claude_complete at module load), so the
 # mock is actually exercised rather than the call erroring out to "" for the wrong reason.
 
 
 def test_llm_country_parses_iso2(monkeypatch):
-    monkeypatch.setattr(geo, "mistral_complete", lambda *a, **k: _Reply('{"country": "ng"}'))
+    monkeypatch.setattr(geo, "claude_complete", lambda *a, **k: _Reply('{"country": "ng"}'))
     assert geo.llm_country("Lagos floods displace thousands") == "NG"
 
 
 def test_llm_country_global_is_blank(monkeypatch):
-    monkeypatch.setattr(geo, "mistral_complete", lambda *a, **k: _Reply('{"country": "XX"}'))
+    monkeypatch.setattr(geo, "claude_complete", lambda *a, **k: _Reply('{"country": "XX"}'))
     assert geo.llm_country("A worldwide climate accord is signed") == ""
 
 
 def test_llm_country_rejects_non_iso2(monkeypatch):
-    monkeypatch.setattr(geo, "mistral_complete", lambda *a, **k: _Reply('{"country": "Nigeria"}'))
+    monkeypatch.setattr(geo, "claude_complete", lambda *a, **k: _Reply('{"country": "Nigeria"}'))
     assert geo.llm_country("x") == ""
 
 
 def test_llm_country_swallows_bad_output(monkeypatch):
-    monkeypatch.setattr(geo, "mistral_complete", lambda *a, **k: _Reply("not json"))
+    monkeypatch.setattr(geo, "claude_complete", lambda *a, **k: _Reply("not json"))
     assert geo.llm_country("x") == ""
 
 
@@ -44,7 +44,7 @@ def test_llm_country_empty_text_no_call(monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("must not call the model for empty text")
 
-    monkeypatch.setattr(geo, "mistral_complete", _boom)
+    monkeypatch.setattr(geo, "claude_complete", _boom)
     assert geo.llm_country("   ") == ""
 
 

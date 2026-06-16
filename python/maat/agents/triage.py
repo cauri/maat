@@ -85,9 +85,12 @@ def _llm_triage(text: str) -> tuple[str, str] | None:
     if os.environ.get("MAAT_TRIAGE_LLM") != "1":
         return None
     try:
-        from maat.providers.seam import mistral_complete
+        from maat.providers.seam import claude_complete
 
-        reply = mistral_complete(TRIAGE_LLM_PROMPT.format(text=text[:2000]))
+        # Sonnet (cauri): routing user feedback to auto-fix vs review is a judgement call, so it
+        # runs on Sonnet, not the cheap tier. Low volume (one call per feedback item). Rules below
+        # stay the fallback on any error.
+        reply = claude_complete(TRIAGE_LLM_PROMPT.format(text=text[:2000]), model="claude-sonnet-4-6")
         raw = reply.text
         data = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
         cat = str(data.get("category", "")).strip().lower()

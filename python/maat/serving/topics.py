@@ -221,17 +221,17 @@ def _llm_parse(interest: str) -> TopicSpec:
 
 
 # ---------------------------------------------------------------------------
-# Hot-path topic enrichment (#189) — memoised bulk-model expansion for the feed filter.
+# Hot-path topic enrichment (#189) — memoised Sonnet expansion for the feed filter.
 #
 # The personal-feed filter (serving.feed._filter_by_topics) runs on EVERY request, so it must
 # never make a per-request LLM call. ``enriched_interest`` expands a reader's free-text interest
-# into extra match terms via the BULK model, but caches the result per distinct interest — a busy
-# feed therefore pays one call per NEW interest and zero thereafter. Enrichment only UNIONS terms
-# onto the deterministic parse, so it can only add recall, never drop the keyword baseline.
-# Gated by MAAT_TOPICS_LLM (read at the feed seam); OFF → the pure parse, unchanged.
+# into extra match terms via Sonnet (cauri: quality over the cheap tier), but caches the result per
+# distinct interest — a busy feed therefore pays one call per NEW interest and zero thereafter.
+# Enrichment only UNIONS terms onto the deterministic parse, so it can only add recall, never drop
+# the keyword baseline. Gated by MAAT_TOPICS_LLM (read at the feed seam); OFF → the pure parse.
 # ---------------------------------------------------------------------------
 
-# DRAFT prompt — flag for cauri review (in-platform agent prompt fed to the bulk model).
+# DRAFT prompt — flag for cauri review (in-platform agent prompt fed to Sonnet).
 _TOPICS_ENRICH_PROMPT = """\
 # ROLE
 You expand a reader's news interest into match terms for filtering a news feed.
@@ -253,14 +253,22 @@ Given one interest, return JSON only:
 # DRAFT prompt — flag for cauri review
 
 
-def _bulk_enrich(interest: str) -> TopicSpec:
-    """One bulk-model expansion of ``interest``, UNIONed with the deterministic terms. Falls back
-    to the pure parse on any error. Not cached itself — go through ``enriched_interest``."""
-    from maat.providers.seam import mistral_complete
+# cauri: Sonnet, not the cheap tier — quality over cost. Memoised per interest (one call per
+# distinct interest), so the higher per-call cost stays off the per-request hot path.
+_TOPICS_ENRICH_MODEL = "claude-sonnet-4-6"
+
+
+def _enrich_llm(interest: str) -> TopicSpec:
+    """One Sonnet expansion of ``interest``, UNIONed with the deterministic terms. Falls back to the
+    pure parse on any error. Not cached itself — go through ``enriched_interest`` (which memoises)."""
+    from maat.providers.seam import claude_complete
 
     base = _pure_parse(interest)
     try:
-        reply = mistral_complete(_TOPICS_ENRICH_PROMPT.replace("{interest}", interest.strip()))
+        reply = claude_complete(
+            _TOPICS_ENRICH_PROMPT.replace("{interest}", interest.strip()),
+            model=_TOPICS_ENRICH_MODEL,
+        )
         spec = _spec_from_reply(reply.text, interest)
     except Exception:  # noqa: BLE001 — provider/network/JSON error: deterministic fallback
         return base
@@ -276,11 +284,11 @@ def _bulk_enrich(interest: str) -> TopicSpec:
 
 @lru_cache(maxsize=512)
 def _enriched_cached(interest_key: str) -> TopicSpec:
-    return _bulk_enrich(interest_key)
+    return _enrich_llm(interest_key)
 
 
 def enriched_interest(interest: str) -> TopicSpec:
-    """Hot-path-safe LLM topic enrichment: memoised bulk-model expansion (one call per distinct
+    """Hot-path-safe LLM topic enrichment: memoised Sonnet expansion (one call per distinct
     interest), falling back to the pure parse on any error. Used by the feed filter when
     MAAT_TOPICS_LLM=1. Call ``_enriched_cached.cache_clear()`` to reset (tests/operator reload)."""
     norm = (interest or "").strip().lower()

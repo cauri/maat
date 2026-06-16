@@ -17,7 +17,11 @@ from __future__ import annotations
 import json
 import re
 
-from maat.providers.seam import mistral_complete
+from maat.providers.seam import claude_complete
+
+# cauri: Sonnet, not the cheap tier — quality over cost. Called only for clusters the heuristic
+# can't place (gated by MAAT_CURATION_LLM), so the volume is the ambiguous tail, not the corpus.
+GEOTAG_MODEL = "claude-sonnet-4-6"
 
 _ISO2 = re.compile(r"^[A-Z]{2}$")
 
@@ -39,9 +43,9 @@ def llm_country(text: str) -> str:
     if not text.strip():
         return ""
     try:
-        # Bulk model (Mistral): one call per UNPLACED cluster per tick — must NOT use the expensive
-        # judge model. The agent only calls this for clusters the heuristic already failed to place.
-        reply = mistral_complete(_GEOTAG_PROMPT.format(text=text[:2000]))
+        # Sonnet (cauri): one call per UNPLACED cluster per tick — the agent only reaches here for
+        # clusters the heuristic already failed to place, so the volume stays bounded.
+        reply = claude_complete(_GEOTAG_PROMPT.format(text=text[:2000]), model=GEOTAG_MODEL)
         raw = reply.text
         data = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
         code = str(data.get("country", "")).strip().upper()

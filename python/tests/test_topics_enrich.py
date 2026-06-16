@@ -25,7 +25,7 @@ def _clear():
 def test_enrichment_unions_llm_terms_onto_base(monkeypatch):
     _clear()
     monkeypatch.setattr(
-        seam, "mistral_complete",
+        seam, "claude_complete",
         lambda *a, **k: _Reply('{"terms": ["sahel security", "coup"], "query": "sahel"}'),
     )
     spec = enriched_interest("West African politics")
@@ -44,7 +44,7 @@ def test_enrichment_is_memoised(monkeypatch):
         calls["n"] += 1
         return _Reply('{"terms": ["frontier model"], "query": "ai"}')
 
-    monkeypatch.setattr(seam, "mistral_complete", _count)
+    monkeypatch.setattr(seam, "claude_complete", _count)
     enriched_interest("artificial intelligence")
     enriched_interest("artificial intelligence")  # same interest → served from cache
     enriched_interest("Artificial Intelligence  ")  # normalised to the same key
@@ -57,7 +57,7 @@ def test_enrichment_falls_back_to_pure_on_error(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("provider down")
 
-    monkeypatch.setattr(seam, "mistral_complete", _boom)
+    monkeypatch.setattr(seam, "claude_complete", _boom)
     spec = enriched_interest("semiconductor supply chains")
     assert spec.terms == topics.parse_interest("semiconductor supply chains").terms
 
@@ -66,7 +66,7 @@ def test_filter_use_llm_matches_via_enriched_terms(monkeypatch):
     _clear()
     # The pure parse of "AI" wouldn't match "frontier model"; the enriched terms do.
     monkeypatch.setattr(
-        seam, "mistral_complete",
+        seam, "claude_complete",
         lambda *a, **k: _Reply('{"terms": ["frontier model", "large language model"], "query": "ai"}'),
     )
     payload = {

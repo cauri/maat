@@ -106,10 +106,10 @@ services:
       # releases the GDELT news stream misses. Costs credits per call. Spend is reported to the
       # operator and (follow-up) surfaced in the admin console. Set to 0 to pause.
       MAAT_PRIMARY_PASS: ${MAAT_PRIMARY_PASS:-1}
-      # LLM refinement paths ON (cauri sign-off, #189). Both run on the BULK model (Mistral), not
-      # the expensive judge — one call per cluster (NER) / per feedback item (triage), with the
-      # deterministic heuristic/rule pass as the fallback on any error. Spend → cat-cafe via OTLP.
-      # Set either to 0 to fall back to the pure heuristic/rule path.
+      # LLM refinement paths ON (cauri sign-off, #189). These run on SONNET (cauri: quality over
+      # the cheap tier) — one call per cluster (NER) / per feedback item (triage) / per unplaced
+      # cluster (geo), with the deterministic heuristic/rule pass as the fallback on any error.
+      # Spend → cat-cafe via OTLP. Set any to 0 to fall back to the pure heuristic/rule path.
       MAAT_STORY_GRAPH_LLM: ${MAAT_STORY_GRAPH_LLM:-1}   # canonical entity spine for thread attachment (#42)
       MAAT_TRIAGE_LLM: ${MAAT_TRIAGE_LLM:-1}             # feedback category/route refinement (#58/#189)
       MAAT_CURATION_LLM: ${MAAT_CURATION_LLM:-1}         # geo-tag clusters the TLD/lang heuristic can't place (#189)
@@ -168,8 +168,8 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       MISTRAL_API_KEY: "${MISTRAL_API_KEY:-}"
       # Personal-feed topic enrichment ON (cauri sign-off, #189): ?topics= expands each interest
-      # via the BULK model, MEMOISED per interest so it's one call per new interest, not per request
-      # (serving.topics.enriched_interest). Set to 0 to fall back to the pure keyword filter.
+      # via SONNET (cauri: quality over the cheap tier), MEMOISED per interest so it's one call per
+      # new interest, not per request (serving.topics.enriched_interest). Set to 0 → pure keyword filter.
       MAAT_TOPICS_LLM: "${MAAT_TOPICS_LLM:-1}"
       # Daily spend cap for operator-triggered pipeline runs (#195, cauri: default $5/day). The
       # console refuses to start a run once today's estimated LLM spend reaches this; set to 0 to
