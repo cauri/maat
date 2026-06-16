@@ -1,8 +1,9 @@
 import Foundation
 
 // A news organisation's reputation (BRIEF §6: truthfulness, one scalar §6.2, with a trajectory §6.4).
-// Mirrors GET /api/sources. NOTE: the live value is a *provisional proxy* until the reputation fold
-// (#37, P3) exists — see the `provisional` flag on the response.
+// Mirrors GET /api/sources. The value is the real §6 truth-over-time fold (#37/#192): reputation is
+// the outcome-anchored standing and `trajectory` is its sparkline over history; the `provisional`
+// flag on the response is now false. Sources never corroborated arrive cold-start (shown neutrally).
 
 struct SourcesResponse: Codable, Sendable {
     var generatedAt: String?

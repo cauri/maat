@@ -40,7 +40,11 @@ from maat.eval_prompt import summary as eval_prompt_summary
 from maat.evals import evaluate, load_expectations
 from maat.learning.calibration import Weights, replay_ab
 from maat.learning.calibration_prod import production_calibration
-from maat.learning.reputation import fold_reputation
+from maat.learning.reputation import (
+    fold_reputation,
+    reputation_score,
+    reputation_trajectories,
+)
 from maat.learning.rl import policy_step
 from maat.metrics import de_us
 from maat.obs_metrics import pipeline_health
@@ -1515,54 +1519,73 @@ def _cluster_sources(cluster, art_source: dict, claim_art: dict) -> set[str]:
 
 
 async def _source_ratings(pool) -> list[dict]:
+    """Per-source reputation as the REAL §6 truth-over-time fold (#192/#37), not the old proxy.
+
+    Folds the ``cluster.corroborated`` event trajectory into per-source standing
+    (``learning.reputation.fold_reputation``): independent-originator rate, confirmation/refutation
+    outcomes where the trajectory resolved them, solo-extraordinary red flags. ``reputation`` is the
+    outcome-anchored 0..1 collapse (``reputation_score``); ``trajectory`` is a real sparkline of
+    that standing over expanding windows of history (``reputation_trajectories``) — replacing the
+    previous last-N-confidences proxy. Sources acquired but never corroborated are listed as
+    cold-start ("not yet rated"), so the Sources view keeps full coverage.
+    """
     from collections import defaultdict
 
-    arts = await pool.fetch("select id, source, language from articles")
-    clusters = await pool.fetch(
-        "select fact, originators, claim_ids, confidence, has_primary, created_at "
-        "from clusters order by created_at"
+    history = await _corroboration_history(pool)
+    reps = fold_reputation(history)
+    rep_by_src = {r.source: r for r in reps}
+    trajectories = reputation_trajectories(history)
+
+    # Language metadata per source (reputation itself is outcome-based, language-agnostic).
+    langrows = await pool.fetch(
+        "select distinct source, language from articles where source is not null"
     )
-    claims = await pool.fetch("select id, article_id from claims")
-    art_source = {a["id"]: a["source"] for a in arts}
-    art_lang = {a["id"]: a["language"] for a in arts}
-    claim_art = {str(c["id"]): c["article_id"] for c in claims}
-
-    confs: dict[str, list] = defaultdict(list)
-    facts: dict[str, set] = defaultdict(set)
     langs: dict[str, set] = defaultdict(set)
-    primary_part: dict[str, bool] = defaultdict(bool)
-
-    for cl in clusters:
-        srcs = _cluster_sources(cl, art_source, claim_art)
-        conf = float(cl["confidence"] or 0.0)
-        for s in srcs:
-            confs[s].append(conf)
-            facts[s].add(cl["fact"])
-            if cl["has_primary"]:
-                primary_part[s] = True
-        for cid in _jload(cl["claim_ids"]):
-            aid = claim_art.get(str(cid))
-            s = art_source.get(aid) if aid else None
-            if s and art_lang.get(aid):
-                langs[s].add(art_lang[aid])
+    all_sources: set[str] = set(rep_by_src)
+    for r in langrows:
+        all_sources.add(r["source"])
+        if r["language"]:
+            langs[r["source"]].add(r["language"])
 
     ratings = []
-    for s in sorted({a["source"] for a in arts if a["source"]}):
-        cs = confs.get(s, [])
-        is_primary = _is_primary_name(s) or primary_part.get(s, False)
-        cold = not cs and not is_primary
-        reputation = 0.9 if is_primary else (sum(cs) / len(cs) if cs else 0.5)
-        reputation = max(0.0, min(1.0, reputation))
+    for s in all_sources:
+        rec = rep_by_src.get(s)
+        primary_name = _is_primary_name(s)
+        if rec is None:
+            # Acquired but never in a corroborated cluster → genuinely not yet rated. Shown at the
+            # neutral midpoint (BRIEF §6.6: cold-start sources are presented neutrally, never penalised).
+            ratings.append(
+                {
+                    "name": s, "reputation": 0.5, "tier": _source_tier(0.5, True),
+                    "is_primary": primary_name, "n_stories": 0, "cold_start": True,
+                    "trajectory": [0.5], "languages": sorted(langs.get(s, set())) or ["en"],
+                    "independent_rate": 0.0, "confirmed": 0, "refuted": 0, "unresolved": 0,
+                    "confirmation_rate": None, "solo_extraordinary": 0,
+                }
+            )
+            continue
+        # Cold = no terminal truth outcome resolved yet (the truthfulness trajectory is unproven),
+        # regardless of primary standing — which is surfaced separately via is_primary.
+        cold = rec.outcome_n == 0
+        score = reputation_score(rec)
+        traj = trajectories.get(s) or [score]
         ratings.append(
             {
                 "name": s,
-                "reputation": round(reputation, 3),
-                "tier": _source_tier(reputation, cold),
-                "is_primary": is_primary,
-                "n_stories": len(facts.get(s, set())),
+                "reputation": score,
+                "tier": _source_tier(score, cold),
+                "is_primary": primary_name or rec.primary_appearances > 0,
+                "n_stories": rec.appearances,
                 "cold_start": cold,
-                "trajectory": [round(c, 3) for c in cs[-8:]] or [round(reputation, 3)],
+                "trajectory": [round(v, 3) for v in traj],
                 "languages": sorted(langs.get(s, set())) or ["en"],
+                # Real §6 dimensions (additive — existing clients ignore unknown keys).
+                "independent_rate": rec.independent_rate,
+                "confirmed": rec.facts_confirmed,
+                "refuted": rec.facts_refuted,
+                "unresolved": rec.facts_unresolved,
+                "confirmation_rate": rec.confirmation_rate,
+                "solo_extraordinary": rec.solo_extraordinary,
             }
         )
     ratings.sort(key=lambda r: (r["cold_start"], -r["reputation"], r["name"]))
@@ -1575,9 +1598,10 @@ async def api_sources() -> JSONResponse:
     return JSONResponse(
         {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "provisional": True,
-            "note": "Pre-reputation-fold proxy (P3 #37 not built): reputation approximated from "
-            "corroboration confidence + primary-source standing, not the §6 truthfulness trajectory.",
+            "provisional": False,
+            "note": "Reputation is the §6 truth-over-time fold over the corroboration trajectory "
+            "(confirmation/refutation outcomes + independent-originator rate); `trajectory` is the "
+            "sparkline of that standing across history. Sources never corroborated show as cold-start.",
             "count": len(ratings),
             "sources": ratings,
         }
