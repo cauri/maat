@@ -41,6 +41,9 @@ harvest:
 story-graph:
 	cd python && uv run python -m maat.agents.story_graph_agent
 
+triage:
+	cd python && uv run python -m maat.agents.triage
+
 eval:
 	cd python && uv run python scripts/eval.py
 

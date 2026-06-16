@@ -56,6 +56,7 @@ from maat.serving import spend as spend_mod
 from maat.serving.feed import feed_router
 from maat.serving.translate import translate_text
 from maat.serving.feedback import queue as feedback_queue
+from maat.serving.feedback import record as feedback_record
 from maat.serving.feedback import routed_queue
 
 CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
@@ -1275,6 +1276,28 @@ async def api_translate(req: TranslateReq) -> JSONResponse:
     return JSONResponse(
         {"translated": translated, "source": req.source, "target": req.target, "engine": engine}
     )
+
+
+class FeedbackReq(BaseModel):
+    text: str
+    category_hint: str = ""
+    source: str = "reader"
+    story_id: str | None = None
+
+
+@app.post("/api/feedback")
+async def api_feedback(req: FeedbackReq) -> JSONResponse:
+    # Reader feedback intake (#58): the front door the loop was missing. Publishes a
+    # feedback.submitted event (feedback.record) that surfaces in the /review queue and that the
+    # triage agent routes to review / auto-fix. Untrusted input (#77) — a coordinated burst is
+    # surfaced on /review, never auto-actioned.
+    if not req.text.strip():
+        raise HTTPException(status_code=422, detail="empty feedback")
+    hint = (req.category_hint + (f" story:{req.story_id}" if req.story_id else "")).strip()
+    item_id = await feedback_record(
+        app.state.pool, None, text=req.text, category_hint=hint, source=req.source
+    )
+    return JSONResponse({"item_id": item_id, "status": "submitted"})
 
 
 # ── Source reputation (provisional, pre-#37) — the Apple client's Sources view reads this ──────────
