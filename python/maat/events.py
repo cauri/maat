@@ -66,6 +66,12 @@ CLUSTER_SNAPSHOT = "cluster.snapshot"
 # claim_node_links so the feed can return THREADED stories.
 STORY_GRAPH_REBUILT = "story.graph.rebuilt"
 
+# Inferred primary country for a story (#189, P6): the curation geo-tagger (agents.geotag_agent)
+# fills the de-US re-ranker's gaps for clusters the TLD/language heuristic can't place, one event
+# per cluster. The feed folds the latest per cluster at read time (no kernel projection needed) —
+# it's a curation/ordering hint, never a veracity signal. stream_id IS the cluster_id.
+STORY_GEO_INFERRED = "story.geo_inferred"
+
 # --- Acquisition funnel (marketing site → operator console) -----------------------------
 # The public marketing site (maat.press) publishes these as it records the visitor funnel
 # (D5/D20): a page view, a "Download on the App Store" tap (which shows "coming soon"), and

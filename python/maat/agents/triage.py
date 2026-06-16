@@ -31,6 +31,7 @@ Run standalone (batch over the unprocessed queue)::
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -71,6 +72,30 @@ Classify it into exactly one of these categories:
 
 Return ONLY a JSON object: {{"category": "<category>", "reason": "<one sentence>"}}.
 """
+
+_VALID_CATEGORIES = {"veracity-dispute", "source-quality", "bug", "ui", "topic-request"}
+# Only clearly-mechanical categories can be auto-fixed without sign-off (#77 untrusted input).
+_AUTO_FIXABLE_CATEGORIES = {"bug", "ui"}
+
+
+def _llm_triage(text: str) -> tuple[str, str] | None:
+    """DRAFT LLM triage refinement (#189) — gated by MAAT_TRIAGE_LLM. Classify the feedback via the
+    bulk model; returns (category, reason) or None on any error (the rule pass stays the fallback).
+    """
+    if os.environ.get("MAAT_TRIAGE_LLM") != "1":
+        return None
+    try:
+        from maat.providers.seam import mistral_complete
+
+        reply = mistral_complete(TRIAGE_LLM_PROMPT.format(text=text[:2000]))
+        raw = reply.text
+        data = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
+        cat = str(data.get("category", "")).strip().lower()
+        if cat in _VALID_CATEGORIES:
+            return cat, (str(data.get("reason", "")).strip() or "LLM triage")
+    except Exception:
+        pass
+    return None
 
 
 @dataclass(frozen=True)
@@ -219,16 +244,18 @@ def classify(text: str, category_hint: str = "") -> TriageResult:
         best_reason += "; low confidence → escalated to review"
         best_auto = False
 
-    # Placeholder for LLM refinement (DISABLED — flag for cauri review before enabling)
-    # DRAFT prompt — flag for cauri review
-    # -------------------------------------------------------------------------
-    # The DRAFT text lives in the module-level ``TRIAGE_LLM_PROMPT`` constant (surfaced read-only
-    # in the operator console). It is intentionally unused here.
-    # -------------------------------------------------------------------------
-    # To enable: import and call your LLM provider with ``TRIAGE_LLM_PROMPT``, parse the JSON
-    # response, then replace best_cat/best_conf/best_reason with the LLM output.
-    # Keep the rule-based pass as a fallback when the LLM is unavailable.
-    # -------------------------------------------------------------------------
+    # DRAFT LLM refinement (#189) — gated by MAAT_TRIAGE_LLM. When enabled + available, the LLM's
+    # category/reason override the rule pass (rules remain the fallback). Untrusted input (#77):
+    # routing still flows through the auto-fix-only-if-mechanical + ambiguity guard below.
+    llm = _llm_triage(text)
+    if llm is not None:
+        best_cat, best_reason = llm
+        best_conf = max(best_conf, 0.8)
+        best_auto = best_cat in _AUTO_FIXABLE_CATEGORIES
+        route = "auto-fix" if best_auto else "review"
+        if route == "auto-fix" and best_conf < 0.65:
+            route = "review"
+            best_auto = False
 
     return TriageResult(
         item_id="",   # caller fills this in

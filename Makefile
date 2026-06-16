@@ -41,6 +41,12 @@ harvest:
 story-graph:
 	cd python && uv run python -m maat.agents.story_graph_agent
 
+geotag:
+	cd python && uv run python -m maat.agents.geotag_agent
+
+backfill:
+	cd python && uv run python scripts/backfill.py
+
 triage:
 	cd python && uv run python -m maat.agents.triage
 

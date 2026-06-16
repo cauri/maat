@@ -182,6 +182,28 @@ def correction_weights(articles: list[dict[str, Any]]) -> list[float]:
     return [w * scale for w in raw_weights]
 
 
+def cap_per_stratum(articles: list[dict[str, Any]], *, cap: int) -> list[dict[str, Any]]:
+    """De-slant an archive corpus by capping each (language, country) stratum at ``cap`` articles.
+
+    The pipeline downstream counts articles/originators, not IPW weights, so the most faithful way
+    to keep archive over-representation from amplifying the English-language majors (§6.5) is to
+    sub-sample the over-represented cells at SELECTION time. This keeps input order (deterministic,
+    reproducible): the first ``cap`` articles of each stratum survive; long-tail cells (≤ ``cap``)
+    pass through untouched. ``cap <= 0`` is a no-op (returns a copy). Pure — pairs with
+    ``correction_weights``/``bias_summary`` (measure the skew, then cap to it).
+    """
+    if cap <= 0:
+        return list(articles)
+    seen: Counter[Stratum] = Counter()
+    out: list[dict[str, Any]] = []
+    for art in articles:
+        s = _stratum(art)
+        if seen[s] < cap:
+            seen[s] += 1
+            out.append(art)
+    return out
+
+
 def bias_summary(articles: list[dict[str, Any]]) -> BiasReport:
     """Measure archive-bias and return a full operator-readable report.
 

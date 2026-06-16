@@ -279,3 +279,53 @@ def reputation_by_source(
 ) -> dict[str, SourceReputation]:
     """Index reputation records by source name for O(1) lookup."""
     return {r.source: r for r in reputations}
+
+
+def reputation_score(rec: SourceReputation) -> float:
+    """Collapse a reputation record into a single 0..1 standing for display/sorting (#192).
+
+    Outcome-anchored, per cauri's rule that reputation is truth-over-time, never consensus:
+      * once the trajectory has resolved terminal outcomes (outcome_n > 0), confirmation_rate
+        dominates, nudged by how often the source stands as an independent originator;
+      * before any outcome resolves there is no truthfulness signal yet, so the score sits in a
+        provisional 0..0.5 band scaled by independent_rate — callers flag these as cold-start
+        (``outcome_n == 0``) rather than reading the number as a verdict.
+
+    This is a SORT KEY / sparkline sample, not a verdict; the individual dimensions on the record
+    (confirmation_rate, independent_rate, solo_extraordinary) remain the honest detail.
+    """
+    if rec.confirmation_rate is not None:
+        return round(0.7 * rec.confirmation_rate + 0.3 * rec.independent_rate, 3)
+    return round(0.5 * rec.independent_rate, 3)
+
+
+def reputation_trajectories(
+    events: Iterable[Mapping],
+    *,
+    buckets: int = 8,
+    attribution_weight_fn=attribution_weight,
+) -> dict[str, list[float]]:
+    """Per-source reputation sparkline (#192): ``reputation_score`` recomputed over expanding
+    chronological prefixes of the corroboration history.
+
+    ``events`` oldest-first (as the DB returns them, ``order by id``). The history is split into up
+    to ``buckets`` expanding prefixes (events[:c1] ⊂ events[:c2] ⊂ … ⊂ events); each prefix is
+    folded with ``fold_reputation`` and every source's score at that point is appended to its
+    series. Because events only accumulate, a source's presence is monotonic — its series is a
+    contiguous run from the first bucket it appears in, so sources that arrive late have shorter
+    sparklines (the UI just plots fewer points). Returns ``{source: [score, …]}``.
+
+    Pure — no DB, no I/O. Cost is ``buckets`` folds, i.e. O(buckets × events).
+    """
+    evs = list(events)
+    if not evs:
+        return {}
+    buckets = max(1, buckets)
+    n = len(evs)
+    cuts = sorted({max(1, round(n * i / buckets)) for i in range(1, buckets + 1)})
+    series: dict[str, list[float]] = {}
+    for c in cuts:
+        recs = fold_reputation(evs[:c], attribution_weight_fn=attribution_weight_fn)
+        for r in recs:
+            series.setdefault(r.source, []).append(reputation_score(r))
+    return series

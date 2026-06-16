@@ -12,11 +12,28 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 DOC_API = "https://api.gdeltproject.org/api/v2/doc/doc"
 _UA = "maat-acquire/0.1 (veracity research)"
+
+
+def gdelt_stamp(dt: datetime) -> str:
+    """Format a datetime as GDELT DOC's YYYYMMDDHHMMSS, in UTC (naive datetimes are assumed UTC)."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y%m%d%H%M%S")
+
+
+def week_windows(now: datetime, weeks: int) -> list[tuple[datetime, datetime]]:
+    """`weeks` consecutive 7-day ``(start, end)`` windows walking BACK from `now` (most recent
+    first) — the historical-backfill plan (#40). Pure; ``weeks <= 0`` → empty."""
+    return [
+        (now - timedelta(days=7 * (i + 1)), now - timedelta(days=7 * i))
+        for i in range(max(0, weeks))
+    ]
 
 
 @dataclass(frozen=True)
@@ -36,20 +53,30 @@ def build_params(
     timespan: str = "3d",
     sourcelang: str | None = None,
     sourcecountry: str | None = None,
+    startdatetime: str | None = None,
+    enddatetime: str | None = None,
 ) -> dict[str, str]:
     q = query.strip()
     if sourcelang:
         q += f" sourcelang:{sourcelang}"
     if sourcecountry:
         q += f" sourcecountry:{sourcecountry}"
-    return {
+    params = {
         "query": q,
         "mode": "artlist",
         "format": "json",
         "maxrecords": str(maxrecords),
-        "timespan": timespan,
         "sort": "hybridrel",
     }
+    # Historical backfill (#40): GDELT DOC 2.0 takes a startdatetime/enddatetime WINDOW
+    # (YYYYMMDDHHMMSS) instead of a rolling `timespan`. When a full window is given it wins and
+    # `timespan` is omitted; otherwise we keep the recent rolling window (live acquisition).
+    if startdatetime and enddatetime:
+        params["startdatetime"] = startdatetime
+        params["enddatetime"] = enddatetime
+    else:
+        params["timespan"] = timespan
+    return params
 
 
 def parse_articles(data: dict) -> list[GdeltArticle]:
@@ -78,13 +105,16 @@ def search(
     timespan: str = "3d",
     sourcelang: str | None = None,
     sourcecountry: str | None = None,
+    startdatetime: str | None = None,
+    enddatetime: str | None = None,
     timeout: float = 30.0,
     retries: int = 4,
 ) -> list[GdeltArticle]:
-    """Query GDELT DOC for recent articles matching `query` (broad global news search).
+    """Query GDELT DOC for articles matching `query` (broad global news search).
 
-    GDELT throttles to roughly one query every 5s and answers bursts with 429; back off and
-    retry rather than failing the acquisition run.
+    Recent window by default (`timespan`); pass `startdatetime`/`enddatetime` (YYYYMMDDHHMMSS) for
+    a historical window (#40 backfill). GDELT throttles to roughly one query every 5s and answers
+    bursts with 429; back off and retry rather than failing the acquisition run.
     """
     params = build_params(
         query,
@@ -92,6 +122,8 @@ def search(
         timespan=timespan,
         sourcelang=sourcelang,
         sourcecountry=sourcecountry,
+        startdatetime=startdatetime,
+        enddatetime=enddatetime,
     )
     headers = {"User-Agent": _UA}
     last: httpx.Response | None = None
@@ -108,3 +140,27 @@ def search(
     if last is not None:
         last.raise_for_status()
     return []
+
+
+def search_window(
+    query: str,
+    *,
+    start: datetime,
+    end: datetime,
+    maxrecords: int = 50,
+    sourcelang: str | None = None,
+    sourcecountry: str | None = None,
+    timeout: float = 30.0,
+    retries: int = 4,
+) -> list[GdeltArticle]:
+    """Historical backfill query (#40): GDELT DOC over the ``[start, end]`` window (UTC)."""
+    return search(
+        query,
+        maxrecords=maxrecords,
+        sourcelang=sourcelang,
+        sourcecountry=sourcecountry,
+        startdatetime=gdelt_stamp(start),
+        enddatetime=gdelt_stamp(end),
+        timeout=timeout,
+        retries=retries,
+    )

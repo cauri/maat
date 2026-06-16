@@ -46,6 +46,45 @@ class StageSpend:
     usd: float
 
 
+# ── Daily spend cap (#195) ────────────────────────────────────────────────────────────────────
+# cauri signed off on a default $5/day ceiling for operator-triggered pipeline runs: the console
+# refuses to KICK OFF a run once today's estimated LLM spend has reached the cap, so a stuck loop
+# or an over-eager operator can't burn the budget. Tunable via MAAT_DAILY_CAP_USD; 0 (or negative)
+# disables the gate entirely (uncapped). The estimate is the same Haiku/Sonnet stage model used on
+# /spend, scoped to today — cat-cafe holds the exact figure.
+DEFAULT_DAILY_CAP_USD = 5.0
+
+
+def daily_cap_usd() -> float:
+    """The daily spend ceiling in USD. ``MAAT_DAILY_CAP_USD`` overrides the $5 default; an
+    unparseable value falls back to the default. ``<= 0`` means uncapped (the gate is disabled)."""
+    raw = os.environ.get("MAAT_DAILY_CAP_USD")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_DAILY_CAP_USD
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_DAILY_CAP_USD
+
+
+def cap_status(today_usd: float, cap_usd: float) -> dict:
+    """Pure: may a run start under the daily cap? ``cap_usd <= 0`` disables the gate (always allowed).
+
+    Returns a JSON-able dict: ``allowed`` (bool), ``today_usd``, ``cap_usd`` (None if uncapped),
+    ``remaining_usd`` (None if uncapped), ``capped`` (bool). A run is allowed while today's spend is
+    strictly below the cap — at or over it, the gate closes.
+    """
+    capped = cap_usd > 0
+    allowed = (not capped) or today_usd < cap_usd
+    return {
+        "allowed": allowed,
+        "today_usd": round(today_usd, 4),
+        "cap_usd": round(cap_usd, 4) if capped else None,
+        "remaining_usd": round(max(0.0, cap_usd - today_usd), 4) if capped else None,
+        "capped": capped,
+    }
+
+
 def _llm_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     pin, pout = PRICES.get(model, (0.0, 0.0))
     return (input_tokens / 1_000_000) * pin + (output_tokens / 1_000_000) * pout

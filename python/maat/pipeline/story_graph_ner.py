@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from maat.providers.seam import claude_complete
+from maat.providers.seam import mistral_complete
 
 # DRAFT — review with cauri (in-platform agent prompt fed to Claude; see D22/D23).
 _NER_PROMPT = (
@@ -29,7 +29,9 @@ def llm_entity_spine(text: str, *, max_entities: int = 8) -> list[str]:
     if not text.strip():
         return []
     try:
-        reply = claude_complete(_NER_PROMPT.format(max_entities=max_entities, text=text[:2000]))
+        # Bulk model (Mistral): entity extraction is high-volume (one call per cluster per tick),
+        # so it must NOT use the expensive judge model.
+        reply = mistral_complete(_NER_PROMPT.format(max_entities=max_entities, text=text[:2000]))
         raw = reply.text
         arr = json.loads(raw[raw.find("[") : raw.rfind("]") + 1])
         out: list[str] = []

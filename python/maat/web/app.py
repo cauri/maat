@@ -40,7 +40,11 @@ from maat.eval_prompt import summary as eval_prompt_summary
 from maat.evals import evaluate, load_expectations
 from maat.learning.calibration import Weights, replay_ab
 from maat.learning.calibration_prod import production_calibration
-from maat.learning.reputation import fold_reputation
+from maat.learning.reputation import (
+    fold_reputation,
+    reputation_score,
+    reputation_trajectories,
+)
 from maat.learning.rl import policy_step
 from maat.metrics import de_us
 from maat.obs_metrics import pipeline_health
@@ -441,7 +445,8 @@ async def spend_view(ok: str = "") -> str:
     )
     apify_usd = await asyncio.to_thread(spend_mod.apify_spend_usd)  # blocking httpx → off-loop
     otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-    return _doc(_spend_page(rows, llm_total, apify_usd, otlp), "spend", "spend", flash=ok)
+    budget = spend_mod.cap_status(await _today_spend_usd(pool), spend_mod.daily_cap_usd())
+    return _doc(_spend_page(rows, llm_total, apify_usd, otlp, budget), "spend", "spend", flash=ok)
 
 
 @app.get("/runs", response_class=HTMLResponse)
@@ -1515,54 +1520,73 @@ def _cluster_sources(cluster, art_source: dict, claim_art: dict) -> set[str]:
 
 
 async def _source_ratings(pool) -> list[dict]:
+    """Per-source reputation as the REAL §6 truth-over-time fold (#192/#37), not the old proxy.
+
+    Folds the ``cluster.corroborated`` event trajectory into per-source standing
+    (``learning.reputation.fold_reputation``): independent-originator rate, confirmation/refutation
+    outcomes where the trajectory resolved them, solo-extraordinary red flags. ``reputation`` is the
+    outcome-anchored 0..1 collapse (``reputation_score``); ``trajectory`` is a real sparkline of
+    that standing over expanding windows of history (``reputation_trajectories``) — replacing the
+    previous last-N-confidences proxy. Sources acquired but never corroborated are listed as
+    cold-start ("not yet rated"), so the Sources view keeps full coverage.
+    """
     from collections import defaultdict
 
-    arts = await pool.fetch("select id, source, language from articles")
-    clusters = await pool.fetch(
-        "select fact, originators, claim_ids, confidence, has_primary, created_at "
-        "from clusters order by created_at"
+    history = await _corroboration_history(pool)
+    reps = fold_reputation(history)
+    rep_by_src = {r.source: r for r in reps}
+    trajectories = reputation_trajectories(history)
+
+    # Language metadata per source (reputation itself is outcome-based, language-agnostic).
+    langrows = await pool.fetch(
+        "select distinct source, language from articles where source is not null"
     )
-    claims = await pool.fetch("select id, article_id from claims")
-    art_source = {a["id"]: a["source"] for a in arts}
-    art_lang = {a["id"]: a["language"] for a in arts}
-    claim_art = {str(c["id"]): c["article_id"] for c in claims}
-
-    confs: dict[str, list] = defaultdict(list)
-    facts: dict[str, set] = defaultdict(set)
     langs: dict[str, set] = defaultdict(set)
-    primary_part: dict[str, bool] = defaultdict(bool)
-
-    for cl in clusters:
-        srcs = _cluster_sources(cl, art_source, claim_art)
-        conf = float(cl["confidence"] or 0.0)
-        for s in srcs:
-            confs[s].append(conf)
-            facts[s].add(cl["fact"])
-            if cl["has_primary"]:
-                primary_part[s] = True
-        for cid in _jload(cl["claim_ids"]):
-            aid = claim_art.get(str(cid))
-            s = art_source.get(aid) if aid else None
-            if s and art_lang.get(aid):
-                langs[s].add(art_lang[aid])
+    all_sources: set[str] = set(rep_by_src)
+    for r in langrows:
+        all_sources.add(r["source"])
+        if r["language"]:
+            langs[r["source"]].add(r["language"])
 
     ratings = []
-    for s in sorted({a["source"] for a in arts if a["source"]}):
-        cs = confs.get(s, [])
-        is_primary = _is_primary_name(s) or primary_part.get(s, False)
-        cold = not cs and not is_primary
-        reputation = 0.9 if is_primary else (sum(cs) / len(cs) if cs else 0.5)
-        reputation = max(0.0, min(1.0, reputation))
+    for s in all_sources:
+        rec = rep_by_src.get(s)
+        primary_name = _is_primary_name(s)
+        if rec is None:
+            # Acquired but never in a corroborated cluster → genuinely not yet rated. Shown at the
+            # neutral midpoint (BRIEF §6.6: cold-start sources are presented neutrally, never penalised).
+            ratings.append(
+                {
+                    "name": s, "reputation": 0.5, "tier": _source_tier(0.5, True),
+                    "is_primary": primary_name, "n_stories": 0, "cold_start": True,
+                    "trajectory": [0.5], "languages": sorted(langs.get(s, set())) or ["en"],
+                    "independent_rate": 0.0, "confirmed": 0, "refuted": 0, "unresolved": 0,
+                    "confirmation_rate": None, "solo_extraordinary": 0,
+                }
+            )
+            continue
+        # Cold = no terminal truth outcome resolved yet (the truthfulness trajectory is unproven),
+        # regardless of primary standing — which is surfaced separately via is_primary.
+        cold = rec.outcome_n == 0
+        score = reputation_score(rec)
+        traj = trajectories.get(s) or [score]
         ratings.append(
             {
                 "name": s,
-                "reputation": round(reputation, 3),
-                "tier": _source_tier(reputation, cold),
-                "is_primary": is_primary,
-                "n_stories": len(facts.get(s, set())),
+                "reputation": score,
+                "tier": _source_tier(score, cold),
+                "is_primary": primary_name or rec.primary_appearances > 0,
+                "n_stories": rec.appearances,
                 "cold_start": cold,
-                "trajectory": [round(c, 3) for c in cs[-8:]] or [round(reputation, 3)],
+                "trajectory": [round(v, 3) for v in traj],
                 "languages": sorted(langs.get(s, set())) or ["en"],
+                # Real §6 dimensions (additive — existing clients ignore unknown keys).
+                "independent_rate": rec.independent_rate,
+                "confirmed": rec.facts_confirmed,
+                "refuted": rec.facts_refuted,
+                "unresolved": rec.facts_unresolved,
+                "confirmation_rate": rec.confirmation_rate,
+                "solo_extraordinary": rec.solo_extraordinary,
             }
         )
     ratings.sort(key=lambda r: (r["cold_start"], -r["reputation"], r["name"]))
@@ -1575,9 +1599,10 @@ async def api_sources() -> JSONResponse:
     return JSONResponse(
         {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "provisional": True,
-            "note": "Pre-reputation-fold proxy (P3 #37 not built): reputation approximated from "
-            "corroboration confidence + primary-source standing, not the §6 truthfulness trajectory.",
+            "provisional": False,
+            "note": "Reputation is the §6 truth-over-time fold over the corroboration trajectory "
+            "(confirmation/refutation outcomes + independent-originator rate); `trajectory` is the "
+            "sparkline of that standing across history. Sources never corroborated show as cold-start.",
             "count": len(ratings),
             "sources": ratings,
         }
@@ -1984,7 +2009,9 @@ _STAGES = [
 # ── Run the pipeline: one click runs the WHOLE flow with live per-step progress ──────────────
 # acquire (scripts/clock.py) → extract+classify drain (the always-on agents process the new
 # articles) → corroborate (recompute clusters). Each runs as a subprocess in the reader's env;
-# progress lives in _RUN, polled by /runs/status. No spend gate (cauri) — running is the point.
+# progress lives in _RUN, polled by /runs/status. A DAILY SPEND CAP (#195, cauri: default $5/day,
+# MAAT_DAILY_CAP_USD) gates the START of a run: once today's estimated LLM spend reaches the cap,
+# the console refuses to kick off another run so a stuck loop can't burn the budget.
 _RUN: dict = {"active": False, "started": None, "finished": None, "error": None, "steps": []}
 _ROOT = Path(__file__).resolve().parents[2]  # the python/ project root (has scripts/ + maat/)
 
@@ -2063,18 +2090,62 @@ async def _run_pipeline() -> None:
         _RUN["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+async def _today_spend_usd(pool) -> float:
+    """Estimated USD spent on LLM pipeline calls TODAY (UTC), from today's event log — the daily
+    cap's cost signal (#195). The dominant Haiku/Sonnet stages (extract/classify/extremity);
+    embeddings are negligible and excluded. Same estimator as /spend, date-scoped. cat-cafe is exact."""
+    counts = {
+        r["type"]: r["n"]
+        for r in await pool.fetch(
+            "select type, count(*) n from events where type in "
+            "('claims.extracted','claims.classified','cluster.corroborated') "
+            "and created_at >= date_trunc('day', now() at time zone 'utc') group by type"
+        )
+    }
+    _, total = spend_mod.estimate_llm_spend(
+        extract_calls=counts.get("claims.extracted", 0),
+        classify_calls=counts.get("claims.classified", 0),
+        extremity_calls=counts.get("cluster.corroborated", 0),
+        embed_claims=0,
+    )
+    return total
+
+
 @app.post("/runs/run-all")
 async def runs_run_all() -> JSONResponse:
-    """Kick off a full pipeline run (one at a time). Returns immediately; the UI polls /runs/status."""
+    """Kick off a full pipeline run (one at a time). Returns immediately; the UI polls /runs/status.
+
+    Budget guard (#195): refuses to start once today's estimated spend has reached the daily cap
+    (default $5, MAAT_DAILY_CAP_USD); the refusal is recorded in the audit log and surfaced to the
+    operator via the run state's error line."""
     if _RUN["active"]:
         return JSONResponse({"already_running": True, **_run_state()})
+    today = await _today_spend_usd(app.state.pool)
+    cap = spend_mod.daily_cap_usd()
+    budget = spend_mod.cap_status(today, cap)
+    if not budget["allowed"]:
+        await _publish(
+            events.ADMIN_RUN_TRIGGERED, "pipeline",
+            events.admin_event(
+                "pipeline", reason=f"blocked by daily cap ${cap:.2f} (today ≈ ${today:.2f})",
+                blocked=True,
+            ),
+        )
+        _RUN.update(
+            active=False,
+            error=f"Daily spend cap ${cap:.2f} reached (today ≈ ${today:.2f}). Run skipped — "
+            "raise MAAT_DAILY_CAP_USD or wait for tomorrow (UTC).",
+            finished=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            steps=[{"label": lbl, "status": "idle"} for lbl, _e, _c in _STAGES],
+        )
+        return JSONResponse({"blocked": True, "budget": budget, **_run_state()})
     _RUN.update(
         active=True, started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        finished=None, error=None,
+        finished=None, error=None, budget=budget,
         steps=[{"label": lbl, "status": "pending"} for lbl, _e, _c in _STAGES],
     )
     asyncio.create_task(_run_pipeline())
-    return JSONResponse(_run_state())
+    return JSONResponse({"budget": budget, **_run_state()})
 
 
 @app.get("/runs/status")
@@ -2151,7 +2222,7 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     )
 
 
-def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
+def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | None = None) -> str:
     apify_cell = f"${apify_usd:,.2f}" if apify_usd is not None else "—"
     grand = llm_total + (apify_usd or 0.0)
     cells = (
@@ -2159,6 +2230,27 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
         f'<div class="mcell"><div class="mk">AI / LLM (est.)</div><div class="mv">${llm_total:,.2f}</div></div>'
         f'<div class="mcell"><div class="mk">Apify (actual)</div><div class="mv">{apify_cell}</div></div>'
     )
+    budget_line = ""
+    if budget:
+        today = budget.get("today_usd", 0.0)
+        if budget.get("capped"):
+            cap = budget.get("cap_usd", 0.0)
+            remaining = budget.get("remaining_usd", 0.0)
+            state = (
+                '<span class="b ok">runs allowed</span>' if budget.get("allowed")
+                else '<span class="b warn">runs paused — cap reached</span>'
+            )
+            budget_line = (
+                f'<div class="mut sm mt">Daily run cap (#195): today ≈ <b>${today:,.2f}</b> of '
+                f'<b>${cap:,.2f}</b> — ${remaining:,.2f} left. {state}. '
+                "Operator runs are blocked once today's estimate reaches the cap "
+                "(<span class=\"mono\">MAAT_DAILY_CAP_USD</span>; UTC day).</div>"
+            )
+        else:
+            budget_line = (
+                f'<div class="mut sm mt">Daily run cap (#195): <b>uncapped</b> '
+                f'(today ≈ ${today:,.2f}; set <span class="mono">MAAT_DAILY_CAP_USD</span> to enable).</div>'
+            )
     srows = "".join(
         f'<tr><td>{html.escape(r.stage)}</td><td class="mono mut">{html.escape(r.model)}</td>'
         f'<td style="text-align:right">{r.calls:,}</td>'
@@ -2182,6 +2274,7 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str) -> str:
         '<div class="mut sm mt">LLM figures are <b>estimated</b> from cumulative call counts × '
         "per-model token estimates; the exact per-call cost (and live token usage) is in cat-cafe. "
         f"Apify is the actual billed figure from its usage API. Per-call detail: {catcafe}.</div>"
+        f"{budget_line}"
         "</div>"
     )
 
