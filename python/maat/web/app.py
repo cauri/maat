@@ -865,7 +865,19 @@ async def config_revert(key: str = Form(...), reason: str = Form("")):
                 key, actor="revert", reason=reason or "revert to code default", key=key, value=default
             ),
         )
-        msg = f"Reverted {key} to its built-in {default}. Filed as a suggestion — sign off to apply."
+        if key in config._ENACTABLE:
+            # #185: revert flows through the SAME enact path as promote — roll the live value back
+            # to the code default (not just a re-proposal) for knobs the pipeline reads.
+            await _publish(
+                events.ADMIN_CONFIG_PROMOTED,
+                key,
+                events.admin_event(
+                    key, actor="revert", reason="revert to code default", key=key, value=default
+                ),
+            )
+            msg = f"Reverted {key} to its built-in {default} — live now (next corroboration pass)."
+        else:
+            msg = f"Reverted {key} to its built-in {default}. Filed as a suggestion — sign off to apply."
     else:
         msg = _BUS_DOWN
     return _redirect("/config", msg)
