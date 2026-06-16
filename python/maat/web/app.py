@@ -27,7 +27,13 @@ from urllib.parse import quote
 
 import asyncpg
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -781,6 +787,38 @@ async def prompts_chat(req: PromptChatReq) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001 - any provider/network error stays graceful, never 500
         return JSONResponse({"error": f"Chat unavailable — {exc}"}, status_code=200)
     return JSONResponse({"reply": reply.text})
+
+
+async def _chat_ndjson(prompt: str, *, max_tokens: int):
+    """Stream a Claude reply as newline-delimited JSON: ``{"t": "<delta>"}`` per token, then a
+    terminal ``{"done": true}``; any provider error becomes one ``{"error": "..."}`` line instead of
+    a 500 (the chat degrades in place, exactly like the non-streaming endpoint). JSON-encoding each
+    delta keeps embedded newlines on a single NDJSON line, so the client can split on ``\\n``."""
+    try:
+        async for delta in seam.claude_stream(prompt, model=seam.CLAUDE_JUDGE, max_tokens=max_tokens):
+            yield json.dumps({"t": delta}) + "\n"
+        yield json.dumps({"done": True}) + "\n"
+    except KeyError:  # ANTHROPIC_API_KEY not set
+        yield json.dumps(
+            {"error": "Chat unavailable — set ANTHROPIC_API_KEY in the reader's env to enable it."}
+        ) + "\n"
+    except Exception as exc:  # noqa: BLE001 - any provider/network error stays graceful, never 500
+        yield json.dumps({"error": f"Chat unavailable — {exc}"}) + "\n"
+
+
+@app.post("/prompts/chat/stream")
+async def prompts_chat_stream(req: PromptChatReq) -> StreamingResponse:
+    """Streaming variant of /prompts/chat (#158) — same prompt, same agent, token-by-token over
+    NDJSON so the console chat renders as it generates. Editable keys only; degrades gracefully."""
+    p = prompts.PROMPTS_BY_KEY.get(req.key)
+    if req.key not in prompts.EDITABLE_KEYS or p is None:
+
+        async def _guard():
+            yield json.dumps({"error": "Chat is available on the editable prompts only."}) + "\n"
+
+        return StreamingResponse(_guard(), media_type="application/x-ndjson")
+    prompt = _prompt_chat_prompt(p["label"], p.get("description", ""), req.current, req.messages)
+    return StreamingResponse(_chat_ndjson(prompt, max_tokens=1500), media_type="application/x-ndjson")
 
 
 class AssistantReq(BaseModel):
@@ -3344,47 +3382,75 @@ function maatBubble(log,cls,html){
   var d=document.createElement('div'); d.className='msg '+cls; d.innerHTML=html;
   log.appendChild(d); return d;
 }
+// --- chat plumbing shared by the streaming chats -------------------------------------------
+// Read an NDJSON stream ({"t":delta} per token, {"error":msg}, {"done":true}); fire onDelta/onError.
+function maatStream(url,body,onDelta,onError){
+  return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)}).then(async function(resp){
+    if(!resp.ok||!resp.body){ onError('Chat unavailable — HTTP '+resp.status); return; }
+    var reader=resp.body.getReader(), dec=new TextDecoder(), buf='', nl;
+    while(true){
+      var r=await reader.read(); if(r.done) break;
+      buf+=dec.decode(r.value,{stream:true});
+      while((nl=buf.indexOf('\n'))>=0){
+        var line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+        if(!line) continue;
+        var m; try{ m=JSON.parse(line); }catch(_){ continue; }
+        if(m.error){ onError(m.error); return; }
+        if(m.t) onDelta(m.t);
+      }
+    }
+  });
+}
+// Autoscroll only when the reader is already near the bottom (don't yank them off old messages).
+function maatStick(log){ return log.scrollHeight-log.scrollTop-log.clientHeight<48; }
+function maatScroll(log,stick){ if(stick) log.scrollTop=log.scrollHeight; }
+function maatBusy(input,btn,busy,label){ input.disabled=busy; btn.disabled=busy; btn.textContent=busy?'…':label; }
+function maatGrow(t){ if(!t) return; t.style.height='auto'; t.style.height=Math.min(t.scrollHeight,170)+'px'; }
+function maatApplyBtn(editor,code){
+  var b=document.createElement('button');
+  b.type='button'; b.className='apply'; b.textContent='Apply to editor';
+  b.title='Fill the prompt box above with this proposal — then review and Save new version';
+  b.onclick=function(){ editor.value=code; editor.focus(); editor.scrollIntoView({block:'center'});
+    b.textContent='Applied ✓'; b.disabled=true; };
+  return b;
+}
+
 async function maatPromptChat(key){
-  var input=document.getElementById('in-'+key);
-  var log=document.getElementById('log-'+key);
-  var btn=document.getElementById('send-'+key);
-  var editor=document.getElementById('ta-'+key);
-  if(!input||!log||!editor) return;
-  var text=input.value.trim();
-  if(!text) return;
+  var input=document.getElementById('in-'+key), log=document.getElementById('log-'+key);
+  var btn=document.getElementById('send-'+key), editor=document.getElementById('ta-'+key);
+  if(!input||!log||!editor||input.disabled) return;
+  var text=input.value.trim(); if(!text) return;
   var convo=window.maatChats[key]||(window.maatChats[key]=[]);
   convo.push({role:'user',content:text});
   maatBubble(log,'you',maatEsc(text));
-  input.value=''; btn.disabled=true; var label=btn.textContent; btn.textContent='…';
-  log.scrollTop=log.scrollHeight;
+  input.value=''; maatGrow(input);
+  var label=btn.textContent; maatBusy(input,btn,true,label);
+  var stick=maatStick(log); maatScroll(log,stick);
+  var bubble=maatBubble(log,'bot streaming',''), acc='';
   try{
-    var resp=await fetch('/prompts/chat',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({key:key,current:editor.value,messages:convo})});
-    var data=await resp.json();
-    if(data.error){
-      maatBubble(log,'err',maatEsc(data.error));
-    }else{
-      convo.push({role:'assistant',content:data.reply});
-      var parts=maatSplit(data.reply);
-      var bubble=maatBubble(log,'bot',parts.html);
-      if(parts.code!==null){
-        var apply=document.createElement('button');
-        apply.type='button'; apply.className='apply'; apply.textContent='Apply to editor';
-        apply.title='Fill the prompt box above with this proposal — then review and Save new version';
-        apply.onclick=function(){
-          editor.value=parts.code; editor.focus();
-          editor.scrollIntoView({block:'center'});
-          apply.textContent='Applied ✓'; apply.disabled=true;
-        };
-        bubble.appendChild(apply);
-      }
-    }
-  }catch(e){
-    maatBubble(log,'err','Chat unavailable — '+maatEsc(e.message||e));
+    await maatStream('/prompts/chat/stream',{key:key,current:editor.value,messages:convo},
+      function(t){ acc+=t; bubble.textContent=acc; maatScroll(log,stick); },
+      function(err){ bubble.className='msg err'; bubble.textContent=err; });
+  }catch(e){ bubble.className='msg err'; bubble.textContent='Chat unavailable — '+((e&&e.message)||e); }
+  if(bubble.classList.contains('streaming')){
+    bubble.classList.remove('streaming');
+    if(acc.trim()){
+      convo.push({role:'assistant',content:acc});
+      var parts=maatSplit(acc); bubble.innerHTML=parts.html;
+      if(parts.code!==null) bubble.appendChild(maatApplyBtn(editor,parts.code));
+    }else{ bubble.remove(); }
   }
-  btn.disabled=false; btn.textContent=label; log.scrollTop=log.scrollHeight;
+  maatBusy(input,btn,false,label); input.focus(); maatScroll(log,stick);
 }
+// Enter sends, Shift+Enter = newline; textarea auto-grows as you type.
+(function(){
+  var ta=document.querySelector('.chat3 .chat-in'); if(!ta) return;
+  var box=ta.closest('.chat3'); if(!box) return; var key=box.dataset.key;
+  ta.addEventListener('keydown',function(e){
+    if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); maatPromptChat(key); }});
+  ta.addEventListener('input',function(){ maatGrow(ta); });
+})();
 
 // Page-aware console assistant (always-open right panel). Sends the current page + conversation
 // to /assistant/chat; renders the reply. Read-only Q&A for now.

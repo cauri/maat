@@ -12,7 +12,9 @@ grows from here.
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
@@ -67,6 +69,57 @@ def claude_complete(prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int =
         record_completion(span, text, input_tokens=u.get("input_tokens", 0),
                           output_tokens=u.get("output_tokens", 0))
         return Reply(text=text, model=model)
+
+
+async def claude_stream(
+    prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 1024
+) -> AsyncIterator[str]:
+    """Streaming Claude: yields text deltas as they arrive (Anthropic SSE, ``stream: true``).
+
+    The async counterpart to ``claude_complete`` for interactive surfaces (the console chat) — same
+    request shape, same telemetry (one span, completion recorded with the assembled text + usage),
+    just incremental. Raises like ``claude_complete`` (KeyError without the key, HTTP/transport
+    errors on a bad response); callers wrap it for graceful degradation.
+    """
+    key = os.environ["ANTHROPIC_API_KEY"]
+    parts: list[str] = []
+    in_tok = out_tok = 0
+    with llm_span("judge", model, prompt) as span:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            async with client.stream(
+                "POST",
+                ANTHROPIC_URL,
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    evt = json.loads(payload)
+                    etype = evt.get("type")
+                    if etype == "content_block_delta":
+                        text = (evt.get("delta") or {}).get("text", "")
+                        if text:
+                            parts.append(text)
+                            yield text
+                    elif etype == "message_start":
+                        in_tok = ((evt.get("message") or {}).get("usage") or {}).get("input_tokens", 0)
+                    elif etype == "message_delta":
+                        out_tok = (evt.get("usage") or {}).get("output_tokens", out_tok)
+        record_completion(span, "".join(parts), input_tokens=in_tok, output_tokens=out_tok)
 
 
 def mistral_complete(prompt: str, *, model: str = MISTRAL_BULK, max_tokens: int = 256) -> Reply:
