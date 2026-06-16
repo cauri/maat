@@ -100,9 +100,9 @@ section.band{padding:62px 0;border-top:1px solid var(--line)}
 .pillars{display:grid;grid-template-columns:1fr;gap:16px;margin-top:40px}
 @media(min-width:720px){.pillars{grid-template-columns:1fr 1fr}}
 .pillar{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px 24px 22px}
-.pillar .n{font-family:var(--serif);font-size:15px;font-weight:700;color:var(--gold);
-  width:34px;height:34px;border:1.5px solid var(--gold-wash);border-radius:10px;
-  display:flex;align-items:center;justify-content:center;margin-bottom:14px;background:#fff}
+.pillar .ic{color:var(--gold);width:40px;height:40px;border:1.5px solid var(--gold-wash);
+  border-radius:11px;display:flex;align-items:center;justify-content:center;margin-bottom:14px;background:#fff}
+.pillar .ic svg{width:21px;height:21px}
 .pillar h3{font-family:var(--serif);font-weight:600;font-size:21px;letter-spacing:-.01em;margin:0 0 7px}
 .pillar p{margin:0;color:#42402f;font-size:15.5px;line-height:1.55}
 .pillar.span2{grid-column:1/-1}
@@ -198,27 +198,27 @@ form.notify button{font:600 15px/1 var(--sans);padding:0 18px;border:0;border-ra
       <p class="sub">Most feeds rank by reach. Maat asks the only question that matters of every story: can you trust it?</p>
       <div class="pillars">
         <div class="pillar">
-          <div class="n">1</div>
-          <h3>A reliability score on every source</h3>
-          <p>Maat rates how much you can trust each outlet — and, soon, the individual writers and contributors behind a story. No more guessing who's worth believing.</p>
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4.5-5"/><circle cx="12" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg></div>
+          <h3>A trust signal you can see</h3>
+          <p>Maat scores how reliable each source is — and, soon, the individual writers and contributors behind a story — and puts a clear trust read on every story. Tell at a glance what holds up, instead of guessing or taking it on faith.</p>
         </div>
         <div class="pillar">
-          <div class="n">2</div>
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 7l-8.5 8.5-5-5L2 17"/><path d="M16 7h6v6"/></svg></div>
           <h3>Reputation is earned, not assumed</h3>
-          <p>Sources earn their score by being right. The ones with a track record of accurate reporting rise; the ones that keep getting it wrong fall. Trust follows the truth — over time, not the loudest moment.</p>
+          <p>Sources earn their score by being right. A track record of accurate reporting lifts them; getting it wrong pulls them down. Trust follows the truth — over time, not the loudest moment.</p>
         </div>
         <div class="pillar">
-          <div class="n">3</div>
-          <h3>A trust read on every story</h3>
-          <p>Every story carries a clear, visible signal of how much it holds up — so you can tell at a glance what to rely on, instead of guessing or taking it on faith.</p>
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div>
+          <h3>Built to resist manipulation</h3>
+          <p>Bias, coordinated campaigns, information laundering — there's a whole playbook for making inaccurate news look credible. Maat accounts for these tactics, so manipulation doesn't earn your trust.</p>
         </div>
         <div class="pillar">
-          <div class="n">4</div>
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.7 2.6 2.7 15.4 0 18M12 3c-2.7 2.6-2.7 15.4 0 18"/></svg></div>
           <h3>The whole world, every language</h3>
           <p>Maat reads the news in every language, from sources across the globe — so you see the full picture, not just the English-language press or one corner of the world.</p>
         </div>
         <div class="pillar span2">
-          <div class="n">5</div>
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="9.5" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg></div>
           <h3>Yours, and private</h3>
           <p>Tell Maat your interests in plain language; it tunes your feed to your taste on your own device — your reading stays with you. Built in Europe, with no trackers and no ads.</p>
         </div>
