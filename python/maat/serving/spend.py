@@ -22,17 +22,19 @@ import httpx
 
 # $ per 1M tokens (input, output). Estimates — the source of truth is each vendor's invoice.
 PRICES: dict[str, tuple[float, float]] = {
-    "claude-haiku-4-5-20251001": (1.00, 5.00),   # extract + classify
-    "claude-sonnet-4-6": (3.00, 15.00),          # extremity (sharper priors)
+    "claude-sonnet-4-6": (3.00, 15.00),          # extract + classify + extremity (all pin Sonnet)
+    "claude-haiku-4-5-20251001": (1.00, 5.00),   # retained for reference; no stage runs on it
     "mistral-embed": (0.10, 0.0),                # clustering embeddings
 }
 
 # Rough tokens per call, per stage (input, output). Coarse — cat-cafe is exact. Tuned to the
 # prompts' shape: extract/classify read the article body (~big input); extremity rates one short
-# fact; embeddings are short claim texts.
+# fact; embeddings are short claim texts. Models track the pipeline's actual pins
+# (EXTRACT_MODEL / CLASSIFY_MODEL / EXTREMITY_MODEL = claude-sonnet-4-6) — NOT Haiku, which the
+# pipeline does not use (this estimate previously under-counted extract/classify at Haiku prices).
 _PER_CALL = {
-    "extract": (1500, 600, "claude-haiku-4-5-20251001"),
-    "classify": (1800, 400, "claude-haiku-4-5-20251001"),
+    "extract": (1500, 600, "claude-sonnet-4-6"),
+    "classify": (1800, 400, "claude-sonnet-4-6"),
     "extremity": (300, 150, "claude-sonnet-4-6"),
 }
 _EMBED_TOKENS_PER_CLAIM = 50  # mistral-embed input per claim text (rough)

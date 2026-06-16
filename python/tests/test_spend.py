@@ -11,7 +11,7 @@ def test_estimate_llm_spend_sums_stages_and_routes_models():
     )
     by = {r.stage: r for r in rows}
     assert set(by) == {"extract", "classify", "extremity", "embeddings"}
-    assert by["extract"].model == "claude-haiku-4-5-20251001"
+    assert by["extract"].model == "claude-sonnet-4-6"  # pipeline pins Sonnet, not Haiku
     assert by["extremity"].model == "claude-sonnet-4-6"
     assert by["embeddings"].model == "mistral-embed"
     assert by["extract"].calls == 10 and by["extremity"].calls == 5
