@@ -57,6 +57,7 @@ from maat.serving.feed import feed_router
 from maat.serving.translate import translate_text
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import record as feedback_record
+from maat.serving.feedback import record_triage as feedback_record_triage
 from maat.serving.feedback import routed_queue
 
 CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
@@ -830,6 +831,22 @@ async def review_view(ok: str = "") -> str:
         "review",
         flash=ok,
     )
+
+
+@app.post("/review/act")
+async def review_act(item_id: str = Form(...), action: str = Form(...), reason: str = Form("")):
+    # #188 — an operator resolves a review-queue item: record a feedback.triaged DECISION so it
+    # leaves the open queue (resolve / dismiss / route to auto-fix). Untrusted input (#77): this is
+    # the human deciding — never an auto-action.
+    routes = {"resolve": "resolved", "dismiss": "dismissed", "fix": "auto-fix"}
+    route = routes.get(action)
+    if route is None:
+        return _redirect("/review", "Unknown action.")
+    await feedback_record_triage(
+        app.state.pool, None, item_id=item_id, category="operator-decision",
+        route=route, reason=reason or f"operator {action}", auto_fixable=(route == "auto-fix"),
+    )
+    return _redirect("/review", f"Item {action} recorded.")
 
 
 @app.get("/policy", response_class=HTMLResponse)
@@ -2627,6 +2644,16 @@ _TRIAGE_LABELS = {
 }
 
 
+def _review_btn(item_id: str, action: str, label: str) -> str:
+    return (
+        '<form class="inline" method="post" action="/review/act">'
+        f'<input type="hidden" name="item_id" value="{html.escape(str(item_id))}">'
+        f'<input type="hidden" name="action" value="{action}">'
+        f'<button title="{label} this item (logged as an operator decision; leaves the queue).">'
+        f'{label}</button></form>'
+    )
+
+
 def _triage_row(it: dict, *, fresh: bool) -> str:
     """One feedback item row (works for both triaged events and live-classified previews)."""
     tri = it.get("triage") or it  # triaged events nest under 'triage'; previews are flat
@@ -2639,12 +2666,18 @@ def _triage_row(it: dict, *, fresh: bool) -> str:
                          "triage agent hasn't filed it yet") if fresh else ""
     when = it.get("submitted_at") or it.get("triaged_at")
     when_html = f'<span class="mut sm">{when:%Y-%m-%d %H:%M}</span>' if when else ""
+    iid = it.get("item_id") or tri.get("item_id") or ""
+    actions = (
+        '<div class="cact">'
+        f'{_review_btn(iid, "resolve", "Resolve")}{_review_btn(iid, "dismiss", "Dismiss")}'
+        f'{_review_btn(iid, "fix", "Route to auto-fix")}</div>'
+    ) if iid else ""
     return (
         f'<div class="mc"><div class="bs">{cat_badge}{fresh_badge} '
         f'<span class="mut sm">{html.escape(str(it.get("source", "")))} · '
         f'confidence {round(conf * 100)}% · {when_html}</span></div>'
         f'<div class="t">{html.escape(str(it.get("text", "")))}</div>'
-        f'<div class="mut sm">{html.escape(str(tri.get("reason", "")))}</div></div>'
+        f'<div class="mut sm">{html.escape(str(tri.get("reason", "")))}</div>{actions}</div>'
     )
 
 
