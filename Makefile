@@ -50,6 +50,9 @@ backfill:
 triage:
 	cd python && uv run python -m maat.agents.triage
 
+file-issues:
+	cd python && uv run python -m maat.serving.issue_filing
+
 eval:
 	cd python && uv run python scripts/eval.py
 
