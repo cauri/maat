@@ -38,6 +38,7 @@ import httpx
 
 from maat.agents.curation import Story as CurationStory, curate
 from maat.pipeline.corroborate import confidence_label
+from maat.serving.topics import parse_interest, story_matches
 
 # FastAPI is a hard dependency, but keep the import guarded so the pure builders above stay
 # importable in any stripped-down env. Hoisted to module scope (not deferred inside _make_router)
@@ -53,6 +54,33 @@ except ImportError:  # pragma: no cover - FastAPI absent (pure-builder-only env)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _filter_by_topics(payload: dict, topics: str) -> dict:
+    """Personal-feed filter (#50): keep only stories matching the reader's NL interests.
+
+    ``topics`` is a comma-separated free-text list ("art, West African politics"); each is parsed
+    to a ``TopicSpec`` (parse_interest) and matched against the story's fact + claim texts via
+    ``story_matches``. No topics → the payload is returned unchanged, so the default feed and
+    every existing client are untouched. Wires the previously-orphaned parse_interest /
+    story_matches (the curation/serving half of #50) into the live Feed API.
+    """
+    wanted = [t.strip() for t in (topics or "").split(",") if t.strip()]
+    if not wanted:
+        return payload
+    specs = [parse_interest(t) for t in wanted]
+    kept = [
+        s
+        for s in payload.get("stories", [])
+        if story_matches(
+            {
+                "title": s.get("fact", ""),
+                "body": " ".join(c.get("text", "") for c in s.get("claims", [])),
+            },
+            specs,
+        )
+    ]
+    return {**payload, "stories": kept, "count": len(kept)}
 
 
 def _jload(v: Any) -> list:
@@ -519,14 +547,18 @@ def _make_router() -> Any:
         return [dict(r) for r in rows]
 
     @router.get("/feed", response_class=JSONResponse)
-    async def feed_endpoint(request: Request):
-        """Served feed: stories ordered by confidence then de-US re-ranked."""
+    async def feed_endpoint(request: Request, topics: str = ""):
+        """Served feed: stories ordered by confidence then de-US re-ranked.
+
+        Optional ``?topics=`` — a comma-separated list of natural-language interests
+        ("art, West African politics") — personalises the feed to stories matching at least
+        one interest (#50). Omitted/empty returns the full feed (backward-compatible)."""
         pool = request.app.state.pool
         clusters = await _load_clusters(pool)
         article_meta = await _load_article_meta(pool)
         claims_by_id = await _load_claims_by_id(pool)
         payload = build_feed(clusters, claims_by_id, article_meta)
-        return JSONResponse(payload)
+        return JSONResponse(_filter_by_topics(payload, topics))
 
     @router.get("/story/{cluster_id}", response_class=JSONResponse)
     async def story_endpoint(cluster_id: str, request: Request):
