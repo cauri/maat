@@ -135,6 +135,8 @@ services:
           uv run --no-dev python scripts/harvest.py || echo "[clock] harvest error";
           echo "[clock] triage (route submitted feedback to review/auto-fix, #58)";
           uv run --no-dev python -m maat.agents.triage || echo "[clock] triage error";
+          echo "[clock] file-issues (auto-fix feedback -> tracked issues, #214)";
+          uv run --no-dev python -m maat.serving.issue_filing || echo "[clock] issue-filing error";
           echo "[clock] tick done; sleeping $${MAAT_TICK_INTERVAL}s";
           sleep "$${MAAT_TICK_INTERVAL}";
         done
