@@ -20,7 +20,6 @@ The script is idempotent — repeated runs are safe.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
@@ -31,6 +30,7 @@ from dotenv import load_dotenv
 from maat import events
 from maat.bus import connect
 from maat.learning.calibration_prod import format_status, production_calibration
+from maat.learning.trajectory import load_trajectory
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -40,14 +40,8 @@ async def main() -> None:
     pool = await asyncpg.create_pool(
         os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
     )
-    rows = await pool.fetch(
-        "select data from events where type = 'cluster.corroborated' order by id"
-    )
+    history = await load_trajectory(pool)
     await pool.close()
-
-    history = [
-        json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows
-    ]
 
     status = production_calibration(history)
     print(format_status(status))

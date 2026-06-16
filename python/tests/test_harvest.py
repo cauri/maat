@@ -25,6 +25,9 @@ _CLUSTER_ROW = {
     "has_primary": True,
     "extremity": "notable",
     "confidence": 0.72,
+    "sources": ["Reuters", "ECB"],
+    "originators": [["a1"], ["a2"], ["a3"]],
+    "corrected": True,
 }
 
 _CLUSTER_ROW_MINIMAL = {
@@ -66,14 +69,21 @@ def test_event_data_carries_all_required_fields():
     assert data["extremity"] == "notable"
     assert data["confidence"] == 0.72
     assert data["harvested_at"] == _AT.isoformat()
+    # enriched trajectory fields the learning folds read off the snapshot
+    assert data["sources"] == ["Reuters", "ECB"]
+    assert data["originators"] == [["a1"], ["a2"], ["a3"]]
+    assert data["corrected"] is True
 
 
 def test_event_data_defaults_for_optional_columns():
-    """Rows without extremity/confidence columns use sensible defaults."""
+    """Rows without extremity/confidence/sources/originators/corrected use sensible defaults."""
     evs = harvest([_CLUSTER_ROW_MINIMAL], at=_AT)
     data = evs[0]["data"]
     assert data["extremity"] == "notable"
     assert data["confidence"] == 0.0
+    assert data["sources"] == []
+    assert data["originators"] == []
+    assert data["corrected"] is False
 
 
 def test_tenant_id_propagated():
