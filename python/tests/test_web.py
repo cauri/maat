@@ -913,3 +913,16 @@ def test_assistant_panel_and_prompt_wired():
     assert prompts.PROMPTS_BY_KEY["console_assistant"]["status"] == "draft"  # reviewable, code-canonical
     assert prompts.PROMPTS_BY_KEY["console_assistant"]["placeholders"] == ["{page}", "{purpose}"]
     assert _assistant_prompt("Settings", "the dials", [], "On {page}: {purpose}") == "On Settings: the dials"
+
+
+def test_activity_has_one_run_button_not_per_step_logs():
+    """Activity shows a single 'Run the pipeline' control + per-step progress pills; the old
+    per-stage 'Log a run' buttons (which didn't actually run anything) are gone."""
+    from maat.web.app import _run_state, _runs_page, stage_summary
+
+    page = _runs_page(stage_summary({}), {"articles": 0, "claims": 0, "clusters": 0}, [], [])
+    assert "run-btn" in page and "maatRunPipeline()" in page          # one run button
+    assert 'id="rs-0"' in page and 'id="rs-3"' in page                # 4 progress pills
+    assert "Log a run" not in page and "/runs/trigger" not in page    # old per-step logs removed
+    steps = _run_state()["steps"]
+    assert len(steps) == 4 and steps[0]["label"] == "Find articles"   # the 4 pipeline steps

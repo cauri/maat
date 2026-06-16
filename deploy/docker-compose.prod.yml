@@ -134,6 +134,11 @@ services:
     build: ./python
     image: maat-app:local
     restart: unless-stopped
+    # Same .env as the pipeline services: the "Run the pipeline" button (Activity) shells out to
+    # the acquire + corroborate jobs, so the reader needs MAAT_TOPICS / APIFY_API_KEY / etc. too.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
       # The admin console (P8, #82) publishes corrections to NATS; without this the reader
