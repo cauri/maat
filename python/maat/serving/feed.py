@@ -41,6 +41,7 @@ from maat.learning.accuracy import lifecycle_by_fact
 from maat.learning.reputation import fold_reputation
 from maat.learning.source_learning import learn_preferences
 from maat.pipeline.corroborate import confidence_label, is_primary_source
+from maat.serving.source_flags import denied_sources
 from maat.serving.topics import parse_interest, story_matches
 
 # FastAPI is a hard dependency, but keep the import guarded so the pure builders above stay
@@ -83,6 +84,20 @@ def _filter_by_topics(payload: dict, topics: str) -> dict:
             specs,
         )
     ]
+    return {**payload, "stories": kept, "count": len(kept)}
+
+
+def _filter_denied(payload: dict, denied: set) -> dict:
+    """Operator source-deny enforcement (#187): drop stories sourced ENTIRELY from denied sources.
+    A story with at least one non-denied source stays — its corroboration still stands."""
+    if not denied:
+        return payload
+    kept = []
+    for s in payload.get("stories", []):
+        srcs = {src for g in s.get("originator_groups", []) for src in g.get("sources", [])}
+        if srcs and srcs <= denied:
+            continue
+        kept.append(s)
     return {**payload, "stories": kept, "count": len(kept)}
 
 
@@ -700,6 +715,18 @@ def _make_router() -> Any:
             return []
         return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
 
+    async def _load_denied(pool):
+        """Currently operator-denied sources (#187), folded from admin.source.flagged. Resilient."""
+        try:
+            rows = await pool.fetch(
+                "select data from events where type = 'admin.source.flagged' order by id"
+            )
+        except Exception:
+            return set()
+        return denied_sources(
+            (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in rows
+        )
+
     @router.get("/feed", response_class=JSONResponse)
     async def feed_endpoint(
         request: Request, topics: str = "", accuracy: int = 0, reputation: int = 0
@@ -716,6 +743,7 @@ def _make_router() -> Any:
         claims_by_id = await _load_claims_by_id(pool)
         payload = build_feed(clusters, claims_by_id, article_meta)
         payload = _filter_by_topics(payload, topics)
+        payload = _filter_denied(payload, await _load_denied(pool))  # #187: drop denied-only stories
         cluster_node, node_meta, node_edges = await _load_story_graph(pool)
         payload = _thread_payload(payload, cluster_node, node_meta, node_edges)
         if accuracy or reputation:

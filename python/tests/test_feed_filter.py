@@ -156,3 +156,18 @@ def test_reputation_map_serialises_per_source():
     ]
     out = _reputation_map(reps)
     assert out == {"reuters.com": 0.8765, "blog.example": 0.21}
+
+
+def test_filter_denied_drops_fully_denied_stories():
+    # #187 — operator source-deny enforcement on the served feed.
+    from maat.serving.feed import _filter_denied
+
+    payload = {"count": 3, "stories": [
+        {"id": "c1", "originator_groups": [{"sources": ["spam.example"]}, {"sources": ["gamed.example"]}]},
+        {"id": "c2", "originator_groups": [{"sources": ["reuters.com"]}, {"sources": ["spam.example"]}]},
+        {"id": "c3", "originator_groups": [{"sources": ["bbc.com"]}]},
+    ]}
+    out = _filter_denied(payload, {"spam.example", "gamed.example"})
+    assert [s["id"] for s in out["stories"]] == ["c2", "c3"]  # fully-denied c1 dropped; mixed c2 kept
+    assert out["count"] == 2
+    assert _filter_denied(payload, set()) is payload  # no denials → untouched
