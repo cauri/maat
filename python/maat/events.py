@@ -72,6 +72,20 @@ CLUSTER_SNAPSHOT = "cluster.snapshot"
 # (contradicted → REFUTED in resolve_outcome). stream_id IS the cluster_id.
 CLUSTER_GROUNDED = "cluster.grounded"
 
+# Automated contradiction detection (#229, §5/§8): the contradiction agent runs NLI between a claim
+# and its nearest neighbours and emits one CLAIM_RELATED per detected relation (contradicts /
+# entails) with the model's confidence score. maat-kerneld folds these into the claim_relations
+# projection (the story graph #42 later folds the SAME events into typed edges). A high-confidence
+# contradiction from a grounded / higher-confidence cluster feeds the refutation path. stream_id is
+# a stable hash of the unordered claim pair.
+CLAIM_RELATED = "claim.related"
+
+# A claim refuted by a STRONGER, contradicting claim (#229) — the contradiction agent arbitrates by
+# the two claims' cluster grounding / confidence and flags the loser. maat-kerneld sets claims.disputed,
+# which the harvester folds into the cluster's `corrected` exactly like an operator correction, so the
+# fact resolves REFUTED over time through the path #227 already built. stream_id IS the claim id.
+CLAIM_DISPUTED = "claim.disputed"
+
 # Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
 # typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
 # maat-kerneld projects it atomically into story_nodes / story_edges / story_node_clusters /

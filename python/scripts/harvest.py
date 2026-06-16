@@ -49,7 +49,7 @@ async def main() -> None:
         " exists ("
         "   select 1 from jsonb_array_elements_text(c.claim_ids) as t(cid)"
         "   join claims cl on cl.id = t.cid::uuid"
-        "   where cl.corrected or cl.laundering_flag is not null"
+        "   where cl.corrected or cl.laundering_flag is not null or cl.disputed"
         " ) as corrected"
         " from clusters c"
         " where c.tenant_id = $1",
