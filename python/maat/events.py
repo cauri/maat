@@ -65,6 +65,13 @@ ADMIN_EVENT_TYPES = frozenset(
 # idempotent per (cluster_id, calendar-day).
 CLUSTER_SNAPSHOT = "cluster.snapshot"
 
+# Primary-source grounding (#228, §5/§8): the grounding agent (agents.grounding_agent) judges
+# whether a cluster's fact is SUPPORTED / CONTRADICTED / NOT_ADDRESSED by its primary source, and
+# emits this with the grounding-refined confidence. maat-kerneld updates the cluster row (grounding
+# + confidence); the harvester carries the verdict into cluster_snapshots so it rides the trajectory
+# (contradicted → REFUTED in resolve_outcome). stream_id IS the cluster_id.
+CLUSTER_GROUNDED = "cluster.grounded"
+
 # Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
 # typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
 # maat-kerneld projects it atomically into story_nodes / story_edges / story_node_clusters /

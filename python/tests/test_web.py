@@ -212,7 +212,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     # Every runtime + console prompt is present (incl. the prompt-chat helper's own draft, #159).
     assert set(prompts.PROMPTS_BY_KEY) == {
         "extract", "classify", "extremity", "acquire_queries", "source_gate",  # active backend
-        "topics_enrich", "curation_geotag", "triage_llm",  # draft backend (gated)
+        "topics_enrich", "curation_geotag", "triage_llm", "grounding",  # draft backend (gated)
         "prompt_chat_agent", "console_assistant",    # draft: console chat helper + page assistant
         "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
     }
@@ -227,14 +227,16 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
         by_status.setdefault(p["status"], set()).add(p["key"])
     assert by_status["active"] == {"extract", "classify", "extremity", "acquire_queries", "source_gate"}
     assert by_status["draft"] == {
-        "topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent", "console_assistant"
+        "topics_enrich", "curation_geotag", "triage_llm", "grounding",
+        "prompt_chat_agent", "console_assistant"
     }
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
     # #189: every backend prompt is editable — drafts are live like any other, just tagged for
     # review. Only on-device (Swift mirrors) stay read-only / out of the editable set.
     assert prompts.EDITABLE_KEYS == frozenset(
         {"extract", "classify", "extremity", "acquire_queries", "source_gate",
-         "topics_enrich", "curation_geotag", "triage_llm", "prompt_chat_agent", "console_assistant"}
+         "topics_enrich", "curation_geotag", "triage_llm", "grounding",
+         "prompt_chat_agent", "console_assistant"}
     )
     assert "summarizer_ondevice" not in prompts.EDITABLE_KEYS
     assert "reranker_ondevice" not in prompts.EDITABLE_KEYS
@@ -245,11 +247,13 @@ def test_draft_prompts_imported_live_from_their_modules():
     from maat import prompts
     from maat.agents.curation import _DRAFT_GEOTAG_PROMPT
     from maat.agents.triage import TRIAGE_LLM_PROMPT
+    from maat.pipeline.grounding import GROUNDING_PROMPT
     from maat.serving.topics import _LLM_PROMPT_TEMPLATE
 
     assert prompts.PROMPTS_BY_KEY["topics_enrich"]["default"] == _LLM_PROMPT_TEMPLATE
     assert prompts.PROMPTS_BY_KEY["curation_geotag"]["default"] == _DRAFT_GEOTAG_PROMPT
     assert prompts.PROMPTS_BY_KEY["triage_llm"]["default"] == TRIAGE_LLM_PROMPT
+    assert prompts.PROMPTS_BY_KEY["grounding"]["default"] == GROUNDING_PROMPT
     # Draft prompts have no editable placeholders.
     assert prompts.missing_placeholders("triage_llm", "anything") == []
 

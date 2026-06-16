@@ -319,6 +319,9 @@ _DECAY = {
 # below 1.0 — nothing is ever certain (§5.7). DRAFT — surfaced in the admin Config panel.
 _PRIMARY_LIFT = 0.5
 _CONFIDENCE_CAP = 0.97
+# Primary-source grounding (#228): a primary that CONTRADICTS the claim multiplies the read down
+# (a strong negative — the issuer's own record disputes it). DRAFT — surfaced for tuning.
+_GROUNDING_CONTRADICTED_PENALTY = 0.4
 
 
 def confidence_read(
@@ -326,6 +329,7 @@ def confidence_read(
     decay: dict[str, float] | None = None,
     primary_lift: float | None = None,
     cap: float | None = None,
+    grounding: str | None = None,
 ) -> float:
     """The confidence read on a corroborated fact (§5.6-5.7) — DRAFT, review on return.
 
@@ -334,14 +338,22 @@ def confidence_read(
     doubt is scaled by the claim's prior — an extraordinary claim needs more independent
     originators to reach the same confidence. Capped below certainty.
 
+    `grounding` (#228) refines the primary lift once a primary-source check has run: "supported"
+    earns the lift, "not_addressed" WITHHOLDS it (a primary that doesn't actually back the claim
+    no longer inflates confidence), "contradicted" withholds it and multiplies the read down.
+    None means no grounding signal — unchanged behaviour, so all existing callers are unaffected.
+
     The weights default to the live constants; passing `decay`/`primary_lift`/`cap` overrides
     them, so the calibration harness can score this exact function under a candidate weight-set
     (and a future live config-read can feed operator-set weights through the same seam).
     """
     d = (decay or _DECAY).get(extremity, 0.55)  # default to "notable" if unrecognised
     base = 1.0 - d ** max(0, independent_originators)
-    if has_primary:
+    # The primary lift is EARNED only when the primary actually backs the claim (#228).
+    if has_primary and grounding not in ("not_addressed", "contradicted"):
         base += (1.0 - base) * (_PRIMARY_LIFT if primary_lift is None else primary_lift)
+    if grounding == "contradicted":
+        base *= _GROUNDING_CONTRADICTED_PENALTY
     return round(min(base, _CONFIDENCE_CAP if cap is None else cap), 2)
 
 

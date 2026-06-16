@@ -123,6 +123,7 @@ def classify_lifecycle(
         initial_ind, latest_ind,
         latest_has_primary=latest_has_primary,
         corrected=corrected,
+        grounding=last.get("grounding"),
         confirm_at=confirm_at,
     )
 

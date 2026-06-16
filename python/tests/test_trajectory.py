@@ -99,7 +99,7 @@ def _snap_row(day, *, fact, independent, sources, originators, corrected=False):
     return {
         "fact": fact, "independent_originators": independent, "has_primary": False,
         "extremity": "notable", "confidence": 0.5, "sources": sources,
-        "originators": originators, "corrected": corrected, "cluster_id": "clust-1",
+        "originators": originators, "corrected": corrected, "grounding": None, "cluster_id": "clust-1",
         "harvested_at": datetime(2026, 6, day, 12, 0, tzinfo=timezone.utc),
     }
 

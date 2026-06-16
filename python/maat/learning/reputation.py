@@ -225,6 +225,7 @@ def fold_reputation(
             int(last.get("independent_originators", 0)),
             latest_has_primary=bool(last.get("has_primary", False)),
             corrected=any(h.get("corrected") for h in hist),
+            grounding=last.get("grounding"),
         )
 
         # Use the LATEST event for per-source signals — it reflects the most corroborated state.
