@@ -181,8 +181,9 @@ def _preferences_payload(prefs) -> dict:
         ],
         "diversity_floor": sorted(prefs.diversity_floor),
         "note": "Learned acquisition preferences (#35): which sources have proven reliable, "
-        "computed read-time from the corroboration history. ACTUATION — biasing acquisition "
-        "toward these within the diversity floor — is a flagged policy decision, not yet enforced.",
+        "computed read-time from the corroboration history. The live ingestion clock ACTUATES these "
+        "— re-ranking fetch within a per-query budget and deepening the top proven sources, bounded "
+        "by the diversity floor + per-source cap (see maat/acquire/steer.py).",
     }
 
 
@@ -807,8 +808,8 @@ def _make_router() -> Any:
     @router.get("/source-preferences", response_class=JSONResponse)
     async def source_preferences_endpoint(request: Request):
         """Learned acquisition preferences (#35): fold the corroboration history into per-source
-        reputation, then rank sources by learned acquisition weight (diversity-floored). Wires the
-        previously-orphaned learn_preferences into a live read; acquisition actuation is flagged."""
+        reputation, then rank sources by learned acquisition weight (diversity-floored). The live
+        ingestion clock actuates these (re-rank within budget + deepen top sources, maat/acquire/steer.py)."""
         pool = request.app.state.pool
         history = await _load_corroboration_history(pool)
         prefs = learn_preferences(fold_reputation(history))
