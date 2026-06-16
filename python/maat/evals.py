@@ -12,13 +12,20 @@ sits near the Gamelan IP boundary.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from maat.pipeline.corroborate import confidence_label
 
-ROOT = Path(__file__).resolve().parents[2]
-EXPECTATIONS = ROOT / "eval" / "expectations.json"
+# Golden fixtures ship INSIDE the package (maat/fixtures/) so they're present both in the repo
+# and in the container image, which copies `maat/` but flattens the repo's `python/` layer away —
+# the old parents[2] math pointed the image at a non-existent "/eval/expectations.json" (#200).
+# MAAT_EVAL_EXPECTATIONS overrides the location.
+EXPECTATIONS = Path(
+    os.environ.get("MAAT_EVAL_EXPECTATIONS")
+    or Path(__file__).resolve().parent / "fixtures" / "expectations.json"
+)
 
 
 def _aslist(v):

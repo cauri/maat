@@ -21,7 +21,7 @@ kernel-lint:
 	cd rust && cargo clippy --all-targets -- -D warnings
 
 py-setup:
-	cd python && uv sync --extra dev
+	cd python && uv sync --extra dev --extra obs
 
 py-smoke:
 	cd python && uv run python scripts/smoke_providers.py
