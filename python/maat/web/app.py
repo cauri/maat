@@ -54,6 +54,7 @@ from maat.providers import seam
 from maat.serving import admin_auth
 from maat.serving import spend as spend_mod
 from maat.serving.feed import feed_router
+from maat.serving.translate import translate_text
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import routed_queue
 
@@ -1263,17 +1264,16 @@ class TranslateReq(BaseModel):
 
 @app.post("/api/translate")
 async def api_translate(req: TranslateReq) -> JSONResponse:
-    # Cloud fallback for §4 translate-for-display. The client translates ON-DEVICE first
-    # (Apple Translation framework); it only calls this when the on-device pair is unavailable.
-    # Real impl routes through the Source/Effect seam (maat/providers/seam.py) — model-translate,
-    # never score a translation. Stubbed echo until that route is wired, so the reader runs keyless.
+    # Cloud fallback for §4 translate-for-display. The client translates ON-DEVICE first (Apple
+    # Translation); it only calls this when the on-device pair is unavailable. Routes through the
+    # provider seam (mistral_complete) — translate-for-display only, never scores a translation.
+    # On any provider error (incl. no MISTRAL key) it returns the original text (engine=identity),
+    # so the reader degrades gracefully and still runs keyless.
+    translated, engine = await asyncio.to_thread(
+        translate_text, req.text, req.target, req.source
+    )
     return JSONResponse(
-        {
-            "translated": req.text,
-            "source": req.source,
-            "target": req.target,
-            "engine": "cloud-fallback-stub",
-        }
+        {"translated": translated, "source": req.source, "target": req.target, "engine": engine}
     )
 
 
