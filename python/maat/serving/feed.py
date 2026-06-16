@@ -40,7 +40,7 @@ import httpx
 from maat.agents.curation import Story as CurationStory, curate
 from maat.events import STORY_GEO_INFERRED
 from maat.learning.accuracy import lifecycle_by_fact
-from maat.learning.reputation import fold_reputation
+from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.source_learning import learn_preferences
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.source_flags import denied_sources
@@ -159,8 +159,12 @@ def _annotate_accuracy(payload: dict, lifecycle: dict) -> dict:
 def _reputation_map(reps) -> dict:
     """Per-source reputation (the §6 truthfulness-over-time fold) as {source: reputation} for the
     feed — surfacing the learned reputation into the PRODUCT (#199), not just the operator console.
+
+    `reps` are `SourceReputation` records (from `fold_reputation`); their 0..1 standing comes from
+    the `reputation_score` fold, NOT a `.reputation` attribute (there isn't one) — collapsing them
+    here is what `?reputation=1` does at read time.
     """
-    return {r.source: round(r.reputation, 4) for r in reps}
+    return {r.source: reputation_score(r) for r in reps}
 
 
 def _preferences_payload(prefs) -> dict:
