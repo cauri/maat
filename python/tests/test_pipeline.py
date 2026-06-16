@@ -105,6 +105,21 @@ def test_collapse_same_outlet_to_one_originator():
     assert len(collapse_originators(["a1", "a2"], bodies, sources)) == 1
 
 
+def test_collapse_source_variants_to_one_originator_via_identity():
+    # #36: Reuters / reuters.com / Thomson Reuters resolve to ONE canonical originator even
+    # with distinct bodies (no lexical overlap, no citation cascade). Without identity
+    # resolution this over-counts as three independent originators, inflating confidence.
+    from maat.pipeline.corroborate import collapse_originators
+
+    bodies = {
+        "a1": "The central bank raised its benchmark rate by fifty basis points on Tuesday.",
+        "a2": "Borrowing costs climbed as policymakers tightened monetary policy this week.",
+        "a3": "Officials lifted the key rate amid stubborn inflation, according to the filing.",
+    }
+    sources = {"a1": "Reuters", "a2": "reuters.com", "a3": "Thomson Reuters"}
+    assert len(collapse_originators(["a1", "a2", "a3"], bodies, sources)) == 1
+
+
 def test_is_primary_source():
     from maat.pipeline.corroborate import is_primary_source
 

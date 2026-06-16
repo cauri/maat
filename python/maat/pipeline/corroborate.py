@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from maat.pipeline.extremity import rate_extremity
+from maat.pipeline.identity import canonical_source
 from maat.providers.seam import mistral_embed
 
 
@@ -169,11 +170,19 @@ def collapse_originators(
     article_ids: list[str], bodies: dict[str, str], sources: dict[str, str], lex_threshold: float = 0.40
 ) -> list[list[int]]:
     """Collapse near-verbatim reprints (lexical) and citation cascades (explicit attribution)
-    into single originator nodes. Independent articles on one event stay separate."""
+    into single originator nodes. Independent articles on one event stay separate.
+
+    Source identity (§6.7, #36): two articles whose sources resolve to the SAME canonical
+    originator (Reuters / reuters.com / Thomson Reuters → "reuters") are one originator, not
+    several — so wire-service reprints that differ only in source-string FORM no longer inflate
+    the independent-originator count (and thus confidence)."""
     n = len(article_ids)
     if n <= 1:
         return [[0]] if n else []
     shingles = [_shingles(bodies[a]) for a in article_ids]
+    # Canonicalise each source once (#36). The same_source check below compares canonical ids;
+    # _cites still uses the RAW source string so a body that names the outlet in full is matched.
+    canon = {a: canonical_source(sources[a]) for a in article_ids if sources.get(a) is not None}
     edges: list[tuple[int, int]] = []
     for i in range(n):
         for j in range(i + 1, n):
@@ -181,10 +190,11 @@ def collapse_originators(
             cascade = _cites(bodies[article_ids[i]], sources[article_ids[j]]) or _cites(
                 bodies[article_ids[j]], sources[article_ids[i]]
             )
-            # An outlet is not independent of itself: many articles from one source (one
-            # domain publishing several pieces — exposed by real GDELT data) are one originator.
-            s_i = sources.get(article_ids[i])
-            same_source = s_i is not None and s_i == sources.get(article_ids[j])
+            # An outlet is not independent of itself: many articles from one source — or from
+            # variant source-strings that resolve to the same canonical originator (#36) — are
+            # one originator, not several.
+            c_i = canon.get(article_ids[i])
+            same_source = c_i is not None and c_i == canon.get(article_ids[j])
             if lexical or cascade or same_source:
                 edges.append((i, j))
     return _components(n, edges)
