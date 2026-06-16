@@ -18,6 +18,8 @@ import hmac
 import html
 import json
 import os
+import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -381,14 +383,8 @@ async def runs(ok: str = "") -> str:
     )
 
 
-@app.post("/runs/trigger")
-async def trigger_run(stage: str = Form(...), reason: str = Form("")):
-    # Record operator intent in the audit log. Execution stays a deliberate CLI/cron step until a
-    # job runner with budget guardrails (D22) is wired — the console must not silently spend API $.
-    pub = await _publish(
-        events.ADMIN_RUN_TRIGGERED, "pipeline", events.admin_event("pipeline", reason=reason, stage=stage)
-    )
-    return _redirect("/runs", "Logged. Run it yourself with the command shown." if pub else _BUS_DOWN)
+# The old per-stage "Log a run" route was removed — the console now runs the WHOLE pipeline on one
+# click (acquire → extract+classify → corroborate) via /runs/run-all, with live progress on /runs/status.
 
 
 @app.get("/clocks", response_class=HTMLResponse)
@@ -1791,6 +1787,107 @@ _STAGES = [
     ("Score corroboration", "cluster.corroborated", "make corroborate"),
 ]
 
+# ── Run the pipeline: one click runs the WHOLE flow with live per-step progress ──────────────
+# acquire (scripts/clock.py) → extract+classify drain (the always-on agents process the new
+# articles) → corroborate (recompute clusters). Each runs as a subprocess in the reader's env;
+# progress lives in _RUN, polled by /runs/status. No spend gate (cauri) — running is the point.
+_RUN: dict = {"active": False, "started": None, "finished": None, "error": None, "steps": []}
+_ROOT = Path(__file__).resolve().parents[2]  # the python/ project root (has scripts/ + maat/)
+
+
+def _run_state() -> dict:
+    """Run state with the 4 display steps always present (idle until a run starts)."""
+    if not _RUN["steps"]:
+        _RUN["steps"] = [{"label": lbl, "status": "idle"} for lbl, _e, _c in _STAGES]
+    return _RUN
+
+
+async def _run_proc(args: list[str]) -> None:
+    """Run a pipeline command as a subprocess in the reader's env; raise on a non-zero exit."""
+    proc = await asyncio.create_subprocess_exec(
+        *args, cwd=str(_ROOT),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        msg = (err or b"").decode("utf-8", "replace").strip()[-400:]
+        raise RuntimeError(msg or f"exited {proc.returncode}")
+
+
+async def _drain(max_s: int = 180, quiet_s: int = 15) -> None:
+    """Let the always-on extract+classify agents catch up on the freshly acquired articles: poll
+    the claims count, stop once it has been steady for `quiet_s` (or `max_s` elapses)."""
+    pool = getattr(app.state, "pool", None)
+    if pool is None:
+        await asyncio.sleep(min(max_s, 20))
+        return
+
+    async def _count():
+        try:
+            return await pool.fetchval("select count(*) from claims")
+        except Exception:  # noqa: BLE001
+            return None
+
+    prev, last_change, deadline = await _count(), time.monotonic(), time.monotonic() + max_s
+    while time.monotonic() < deadline:
+        await asyncio.sleep(5)
+        cur = await _count()
+        if cur != prev:
+            prev, last_change = cur, time.monotonic()
+        elif time.monotonic() - last_change >= quiet_s:
+            break
+
+
+async def _run_pipeline() -> None:
+    """Background task: run the full pipeline, updating _RUN per step as it goes."""
+    steps = _run_state()["steps"]
+
+    def mark(i, status):
+        steps[i]["status"] = status
+
+    try:
+        await _publish(events.ADMIN_RUN_TRIGGERED, "pipeline",
+                       events.admin_event("pipeline", reason="full pipeline run from console"))
+        mark(0, "running")  # Find articles
+        await _run_proc([sys.executable, "scripts/clock.py"])
+        mark(0, "done")
+        mark(1, "running")  # Pull out claims + Label claims — the agents drain automatically
+        mark(2, "running")
+        await _drain()
+        mark(1, "done")
+        mark(2, "done")
+        mark(3, "running")  # Score corroboration
+        await _run_proc([sys.executable, "-m", "maat.agents.corroborate_agent"])
+        mark(3, "done")
+    except Exception as exc:  # noqa: BLE001 - surface failure to the operator, never crash the app
+        _RUN["error"] = str(exc)
+        for s in steps:
+            if s["status"] == "running":
+                s["status"] = "error"
+    finally:
+        _RUN["active"] = False
+        _RUN["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@app.post("/runs/run-all")
+async def runs_run_all() -> JSONResponse:
+    """Kick off a full pipeline run (one at a time). Returns immediately; the UI polls /runs/status."""
+    if _RUN["active"]:
+        return JSONResponse({"already_running": True, **_run_state()})
+    _RUN.update(
+        active=True, started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        finished=None, error=None,
+        steps=[{"label": lbl, "status": "pending"} for lbl, _e, _c in _STAGES],
+    )
+    asyncio.create_task(_run_pipeline())
+    return JSONResponse(_run_state())
+
+
+@app.get("/runs/status")
+async def runs_status() -> JSONResponse:
+    """Current pipeline-run state for the Activity progress strip."""
+    return JSONResponse(_run_state())
+
 
 def stage_summary(counts: dict) -> list[dict]:
     """Map event-type aggregates {type: {n, last}} to the pipeline stages (F4). Pure."""
@@ -1809,17 +1906,13 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
         for k, v in proj.items()
     )
     srows = []
-    for s in stages:
+    for i, s in enumerate(stages):
         last = f'{s["last"]:%Y-%m-%d %H:%M}' if s["last"] else "never"
         srows.append(
-            f'<div class="srow" title="event: {html.escape(s["type"])}"><div class="sname">'
-            f'{html.escape(s["label"])}</div>'
+            f'<div class="srow-step" title="event: {html.escape(s["type"])}">'
+            f'<div class="sname">{html.escape(s["label"])}</div>'
             f'<div class="snum">{s["count"]}<span class="mut sm"> done · last {last}</span></div>'
-            f'<div class="scmd mono">{html.escape(s["cmd"])}</div>'
-            '<form class="inline" method="post" action="/runs/trigger">'
-            f'<input type="hidden" name="stage" value="{html.escape(s["label"])}">'
-            '<button title="Notes that you started this step. It does not run it — you run that '
-            'yourself, to control cost.">Log a run</button></form></div>'
+            f'<span class="step-state" id="rs-{i}"></span></div>'
         )
     dead_html = ""
     if not dead_ready:
@@ -1854,7 +1947,11 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     return (
         '<div class="ins"><a class="back" href="/">← back to feed</a>'
         '<h3 class="ih">Activity — what the system has done, and anything that failed</h3>'
-        f'<div class="mgrid">{pcells}</div><div class="bl mt">Steps</div>{"".join(srows)}'
+        f'<div class="mgrid">{pcells}</div>'
+        '<div class="bl mt">Pipeline</div>'
+        '<div class="runbar"><button id="run-btn" onclick="maatRunPipeline()">▶ Run the pipeline</button>'
+        '<span class="run-status" id="run-status"></span></div>'
+        f'{"".join(srows)}'
         f'{dead_html}<div class="bl mt">Recent activity</div>'
         f'<table class="aud"><tr><th>when</th><th title="Pipeline stage — the internal event name for what ran">step</th><th>item</th></tr>{rrows}</table>{note}</div>'
     )
@@ -2913,5 +3010,35 @@ async function maatAssistant(){
 (function(){var i=document.getElementById('asst-in');
   if(i)i.addEventListener('keydown',function(e){
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();maatAssistant();}});})();
+
+// Activity — run the whole pipeline on one click, then poll progress and paint the per-step pills.
+var maatRunTimer=null;
+function maatPaintRun(st){
+  var btn=document.getElementById('run-btn'), status=document.getElementById('run-status');
+  (st.steps||[]).forEach(function(s,i){
+    var el=document.getElementById('rs-'+i); if(!el) return;
+    el.className='step-state '+(s.status||'idle');
+    el.textContent={pending:'waiting',running:'running…',done:'done ✓',error:'failed'}[s.status]||'';
+  });
+  if(btn) btn.disabled=!!st.active;
+  if(status){
+    if(st.active) status.textContent='Running…';
+    else if(st.error) status.textContent='Stopped: '+st.error;
+    else if(st.finished) status.textContent='Done · finished '+String(st.finished).replace('T',' ');
+    else status.textContent='';
+  }
+}
+async function maatPollRun(){
+  try{ var r=await fetch('/runs/status'); var st=await r.json(); maatPaintRun(st);
+    if(st.active){ clearTimeout(maatRunTimer); maatRunTimer=setTimeout(maatPollRun,2000); }
+  }catch(e){}
+}
+async function maatRunPipeline(){
+  var btn=document.getElementById('run-btn'); if(!btn||btn.disabled) return;
+  btn.disabled=true;
+  try{ await fetch('/runs/run-all',{method:'POST'}); }catch(e){}
+  maatPollRun();
+}
+(function(){ if(document.getElementById('run-btn')) maatPollRun(); })();  // reflect a run in progress
 </script>
 </body></html>"""
