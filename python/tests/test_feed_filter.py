@@ -113,3 +113,32 @@ def test_annotate_accuracy_extracts_enum_value():
 
     out = _annotate_accuracy({"stories": [{"id": "c1", "fact": "x"}]}, {"x": LifecycleState.RESOLVED})
     assert out["stories"][0]["accuracy_state"] == LifecycleState.RESOLVED.value
+
+
+def test_preferences_payload_serialises_ranked():
+    # #35 — learned acquisition preferences serialised for /api/v2/source-preferences.
+    from types import SimpleNamespace
+
+    from maat.serving.feed import _preferences_payload
+
+    prefs = SimpleNamespace(
+        ranked=[SimpleNamespace(
+            source="reuters.com", rank=1, acquisition_weight=0.3, confirmation_rate=0.9,
+            independent_rate=0.8, in_diversity_floor=False, low_evidence=False,
+        )],
+        diversity_floor=frozenset({"azertag.az"}),
+    )
+    out = _preferences_payload(prefs)
+    assert out["ranked"][0]["source"] == "reuters.com"
+    assert out["ranked"][0]["acquisition_weight"] == 0.3
+    assert out["diversity_floor"] == ["azertag.az"]
+
+
+def test_source_preference_dataclass_has_serialised_fields():
+    # guards the serialiser above against drift in the real dataclass field names
+    import dataclasses
+
+    from maat.learning.source_learning import SourcePreference
+
+    names = {f.name for f in dataclasses.fields(SourcePreference)}
+    assert {"source", "rank", "acquisition_weight", "in_diversity_floor", "low_evidence"} <= names

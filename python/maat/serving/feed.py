@@ -38,6 +38,8 @@ import httpx
 
 from maat.agents.curation import Story as CurationStory, curate
 from maat.learning.accuracy import lifecycle_by_fact
+from maat.learning.reputation import fold_reputation
+from maat.learning.source_learning import learn_preferences
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.topics import parse_interest, story_matches
 
@@ -134,6 +136,29 @@ def _annotate_accuracy(payload: dict, lifecycle: dict) -> dict:
         if state is not None:
             s["accuracy_state"] = getattr(state, "value", state)
     return payload
+
+
+def _preferences_payload(prefs) -> dict:
+    """Serialise learned acquisition preferences (#35) for /api/v2/source-preferences — which
+    sources have proven reliable over time, ranked by acquisition weight (diversity-floored)."""
+    return {
+        "ranked": [
+            {
+                "source": p.source,
+                "rank": p.rank,
+                "acquisition_weight": round(p.acquisition_weight, 4),
+                "confirmation_rate": p.confirmation_rate,
+                "independent_rate": round(p.independent_rate, 4),
+                "in_diversity_floor": p.in_diversity_floor,
+                "low_evidence": p.low_evidence,
+            }
+            for p in prefs.ranked
+        ],
+        "diversity_floor": sorted(prefs.diversity_floor),
+        "note": "Learned acquisition preferences (#35): which sources have proven reliable, "
+        "computed read-time from the corroboration history. ACTUATION — biasing acquisition "
+        "toward these within the diversity floor — is a flagged policy decision, not yet enforced.",
+    }
 
 
 def _jload(v: Any) -> list:
@@ -690,6 +715,16 @@ def _make_router() -> Any:
                     payload, lifecycle_by_fact(history, datetime.now(timezone.utc))
                 )
         return JSONResponse(payload)
+
+    @router.get("/source-preferences", response_class=JSONResponse)
+    async def source_preferences_endpoint(request: Request):
+        """Learned acquisition preferences (#35): fold the corroboration history into per-source
+        reputation, then rank sources by learned acquisition weight (diversity-floored). Wires the
+        previously-orphaned learn_preferences into a live read; acquisition actuation is flagged."""
+        pool = request.app.state.pool
+        history = await _load_corroboration_history(pool)
+        prefs = learn_preferences(fold_reputation(history))
+        return JSONResponse(_preferences_payload(prefs))
 
     @router.get("/story/{cluster_id}", response_class=JSONResponse)
     async def story_endpoint(cluster_id: str, request: Request, deeper: int = 0):
