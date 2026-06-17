@@ -37,10 +37,12 @@ final class Analytics {
     /// Lane 1 — individual, on-device only. Rolling buffer; never leaves the phone.
     private(set) var events: [EngagementEvent] = []
 
-    /// Lane 2 — anonymised aggregate counts. The only lane eligible for edge upload (disabled now).
+    /// Lane 2 — anonymised aggregate counts. The only lane that WOULD be eligible for edge upload if
+    /// one is ever built — there is no upload path today; this is a collection-only, on-device seam.
     private(set) var aggregate: [String: Int] = [:]
 
-    /// Hard switch: nothing is transmitted in P6 (capture for a named purpose or don't capture it).
+    /// Guard flag for any future upload path; stays false in P6. There is NO transmission code built —
+    /// nothing reads this to send data. It documents intent (capture for a named purpose or don't).
     let transmissionEnabled = false
 
     private let maxEvents = 500
@@ -64,8 +66,9 @@ final class Analytics {
         defaults.set(aggregate, forKey: aggregateKey)
     }
 
-    /// The anonymised, aggregated payload that edge-aggregation would hand upstream — counts only.
-    /// Returned for inspection (Settings) and future transmission; not sent while disabled.
+    /// The anonymised, aggregated payload that an edge-aggregation step WOULD hand upstream — counts
+    /// only. Returned for inspection (Settings) ONLY; there is no upload consumer built, so nothing
+    /// transmits it. (Naming kept as a documented seam, not a promise that an upload path exists.)
     func anonymisedRollup() -> [String: Int] { aggregate }
 
     func reset() {
