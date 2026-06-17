@@ -16,6 +16,9 @@ dependencies = [
     "numpy>=2.4.6",
     "warcio>=1.8.1",
     "py3langid>=0.3.0",
+    "onnxruntime>=1.27.0",
+    "tokenizers>=0.23.1",
+    "huggingface-hub>=1.19.0",
 ]
 
 [project.optional-dependencies]
