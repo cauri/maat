@@ -118,6 +118,7 @@ services:
       MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/nli-deberta-v3-small}  # DeBERTa-v3 NLI cross-encoder in ONNX (#229)
       HF_HOME: /data/hf                                  # cache the NLI model on a volume so it isn't re-downloaded each deploy (#229)
       MAAT_OWNERSHIP_LOOKUP: ${MAAT_OWNERSHIP_LOOKUP:-0}  # auto-resolve source ownership from Wikidata (#254) — OFF until the resolved groups are reviewed
+      MAAT_TRANSLATE_TITLES: ${MAAT_TRANSLATE_TITLES:-1}  # English gloss for non-English feed titles (#54), display-only
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
     # by compose against the host env (unset → blank), breaking `sleep ""`.
@@ -134,6 +135,8 @@ services:
           uv run --no-dev python scripts/acquire_locales.py || echo "[clock] locale error";
           echo "[clock] ownership (resolve new sources' controlling owners via Wikidata, #254)";
           uv run --no-dev python -m maat.agents.ownership_agent || echo "[clock] ownership error";
+          echo "[clock] translate-titles (English gloss for non-English feed titles, #54)";
+          uv run --no-dev python -m maat.agents.translate_titles || echo "[clock] translate-titles error";
           echo "[clock] draining $${MAAT_TICK_DRAIN}s for extract+classify";
           sleep "$${MAAT_TICK_DRAIN}";
           echo "[clock] corroborate (recompute clusters)";

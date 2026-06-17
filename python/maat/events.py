@@ -93,6 +93,12 @@ CLAIM_DISPUTED = "claim.disputed"
 # + operator-overridable — a wrong merge would HIDE real corroboration. stream_id is the source.
 SOURCE_OWNERSHIP_RESOLVED = "source.ownership.resolved"
 
+# Cached English title for feed display (#54): the translate-titles step renders each non-English
+# article title into English ONCE (Mistral; display-only, never scored — §4) so the feed can show the
+# original with an English gloss beside it. Read at feed-render time; no projection. stream_id is the
+# article id, so a re-run is a no-op (one translation per article, ever).
+ARTICLE_TITLE_EN = "article.title_en"
+
 # Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
 # typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
 # maat-kerneld projects it atomically into story_nodes / story_edges / story_node_clusters /

@@ -263,7 +263,7 @@ def _login_failed(msg: str) -> str:
 async def feed(ok: str = "") -> str:
     pool = app.state.pool
     articles = await pool.fetch(
-        "select id, title, source, language from articles order by ingested_at desc"
+        "select id, title, source, language, url from articles order by ingested_at desc"
     )
     claims = await pool.fetch(
         "select id, article_id, voice, speaker, kind, is_synthesis, horizon, in_headline, text "
@@ -277,7 +277,13 @@ async def feed(ok: str = "") -> str:
     by_article: dict[str, list] = {}
     for c in claims:
         by_article.setdefault(c["article_id"], []).append(c)
-    return _feed_page(articles, by_article, clusters, id_to_source, flash=ok)
+    # English gloss for non-English titles (#54), cached by the translate-titles step (latest wins).
+    title_en: dict[str, str] = {}
+    for r in await pool.fetch("select data from events where type = 'article.title_en' order by id"):
+        d = _jobj(r["data"])
+        if d.get("article_id") and d.get("title_en"):
+            title_en[d["article_id"]] = d["title_en"]
+    return _feed_page(articles, by_article, clusters, id_to_source, title_en=title_en, flash=ok)
 
 
 @app.get("/cluster/{cid}", response_class=HTMLResponse)
@@ -1797,11 +1803,16 @@ def _extlink(url, text, *, cls: str = "") -> str:
     return f'<a{c} href="{html.escape(u)}" target="_blank" rel="noopener noreferrer">{t}</a>'
 
 
-def _card(a, claims) -> str:
+def _card(a, claims, title_en: str = "") -> str:
     rows = "".join(_claim(c) for c in claims) or '<div class="claim t muted">no claims</div>'
+    te = (title_en or "").strip()
+    gloss = (
+        f'<div class="title-en mut" lang="en" title="English translation — display only, never scored">{html.escape(te)}</div>'
+        if te and te != (a["title"] or "").strip() else ""
+    )
     return (
         f'<article class="card"><div class="src">{html.escape(a["source"] or "")}</div>'
-        f'<h2>{_extlink(a.get("url"), a["title"])}</h2>'
+        f'<h2>{_extlink(a.get("url"), a["title"])}</h2>{gloss}'
         f'<div class="claims">{rows}</div>'
         f'<div class="foot">{len(claims)} claims</div></article>'
     )
@@ -1911,7 +1922,7 @@ def _story(group, id_to_source) -> str:
     return f'<div class="story">{head}{sup}</div>'
 
 
-def _feed_page(articles, by_article, clusters, id_to_source, flash: str = "") -> str:
+def _feed_page(articles, by_article, clusters, id_to_source, title_en=None, flash: str = "") -> str:
     panel = ""
     n_stories = 0
     if clusters:
@@ -1922,7 +1933,7 @@ def _feed_page(articles, by_article, clusters, id_to_source, flash: str = "") ->
             '<section class="panel"><h3>Stories · corroboration over spread, confidence on '
             f"every claim</h3>{items}</section>"
         )
-    cards = "".join(_card(a, by_article.get(a["id"], [])) for a in articles)
+    cards = "".join(_card(a, by_article.get(a["id"], []), (title_en or {}).get(a["id"], "")) for a in articles)
     if not cards:
         cards = '<p class="empty">No stories yet — pull some news from the Updates tab.</p>'
     subtitle = f"{n_stories or len(articles)} stories · corroboration over spread · confidence on every claim"
