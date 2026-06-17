@@ -627,15 +627,20 @@ async def sources_view(ok: str = "") -> str:
 
 
 @app.post("/sources/flag")
-async def source_flag(source: str = Form(...), status: str = Form(...), reason: str = Form("")):
-    msg = ""
-    if status in ("allow", "deny"):
-        pub = await _publish(
-            events.ADMIN_SOURCE_FLAGGED,
-            source,
-            events.admin_event(source, reason=reason, source=source, status=status),
-        )
-        msg = f"Saved — {source} marked {status}. Not enforced yet." if pub else _BUS_DOWN
+async def source_flag(source: str = Form(...), deny: str = Form("0"), reason: str = Form("")):
+    # One on/off control: the /sources toggle posts deny=1 (deny) or omits it (allow / un-deny).
+    status = "deny" if deny == "1" else "allow"
+    pub = await _publish(
+        events.ADMIN_SOURCE_FLAGGED,
+        source,
+        events.admin_event(source, reason=reason, source=source, status=status),
+    )
+    if not pub:
+        msg = _BUS_DOWN
+    elif status == "deny":
+        msg = f"Denied {source} — stories sourced only from it are now dropped from the feed."
+    else:
+        msg = f"Allowed {source} — it can surface in the feed again."
     return _redirect("/sources", msg)
 
 
@@ -648,7 +653,10 @@ async def source_group(source: str = Form(...), group: str = Form(...), reason: 
             source,
             events.admin_event(source, reason=reason, source=source, group=group.strip()),
         )
-        msg = f"Saved — {source} grouped as '{group.strip()}'. Not enforced yet." if pub else _BUS_DOWN
+        msg = (
+            f"Grouped {source} as '{group.strip()}' — its outlets now count as one source in "
+            "corroboration." if pub else _BUS_DOWN
+        )
     return _redirect("/sources", msg)
 
 
@@ -2424,9 +2432,9 @@ def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
 
 def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
     note = (
-        '<div class="deriv">Every outlet Maat has read. Mark a source <b>allow</b> or <b>deny</b>, or '
-        '<b>group</b> outlets owned by the same company so they count as one source, not several. '
-        'These are saved as preferences — they don\'t change scoring yet.</div>'
+        '<div class="deriv">Every outlet Maat has read. <b>Deny</b> a source to drop stories sourced '
+        'only from it out of the feed (a story another outlet also carries still shows). <b>Group</b> '
+        'outlets owned by the same company so they count as one source in corroboration, not several.</div>'
     )
     rows = []
     for s in srcs:
@@ -2455,9 +2463,10 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
             f'<div class="mut sm">{s["n"]} articles · {html.escape(langs)} · last {last}</div></div>'
             '<form class="inline" method="post" action="/sources/flag">'
             f'<input type="hidden" name="source" value="{esc}">'
-            '<select name="status"><option value="deny">deny</option>'
-            '<option value="allow">allow</option></select>'
-            '<button title="Saved as a preference — not enforced yet">Save</button></form>'
+            '<label class="toggle" title="Deny: drop feed stories sourced only from this outlet">'
+            '<input type="checkbox" name="deny" value="1" onchange="this.form.submit()"'
+            f'{" checked" if fl.get("status") == "deny" else ""}>'
+            ' Deny</label></form>'
             '<form class="inline" method="post" action="/sources/group">'
             f'<input type="hidden" name="source" value="{esc}">'
             '<input name="group" placeholder="same-owner group">'

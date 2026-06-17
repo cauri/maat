@@ -150,7 +150,7 @@ async def _run_all() -> None:
             # recompute SQL path (_claimrows' any($1::uuid[]) + corroborate_fixed).
             posts = [
                 ("/config/set", {"key": "gate.floor", "value": "0.5", "reason": "smoke"}),
-                ("/sources/flag", {"source": "AFP", "status": "deny", "reason": "smoke"}),
+                ("/sources/flag", {"source": "AFP", "deny": "1", "reason": "smoke"}),
                 ("/clocks/set", {"clock": "ingestion", "paused": "true", "reason": "smoke"}),
                 (f"/claim/{CL1}/correct", {"kind": "projection", "reason": "smoke"}),
                 ("/prompts/save", {"key": "extremity", "text": "rate {claim}", "reason": "smoke"}),
