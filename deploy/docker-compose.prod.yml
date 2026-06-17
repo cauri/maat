@@ -115,7 +115,8 @@ services:
       MAAT_CURATION_LLM: ${MAAT_CURATION_LLM:-1}         # geo-tag clusters the TLD/lang heuristic can't place (#189)
       MAAT_GROUNDING_LLM: ${MAAT_GROUNDING_LLM:-1}       # judge each primary-bearing cluster vs its primary source (#228)
       MAAT_CONTRADICTION_NLI: ${MAAT_CONTRADICTION_NLI:-1}  # NLI contradiction detection (#229): pinned + smoke-tested ONNX MNLI cross-encoder
-      MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/distilbert-base-uncased-mnli}  # small DistilBERT-MNLI in ONNX (#229), downloaded once per deploy
+      MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/nli-deberta-v3-small}  # DeBERTa-v3 NLI cross-encoder in ONNX (#229)
+      HF_HOME: /data/hf                                  # cache the NLI model on a volume so it isn't re-downloaded each deploy (#229)
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
     # by compose against the host env (unset → blank), breaking `sleep ""`.
@@ -156,6 +157,8 @@ services:
         condition: service_started
       agents:
         condition: service_started
+    volumes:
+      - hfcache:/data/hf   # NLI model cache (#229) — persists across deploys
 
   reader:
     build: ./python
@@ -265,3 +268,4 @@ volumes:
   caddydata:
   caddyconfig:
   catcafedata:
+  hfcache:
