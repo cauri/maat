@@ -119,6 +119,39 @@ def estimate_llm_spend(
     return rows, total
 
 
+@dataclass(frozen=True)
+class ProviderSpend:
+    provider: str
+    articles: int
+    usd: float  # estimated LLM cost to process this channel's articles (extract + classify + embed)
+
+
+def spend_by_provider(
+    articles_by_provider: dict[str, int], *, avg_claims_per_article: float
+) -> list[ProviderSpend]:
+    """Estimate LLM spend per ACQUISITION CHANNEL (#241): what each provider — rss, apify, the
+    per-locale floor, cc-news, backfill — costs to run through extract + classify + embed. cauri
+    wants to track the token/API cost of each sourcing method when deciding which to invest in.
+
+    Cost is attributed by article count × a per-article estimate (one extract call per article,
+    then ``avg_claims_per_article`` classify calls + embeddings per article). Coarse but honest and
+    join-free — the exact per-call truth is in cat-cafe; Apify's $ is reported separately (actual).
+    Sorted most-expensive first."""
+    tin_e, tout_e, m_e = _PER_CALL["extract"]
+    tin_c, tout_c, m_c = _PER_CALL["classify"]
+    per_article = (
+        _llm_cost(m_e, tin_e, tout_e)
+        + avg_claims_per_article * _llm_cost(m_c, tin_c, tout_c)
+        + avg_claims_per_article * _llm_cost("mistral-embed", _EMBED_TOKENS_PER_CLAIM, 0)
+    )
+    out = [
+        ProviderSpend(provider=p or "untagged", articles=n, usd=round(n * per_article, 4))
+        for p, n in articles_by_provider.items()
+    ]
+    out.sort(key=lambda r: r.usd, reverse=True)
+    return out
+
+
 def apify_spend_usd(*, timeout: float = 10.0) -> float | None:
     """Actual Apify spend this billing cycle (USD), via the Apify usage API. None if unavailable."""
     token = os.environ.get("APIFY_API_KEY")

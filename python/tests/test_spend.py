@@ -70,3 +70,22 @@ def test_cap_status_uncapped_when_cap_non_positive():
     assert s["allowed"] is True
     assert s["capped"] is False
     assert s["cap_usd"] is None and s["remaining_usd"] is None
+
+
+def test_spend_by_provider_attributes_cost_and_sorts():
+    # rss has the most articles → most cost; ordering is most-expensive first; usd scales with count.
+    out = spend.spend_by_provider(
+        {"rss": 100, "apify-locale": 10, "cc-news": 40}, avg_claims_per_article=3.0
+    )
+    assert [r.provider for r in out] == ["rss", "cc-news", "apify-locale"]  # by usd desc
+    by = {r.provider: r for r in out}
+    assert by["rss"].articles == 100
+    assert all(r.usd > 0 for r in out)
+    # cost is linear in article count at a fixed claims/article ratio
+    assert abs(by["rss"].usd - by["cc-news"].usd * (100 / 40)) < 1e-6
+
+
+def test_spend_by_provider_handles_empty_and_untagged():
+    assert spend.spend_by_provider({}, avg_claims_per_article=2.0) == []
+    out = spend.spend_by_provider({"": 5}, avg_claims_per_article=0.0)
+    assert out[0].provider == "untagged" and out[0].usd > 0  # extract cost alone, no claims

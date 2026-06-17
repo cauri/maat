@@ -105,6 +105,15 @@ STORY_GRAPH_REBUILT = "story.graph.rebuilt"
 # it's a curation/ordering hint, never a veracity signal. stream_id IS the cluster_id.
 STORY_GEO_INFERRED = "story.geo_inferred"
 
+# Source registry + lifecycle (#241, P3): a newly-seen acquisition source moves
+# registered → backfilling → scored → active, and the live feed shows only ACTIVE sources
+# (fail-open — an unregistered source is shown, so the registry can never empty the feed). The
+# registry agent (scripts/source_registry_agent.py) emits these; maat/learning/source_registry.py
+# folds them at read time (no kernel table, exactly like reputation #37). Both carry the same
+# {source, state, provider?, reputation?, run_id?, cost_usd?, at} shape — stream_id IS the source.
+SOURCE_REGISTERED = "source.registered"        # first sighting (state registered, or active if grandfathered)
+SOURCE_STATE_CHANGED = "source.state_changed"  # a later lifecycle transition / reputation refresh
+
 # --- Acquisition funnel (marketing site → operator console) -----------------------------
 # The public marketing site (maat.press) publishes these as it records the visitor funnel
 # (D5/D20): a page view, a "Download on the App Store" tap (which shows "coming soon"), and
