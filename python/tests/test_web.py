@@ -337,7 +337,7 @@ def test_prompts_page_shows_active_seed_history_and_rollback():
     from maat.web.app import _prompts_page
 
     base = _prompts_page({})  # no edits yet
-    assert "Prompts" in base and "live on the next run" in base and "built-in" in base
+    assert "live on the next run" in base and "built-in" in base  # title now in the shell topbar
     rows = {
         "extract": [
             {"key": "extract", "version": 2, "text": "v2 {article_text} {source_metadata} {detected_language}",
@@ -654,7 +654,7 @@ def test_reputation_page_renders_fold_over_corroboration_history():
 
     reps = fold_reputation(_CONFIRMING_HISTORY)
     out = _reputation_page(reps, len(_CONFIRMING_HISTORY))
-    assert "Reputation" in out and "over time" in out
+    assert "over time" in out  # page title now in the shell topbar; the §6 framing stays in-body
     assert "independent originator" in out  # the independence dimension is surfaced
     assert "confirmed" in out  # the truth-over-time outcome column
     assert "never" in out and "consensus" in out  # the anti-consensus framing is explicit
@@ -666,7 +666,7 @@ def test_reputation_page_empty_history():
     from maat.web.app import _reputation_page
 
     out = _reputation_page([], 0)
-    assert "No reputation yet" in out and "Reputation" in out
+    assert "No reputation yet" in out
 
 
 def test_reputation_tier_cold_start_is_unrated_not_zero():
@@ -794,7 +794,7 @@ def test_policy_page_shows_bounded_signoff_gated_proposal_and_grants():
     proposal = policy_step(_CONFIRMING_HISTORY)
     assert proposal.approved is False  # the contract: never auto-applied
     out = _policy_page(proposal, len(_CONFIRMING_HISTORY))
-    assert "Policy" in out and "needs sign-off" in out
+    assert "needs sign-off" in out  # page title now in the shell topbar
     assert "A/B-on-replay" in out  # the weight side is justified by replay
     assert "Capability grants" in out and "bounded self-modification" in out
     assert "operator-gated" in out and "auto-tunable" in out  # both grant kinds shown
