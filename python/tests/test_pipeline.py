@@ -292,6 +292,51 @@ def test_group_by_similarity_scales_to_a_large_corpus(monkeypatch):
     assert sorted(i for g in groups for i in g) == list(range(2 * n_pairs))  # each claim once
 
 
+def _onehot_embed(texts, **_):
+    """Deterministic fake embedder: identical strings → identical vector (cosine 1.0), distinct
+    strings → orthogonal (cosine 0). Lets us test clustering wiring without the live model."""
+    uniq: dict[str, int] = {}
+    out = []
+    for t in texts:
+        i = uniq.setdefault(t, len(uniq))
+        v = [0.0] * 64
+        v[i % 64] = 1.0
+        out.append(v)
+    return out
+
+
+def test_corroborate_clusters_cross_lingual_via_english_pivot(monkeypatch):
+    # #240: two claims with DIFFERENT original text but the SAME English pivot cluster as ONE fact
+    # (group_by_similarity embeds embed_text, not text). Distinct sources → 2 independent originators.
+    import maat.pipeline.corroborate as corro
+    from maat.pipeline.corroborate import ClaimRow, corroborate
+
+    monkeypatch.setattr(corro, "mistral_embed", _onehot_embed)
+    claims = [
+        ClaimRow(id="es", text="El ministro dimitió el martes.", article_id="a1",
+                 source="elpais.com", embed_text="The minister resigned on Tuesday."),
+        ClaimRow(id="ru", text="Министр подал в отставку во вторник.", article_id="a2",
+                 source="lenta.ru", embed_text="The minister resigned on Tuesday."),
+    ]
+    res = corroborate(claims, {"a1": "x", "a2": "y"}, extremity_of=lambda _t: "notable")
+    assert len(res) == 1 and set(res[0].claim_ids) == {"es", "ru"}
+    assert res[0].independent_originators == 2  # elpais + lenta are independent
+
+
+def test_corroborate_without_pivot_leaves_cross_lingual_separate(monkeypatch):
+    # Control: WITHOUT a pivot, the different-language texts embed distinctly → no shared cluster.
+    import maat.pipeline.corroborate as corro
+    from maat.pipeline.corroborate import ClaimRow, corroborate
+
+    monkeypatch.setattr(corro, "mistral_embed", _onehot_embed)
+    claims = [
+        ClaimRow(id="es", text="El ministro dimitió el martes.", article_id="a1", source="elpais.com"),
+        ClaimRow(id="ru", text="Министр подал в отставку во вторник.", article_id="a2", source="lenta.ru"),
+    ]
+    res = corroborate(claims, {"a1": "x", "a2": "y"}, extremity_of=lambda _t: "notable")
+    assert all(len(r.claim_ids) == 1 for r in res)  # never collapse distinct-language text without the pivot
+
+
 def test_confidence_read_scales_with_extremity():
     from maat.pipeline.corroborate import confidence_read
 
