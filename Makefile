@@ -53,6 +53,9 @@ ccnews-backfill:
 acquire-rss:
 	cd python && uv run python scripts/acquire_rss.py
 
+acquire-locales:
+	cd python && uv run python scripts/acquire_locales.py
+
 triage:
 	cd python && uv run python -m maat.agents.triage
 
