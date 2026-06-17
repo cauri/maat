@@ -138,6 +138,8 @@ services:
           sleep "$${MAAT_TICK_DRAIN}";
           echo "[clock] corroborate (recompute clusters)";
           uv run --no-dev python -m maat.agents.corroborate_agent || echo "[clock] corroborate error";
+          echo "[clock] source-registry (lifecycle + reputation; gate new sources until scored, #241)";
+          uv run --no-dev python scripts/source_registry_agent.py || echo "[clock] source-registry error";
           echo "[clock] story-graph (thread clusters into event-nodes, #42)";
           uv run --no-dev python -m maat.agents.story_graph_agent || echo "[clock] story-graph error";
           echo "[clock] geotag (infer country for clusters the heuristic can't place, #189)";

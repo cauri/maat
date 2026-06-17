@@ -181,11 +181,21 @@ def test_sources_page_registry_badges_and_proposal_note():
         {"source": "European Central Bank", "n": 3, "last": dt.datetime(2026, 6, 15), "langs": ["en"]},
         {"source": "AFP", "n": 9, "last": dt.datetime(2026, 6, 15), "langs": ["en", "fr"]},
     ]
-    out = _sources_page(srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}}, {"AFP": "Wire"})
+    from maat.learning.source_registry import fold_sources
+
+    registry = fold_sources([
+        {"source": "AFP", "state": "active", "reputation": 0.71, "at": "t"},
+        {"source": "European Central Bank", "state": "registered", "at": "t"},
+    ])
+    out = _sources_page(srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}}, {"AFP": "Wire"}, registry)
     assert "European Central Bank" in out and "first-hand" in out  # first-hand source role shown
     assert "reprint" in out and "denied" in out and "group · Wire" in out
     assert 'name="deny"' in out  # the deny toggle (one on/off control, no save button)
     assert "corroboration" in out  # the enforcement note surfaced
+    # #241 lifecycle: the registry state badge (by its unique tooltip) + reputation render per source
+    assert "In the live feed" in out  # active badge tooltip
+    assert "Held out of the feed" in out  # pending (registered) badge tooltip
+    assert "reputation 0.71" in out
 
 
 def test_nav_includes_all_p8_tabs():

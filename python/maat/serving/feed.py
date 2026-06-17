@@ -42,6 +42,7 @@ from maat.events import STORY_GEO_INFERRED
 from maat.learning.accuracy import lifecycle_by_fact
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.source_learning import learn_preferences
+from maat.learning.source_registry import fold_sources, pending_sources
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.source_flags import denied_sources
 from maat.serving.topics import enriched_interest, parse_interest, story_matches
@@ -99,6 +100,23 @@ def _filter_denied(payload: dict, denied: set) -> dict:
     for s in payload.get("stories", []):
         srcs = {src for g in s.get("originator_groups", []) for src in g.get("sources", [])}
         if srcs and srcs <= denied:
+            continue
+        kept.append(s)
+    return {**payload, "stories": kept, "count": len(kept)}
+
+
+def _filter_pending(payload: dict, pending: set) -> dict:
+    """Source-lifecycle gate (#241): hold stories sourced ENTIRELY from not-yet-active sources out
+    of the live feed until their backfill + scoring completes ("ok if it doesn't appear until it is
+    complete"). FAIL-OPEN — only sources EXPLICITLY in a pending registry state are held, so an
+    unregistered source is always shown and the registry can never silently empty the feed. A story
+    with ≥1 active (or unregistered) source stays; its corroboration still stands."""
+    if not pending:
+        return payload
+    kept = []
+    for s in payload.get("stories", []):
+        srcs = {src for g in s.get("originator_groups", []) for src in g.get("sources", [])}
+        if srcs and srcs <= pending:
             continue
         kept.append(s)
     return {**payload, "stories": kept, "count": len(kept)}
@@ -754,6 +772,22 @@ def _make_router() -> Any:
             (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]) for r in rows
         )
 
+    async def _load_pending_sources(pool):
+        """Sources NOT yet activated in the registry (#241), folded from source.* events. Resilient
+        + fail-open: any error → empty set → nothing hidden."""
+        try:
+            rows = await pool.fetch(
+                "select data from events where type in ('source.registered', 'source.state_changed') "
+                "order by id"
+            )
+        except Exception:
+            return set()
+        return pending_sources(
+            fold_sources(
+                json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows
+            )
+        )
+
     async def _load_geo_overrides(pool):
         """LLM-inferred {cluster_id: country} from the geo-tagger (#189), latest per cluster.
         A de-US ordering hint that fills the heuristic's gaps — never a veracity signal. Resilient
@@ -797,6 +831,7 @@ def _make_router() -> Any:
         else:
             payload = _filter_by_topics(payload, topics)
         payload = _filter_denied(payload, await _load_denied(pool))  # #187: drop denied-only stories
+        payload = _filter_pending(payload, await _load_pending_sources(pool))  # #241: hold non-active sources
         cluster_node, node_meta, node_edges = await _load_story_graph(pool)
         payload = _thread_payload(payload, cluster_node, node_meta, node_edges)
         if accuracy or reputation:

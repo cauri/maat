@@ -53,6 +53,7 @@ from maat.learning.reputation import (
 )
 from maat.learning.rl import policy_step
 from maat.learning.trajectory import load_trajectory
+from maat.learning import source_registry as sreg
 from maat.metrics import de_us
 from maat.obs_metrics import pipeline_health
 from maat.pipeline.corroborate import (
@@ -623,7 +624,14 @@ async def sources_view(ok: str = "") -> str:
     )
     flag_by = {r["s"]: {"status": r["st"], "reason": r["r"]} for r in flags}
     group_by = {r["s"]: r["g"] for r in grps}
-    return _doc(_sources_page(srcs, wire, flag_by, group_by),
+    reg_rows = await pool.fetch(
+        "select data from events where type in ($1, $2) order by id",
+        events.SOURCE_REGISTERED, events.SOURCE_STATE_CHANGED,
+    )
+    registry = sreg.fold_sources(
+        json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in reg_rows
+    )
+    return _doc(_sources_page(srcs, wire, flag_by, group_by, registry),
                 "Every outlet Maat reads, and how you want each one treated", "sources", flash=ok)
 
 
@@ -2441,11 +2449,14 @@ def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
     return out
 
 
-def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
+def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict, registry: dict | None = None) -> str:
+    registry = registry or {}
     note = (
-        '<div class="deriv">Every outlet Maat has read. <b>Deny</b> a source to drop stories sourced '
-        'only from it out of the feed (a story another outlet also carries still shows). <b>Group</b> '
-        'outlets owned by the same company so they count as one source in corroboration, not several.</div>'
+        '<div class="deriv">Every outlet Maat has read. Its <b>lifecycle</b> runs registered → '
+        'backfilling → scored → active; only <b>active</b> sources show in the feed (a new source '
+        'is held until its articles corroborate and earn a reputation). <b>Deny</b> a source to drop '
+        'stories sourced only from it; <b>Group</b> same-owner outlets so they count as one source in '
+        'corroboration, not several.</div>'
     )
     rows = []
     for s in srcs:
@@ -2454,6 +2465,13 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
         langs = ", ".join(x for x in (s["langs"] or []) if x) or "—"
         last = f'{s["last"]:%Y-%m-%d}' if s["last"] else "—"
         badges = []
+        rec = registry.get(name)
+        if rec is not None:
+            if rec.state == sreg.ACTIVE:
+                badges.append(_badge("active", "fact", "In the live feed"))
+            else:
+                badges.append(_badge(rec.state, "proj",
+                                     "Held out of the feed until its backfill + scoring completes (#241)"))
         if is_primary_source(name):
             badges.append(_badge("first-hand", "fact",
                                  "A first-hand source, e.g. a body publishing its own statement"))
@@ -2468,10 +2486,16 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
         if group_by.get(name):
             badges.append(_badge(f"group · {group_by[name]}", "syn",
                                  "Grouped with same-owner outlets — they count as one source"))
+        extra = ""
+        if rec is not None:
+            if rec.reputation is not None:
+                extra += f' · reputation {rec.reputation:.2f}'
+            if rec.provider:
+                extra += f' · via {html.escape(rec.provider)}'
         rows.append(
             f'<div class="srow2"><div><div class="sname">{esc} '
             f'<span class="bs">{"".join(badges)}</span></div>'
-            f'<div class="mut sm">{s["n"]} articles · {html.escape(langs)} · last {last}</div></div>'
+            f'<div class="mut sm">{s["n"]} articles · {html.escape(langs)} · last {last}{extra}</div></div>'
             '<form class="inline" method="post" action="/sources/flag">'
             f'<input type="hidden" name="source" value="{esc}">'
             '<label class="toggle" title="Deny: drop feed stories sourced only from this outlet">'
