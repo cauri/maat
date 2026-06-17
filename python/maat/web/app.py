@@ -3417,10 +3417,12 @@ def _redirect(path: str, msg: str = ""):
 
 _DOC = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Maat console</title><link rel="stylesheet" href="/static/console.css"></head><body>
+<title>Maat console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%3E%3Cpath%20d='M20%204C11%205%206%2010%205%2018c5%201%209-1%2012-5M9%2014c2-3%205-5%209-6M5%2018l-2%202'%20stroke='%23a8792e'%20stroke-width='1.8'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/console.css"></head><body>
 <div class="app">
 <aside class="sidebar">
-<a class="brand" href="/"><b>Maat</b><span>operator console</span></a>
+<a class="brand" href="/"><svg class="brand-feather" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 4C11 5 6 10 5 18c5 1 9-1 12-5M9 14c2-3 5-5 9-6M5 18l-2 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Maat</b><span>operator console</span></a>
 {{nav}}
 {{foot}}
 </aside>
