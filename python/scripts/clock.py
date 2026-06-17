@@ -120,8 +120,12 @@ async def main() -> None:
     gate_cache: dict = {}  # per-tick domain → verdict, so each new domain is classified once
     use_apify = apify.available() and os.environ.get("MAAT_PRIMARY_PASS", "1") != "0"
     paced = 0  # global GDELT-call counter — GDELT throttles ~1 query/5s, so space ALL calls out
+    gdelt_dead = False  # set on the first 429: GDELT rate-limits by IP, so once one call is
+    # throttled the rest will be too — stop pacing through ~30 dead calls (≈30×5s) every tick and
+    # let the Apify pass (the real workhorse while GDELT is down) carry acquisition.
     reranked = 0  # main-loop queries the per-query budget actually narrowed (#35 observability)
     rep_queries: list[str] = []  # one query per topic — seeds the deepen-top-sources pass (#35)
+    apify_queries: list[str] = []  # collected here, fetched CONCURRENTLY after the loop (see below)
 
     async def ingest_gdelt(a) -> bool:
         """Gate → fetch body → publish one GDELT candidate. Returns True iff a NEW article was
@@ -149,7 +153,7 @@ async def main() -> None:
             return False
         await publish(nc, "article.ingested", _aid(a.url),
                       {"title": a.title, "source": a.domain, "language": a.language,
-                       "body": body, "url": a.url, "image_url": image_url})
+                       "body": body, "url": a.url, "image_url": image_url, "provider": "gdelt"})
         seen.add(a.url)
         new += 1
         return True
@@ -163,17 +167,22 @@ async def main() -> None:
             rep_queries.append(queries[0])  # representative query for this topic's deepen pass
         got = 0
         for q in queries:
-            if paced:  # space successive GDELT calls to dodge its 429 back-off (a blocking sleep)
-                await asyncio.sleep(5)
-            paced += 1
-            try:
-                # search()/fetch_article() block (httpx + trafilatura). Run them OFF the event loop
-                # — otherwise a multi-second fetch starves the NATS client's flush/ping tasks, the
-                # connection drops, and published articles are silently lost (the 83→7 bug).
-                arts = await asyncio.to_thread(search, q, maxrecords=15, timespan="1d")
-            except Exception as e:  # GDELT down / rate-limited
-                print(f"  [{q}] GDELT unavailable: {e}", flush=True)
-                arts = []
+            if not gdelt_dead:
+                if paced:  # space successive GDELT calls to dodge its 429 back-off (a blocking sleep)
+                    await asyncio.sleep(5)
+                paced += 1
+                try:
+                    # search()/fetch_article() block (httpx + trafilatura). Run them OFF the event loop
+                    # — otherwise a multi-second fetch starves the NATS client's flush/ping tasks, the
+                    # connection drops, and published articles are silently lost (the 83→7 bug).
+                    arts = await asyncio.to_thread(search, q, maxrecords=15, timespan="1d")
+                except Exception as e:  # GDELT down / rate-limited
+                    print(f"  [{q}] GDELT unavailable: {e}", flush=True)
+                    arts = []
+                    if "429" in str(e):  # throttled by IP — the rest will 429 too; stop wasting 5s/call
+                        gdelt_dead = True
+            else:
+                arts = []  # GDELT throttled this tick — skip straight to the Apify pass
             # #35 actuation — re-rank within a per-query fetch budget: order the unseen candidates by
             # learned source weight (rank_for_fetch keeps diversity structural — every source present
             # gets a slot before reward priority fills the rest), then fetch bodies for at most
@@ -189,45 +198,63 @@ async def main() -> None:
                 if await ingest_gdelt(a):
                     published_q += 1
                     got += 1
-            # Apify pass per query: its web search surfaces primary/authoritative sources GDELT
-            # misses (#108, e.g. the issuer's own release). MAAT_PRIMARY_PASS=0 opts out (credits).
+            # Apify primary pass: its web search surfaces primary/authoritative sources GDELT misses
+            # (#108) and is the workhorse while GDELT is throttled. The calls are slow (~30-60s each),
+            # so don't run them inline/serially — collect the queries and fetch them CONCURRENTLY after
+            # this loop (a serial pass over ~30 queries was making each tick ~30 min). MAAT_PRIMARY_PASS=0
+            # opts out (credits).
             if use_apify:
+                apify_queries.append(q)
+        print(f"[{topic}] +{got} new (gdelt)", flush=True)
+
+    # Concurrent Apify primary pass (#108) — the slow per-query web-search+fetch calls, run together
+    # under a bounded semaphore so the whole pass costs ~one slow request of wall-clock instead of
+    # the serial sum. Gate + publish stay on the event loop (fast, dedup-safe). Queries are deduped
+    # so a phrase shared across topics is fetched once.
+    if use_apify and apify_queries:
+        conc = int(os.environ.get("MAAT_CLOCK_APIFY_CONC", "6"))
+        sem = asyncio.Semaphore(conc)
+        uniq = list(dict.fromkeys(apify_queries))
+
+        async def _fetch(q: str):
+            async with sem:
                 try:
-                    items = await asyncio.to_thread(apify.search_and_fetch, q, max_results=5)
-                except Exception as e:  # Apify down / out of credit (402) — a paid provider must
-                    # NOT abort the tick. Disable it for the rest of this tick (next tick retries,
-                    # in case credit is topped up) and keep going on the free GDELT stream.
-                    print(f"  [{q}] Apify unavailable, skipping primary pass this tick: {e}", flush=True)
-                    use_apify = False
-                    items = []
-                for fa in items:
-                    if fa.url in seen:
-                        continue
-                    if fa.domain in denied:  # operator-denied source (#187)
-                        seen.add(fa.url)
-                        dropped += 1
-                        continue
-                    verdict = await asyncio.to_thread(
-                        accept_source, fa.domain, fa.title,
-                        prompt=gate_prompt, known_good=known_good, cache=gate_cache,
-                    )
-                    if not verdict.accept:
-                        seen.add(fa.url)
-                        dropped += 1
-                        continue
-                    await publish(nc, "article.ingested", _aid(fa.url),
-                                  {"title": fa.title, "source": fa.domain, "language": fa.language,
-                                   "body": fa.body, "url": fa.url, "image_url": fa.image})
+                    return await asyncio.to_thread(apify.search_and_fetch, q, max_results=5)
+                except Exception as e:  # a paid provider must NOT abort the tick
+                    print(f"  [{q}] Apify unavailable this tick: {e}", flush=True)
+                    return []
+
+        for items in await asyncio.gather(*(_fetch(q) for q in uniq)):
+            for fa in items:
+                if fa.url in seen:
+                    continue
+                if fa.domain in denied:  # operator-denied source (#187)
                     seen.add(fa.url)
-                    new += 1
-                    got += 1
-        print(f"[{topic}] +{got} new", flush=True)
+                    dropped += 1
+                    continue
+                verdict = await asyncio.to_thread(
+                    accept_source, fa.domain, fa.title,
+                    prompt=gate_prompt, known_good=known_good, cache=gate_cache,
+                )
+                if not verdict.accept:
+                    seen.add(fa.url)
+                    dropped += 1
+                    continue
+                await publish(nc, "article.ingested", _aid(fa.url),
+                              {"title": fa.title, "source": fa.domain, "language": fa.language,
+                               "body": fa.body, "url": fa.url, "image_url": fa.image,
+                               "provider": "apify"})
+                seen.add(fa.url)
+                new += 1
+        print(f"[apify] primary pass over {len(uniq)} queries done", flush=True)
 
     # #35 deepen pass: give the top proven-reliable sources MORE coverage by re-querying the tracked
     # topics scoped (domain:) to their domains. Bounded (≤ a handful of extra GDELT calls/tick) and
     # paced like the main loop. Skipped on cold start / when no source has earned deepening yet.
     deepened = 0
-    plan = deepening_plan(prefs, rep_queries) if steer_active else []
+    # The deepen pass is GDELT-only; skip it entirely when GDELT is throttled (no point pacing
+    # through more dead calls — the Apify pass already widened coverage above).
+    plan = deepening_plan(prefs, rep_queries) if steer_active and not gdelt_dead else []
     for src, dq in plan:
         if paced:  # keep pacing GDELT's ~1 query/5s throttle across the deepen calls too
             await asyncio.sleep(5)
