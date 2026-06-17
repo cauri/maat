@@ -457,10 +457,26 @@ async def spend_view(ok: str = "") -> str:
         extremity_calls=counts.get("cluster.corroborated", 0),
         embed_claims=n_claims,
     )
+    # #241: per-acquisition-channel cost — what each sourcing method (rss / apify / per-locale /
+    # cc-news / backfill) costs to run through the pipeline. Articles per provider × per-article est.
+    n_articles = await pool.fetchval("select count(*) from articles") or 0
+    by_provider = {
+        (r["p"] or "untagged"): r["n"]
+        for r in await pool.fetch(
+            "select coalesce(nullif(data->>'provider',''),'untagged') p, count(*) n "
+            "from events where type = 'article.ingested' group by 1"
+        )
+    }
+    provider_spend = spend_mod.spend_by_provider(
+        by_provider, avg_claims_per_article=(n_claims / n_articles if n_articles else 0.0)
+    )
     apify_usd = await asyncio.to_thread(spend_mod.apify_spend_usd)  # blocking httpx → off-loop
     otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
     budget = spend_mod.cap_status(await _today_spend_usd(pool), spend_mod.daily_cap_usd())
-    return _doc(_spend_page(rows, llm_total, apify_usd, otlp, budget), "spend", "spend", flash=ok)
+    return _doc(
+        _spend_page(rows, llm_total, apify_usd, otlp, budget, provider_spend),
+        "spend", "spend", flash=ok,
+    )
 
 
 @app.get("/runs", response_class=HTMLResponse)
@@ -2310,7 +2326,8 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
     )
 
 
-def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | None = None) -> str:
+def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | None = None,
+                provider_spend=None) -> str:
     apify_cell = f"${apify_usd:,.2f}" if apify_usd is not None else "—"
     grand = llm_total + (apify_usd or 0.0)
     cells = (
@@ -2345,6 +2362,23 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | Non
         f'<td style="text-align:right">${r.usd:,.2f}</td></tr>'
         for r in rows
     )
+    channel_block = ""
+    if provider_spend:
+        crows = "".join(
+            f'<tr><td>{html.escape(r.provider)}</td>'
+            f'<td style="text-align:right">{r.articles:,}</td>'
+            f'<td style="text-align:right">${r.usd:,.2f}</td></tr>'
+            for r in provider_spend
+        )
+        channel_block = (
+            '<div class="bl mt">By acquisition channel (#241)</div>'
+            '<table class="aud"><tr><th>channel</th>'
+            '<th style="text-align:right">articles</th><th style="text-align:right">est. LLM $</th></tr>'
+            f"{crows}</table>"
+            '<div class="mut sm">Estimated pipeline (extract + classify + embed) cost to process each '
+            "sourcing method's articles — what it costs to run rss / apify / the per-locale floor / "
+            "cc-news. Apify's own scraping credits are the actual figure above, billed separately.</div>"
+        )
     catcafe = (
         f'<a class="clink" href="{html.escape(CATCAFE_URL)}" title="per-call traces + token usage">'
         "open cat-cafe ↗</a>"
@@ -2359,6 +2393,7 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | Non
         '<table class="aud"><tr><th>stage</th><th>model</th>'
         '<th style="text-align:right">calls</th><th style="text-align:right">est. $</th></tr>'
         f"{srows}</table>"
+        f"{channel_block}"
         '<div class="mut sm mt">LLM figures are <b>estimated</b> from cumulative call counts × '
         "per-model token estimates; the exact per-call cost (and live token usage) is in cat-cafe. "
         f"Apify is the actual billed figure from its usage API. Per-call detail: {catcafe}.</div>"
