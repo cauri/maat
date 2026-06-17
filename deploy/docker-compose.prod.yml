@@ -114,8 +114,8 @@ services:
       MAAT_TRIAGE_LLM: ${MAAT_TRIAGE_LLM:-1}             # feedback category/route refinement (#58/#189)
       MAAT_CURATION_LLM: ${MAAT_CURATION_LLM:-1}         # geo-tag clusters the TLD/lang heuristic can't place (#189)
       MAAT_GROUNDING_LLM: ${MAAT_GROUNDING_LLM:-1}       # judge each primary-bearing cluster vs its primary source (#228)
-      MAAT_CONTRADICTION_NLI: ${MAAT_CONTRADICTION_NLI:-0}  # NLI contradiction detection (#229) — OFF until the model is pinned + smoke-tested
-      MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-}                 # the ONNX MNLI cross-encoder repo (set when pinned, #229)
+      MAAT_CONTRADICTION_NLI: ${MAAT_CONTRADICTION_NLI:-1}  # NLI contradiction detection (#229): pinned + smoke-tested ONNX MNLI cross-encoder
+      MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/distilbert-base-uncased-mnli}  # small DistilBERT-MNLI in ONNX (#229), downloaded once per deploy
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
     # by compose against the host env (unset → blank), breaking `sleep ""`.
