@@ -7,10 +7,10 @@ None) when the flag is off — so tests and CI never touch the model or the netw
 (missing dependency, download failure, runtime error) also returns None, so the contradiction agent
 treats the pair as "no signal" rather than guessing.
 
-Pinned model: ``Xenova/distilbert-base-uncased-mnli`` — a small DistilBERT fine-tuned on MNLI,
-exported to ONNX (smoke-tested: correct on canonical NLI; inputs input_ids + attention_mask;
-id2label order entailment / neutral / contradiction). Overridable via MAAT_NLI_MODEL /
-MAAT_NLI_ONNX_FILE / MAAT_NLI_LABELS for a stronger model (e.g. a DeBERTa-v3 NLI) without code change.
+Pinned model: ``Xenova/nli-deberta-v3-small`` — a DeBERTa-v3 cross-encoder fine-tuned for NLI,
+exported to ONNX (smoke-tested: correct on canonical NLI AND on abstract entailment a small
+DistilBERT got wrong; inputs input_ids + attention_mask; id2label order contradiction / entailment /
+neutral). Overridable via MAAT_NLI_MODEL / MAAT_NLI_ONNX_FILE / MAAT_NLI_LABELS without code change.
 """
 
 from __future__ import annotations
@@ -19,11 +19,11 @@ import math
 import os
 from functools import lru_cache
 
-_MODEL_REPO = os.environ.get("MAAT_NLI_MODEL") or "Xenova/distilbert-base-uncased-mnli"
+_MODEL_REPO = os.environ.get("MAAT_NLI_MODEL") or "Xenova/nli-deberta-v3-small"
 _ONNX_FILE = os.environ.get("MAAT_NLI_ONNX_FILE") or "onnx/model.onnx"
 # id2label order of the pinned model (index → label); set MAAT_NLI_LABELS to match a different model.
 _LABELS = tuple(
-    s.strip() for s in (os.environ.get("MAAT_NLI_LABELS") or "entailment,neutral,contradiction").split(",")
+    s.strip() for s in (os.environ.get("MAAT_NLI_LABELS") or "contradiction,entailment,neutral").split(",")
 )
 
 
