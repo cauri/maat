@@ -623,7 +623,8 @@ async def sources_view(ok: str = "") -> str:
     )
     flag_by = {r["s"]: {"status": r["st"], "reason": r["r"]} for r in flags}
     group_by = {r["s"]: r["g"] for r in grps}
-    return _doc(_sources_page(srcs, wire, flag_by, group_by), "sources", "sources", flash=ok)
+    return _doc(_sources_page(srcs, wire, flag_by, group_by),
+                "Every outlet Maat reads, and how you want each one treated", "sources", flash=ok)
 
 
 @app.post("/sources/flag")
