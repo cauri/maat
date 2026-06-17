@@ -6,11 +6,20 @@
 //! self-test the whole spine (publish one event, record it, check the projection).
 
 use anyhow::Result;
+use async_nats::jetstream::{self, consumer::pull, consumer::AckPolicy, stream};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json;
 use sqlx::PgPool;
+use std::time::Duration;
+
+/// Durable, file-backed JetStream stream + consumer so a kerneld restart/outage REPLAYS events
+/// rather than dropping them — a core-NATS subscription keeps nothing for an offline subscriber,
+/// which silently lost a real beta signup (2026-06-16).
+const STREAM_NAME: &str = "MAAT_EVENTS";
+const SUBJECT: &str = "maat.events.>";
+const DURABLE: &str = "kerneld";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EventEnvelope {
@@ -36,13 +45,27 @@ async fn main() -> Result<()> {
     sqlx::migrate!().run(&pool).await?;
     tracing::info!("postgres connected + migrated");
 
-    let nats = async_nats::connect(&nats_url).await?;
+    let client = async_nats::connect(&nats_url).await?;
     tracing::info!("nats connected: {nats_url}");
+    let js = jetstream::new(client.clone());
+
+    // Retain every maat.events.* publish durably (30-day / 2 GiB rolling window). A core publish
+    // is captured by the stream, so publishers don't change — only the kernel's read path does.
+    let events_stream = js
+        .get_or_create_stream(stream::Config {
+            name: STREAM_NAME.to_string(),
+            subjects: vec![SUBJECT.to_string()],
+            retention: stream::RetentionPolicy::Limits,
+            storage: stream::StorageType::File,
+            max_age: Duration::from_secs(60 * 60 * 24 * 30),
+            max_bytes: 2 * 1024 * 1024 * 1024,
+            discard: stream::DiscardPolicy::Old,
+            ..Default::default()
+        })
+        .await?;
+    tracing::info!("jetstream stream {STREAM_NAME} ready");
 
     let smoke = std::env::args().any(|a| a == "--smoke");
-    let mut sub = nats.subscribe("maat.events.>").await?;
-    tracing::info!("subscribed to maat.events.>");
-
     if smoke {
         let ev = EventEnvelope {
             stream_id: "smoke-article-1".to_string(),
@@ -52,60 +75,116 @@ async fn main() -> Result<()> {
             }),
             tenant_id: "cauri".to_string(),
         };
-        nats.publish("maat.events.article.ingested", serde_json::to_vec(&ev)?.into())
+        client
+            .publish("maat.events.article.ingested", serde_json::to_vec(&ev)?.into())
             .await?;
-        nats.flush().await?;
+        client.flush().await?;
         tracing::info!("smoke event published");
     }
 
-    while let Some(msg) = sub.next().await {
-        match serde_json::from_slice::<EventEnvelope>(&msg.payload) {
-            Ok(ev) => {
-                if let Err(e) = record_and_project(&pool, &ev).await {
-                    tracing::error!("project failed (type={}): {e}", ev.typ);
-                    // Record the failure so the operator Run console can surface it (P8 F4),
-                    // not just the logs. Best-effort: a dead-letter insert must not itself wedge
-                    // the consumer.
-                    let dl = sqlx::query(
-                        "insert into dead_letters (stream_id, type, data, error, tenant_id) \
-                         values ($1, $2, $3, $4, $5)",
-                    )
-                    .bind(&ev.stream_id)
-                    .bind(&ev.typ)
-                    .bind(Json(&ev.data))
-                    .bind(e.to_string())
-                    .bind(&ev.tenant_id)
-                    .execute(&pool)
-                    .await;
-                    if let Err(de) = dl {
-                        tracing::error!("dead-letter insert failed: {de}");
-                    }
-                    continue;
-                }
-                tracing::info!("recorded event type={} stream={}", ev.typ, ev.stream_id);
-                if smoke {
-                    let n: i64 = sqlx::query_scalar("select count(*) from articles")
-                        .fetch_one(&pool)
-                        .await?;
-                    tracing::info!("smoke ok: articles projected = {n}");
-                    break;
-                }
+    // Durable pull consumer: at-least-once, explicit ack. On restart it resumes from the last ack,
+    // so anything published while kerneld was down is redelivered and folded — never dropped.
+    let consumer = events_stream
+        .get_or_create_consumer(
+            DURABLE,
+            pull::Config {
+                durable_name: Some(DURABLE.to_string()),
+                filter_subject: SUBJECT.to_string(),
+                ack_policy: AckPolicy::Explicit,
+                ack_wait: Duration::from_secs(60),
+                max_deliver: 6,
+                ..Default::default()
+            },
+        )
+        .await?;
+    let mut messages = consumer.messages().await?;
+    tracing::info!("consuming {STREAM_NAME} via durable consumer {DURABLE}");
+
+    while let Some(item) = messages.next().await {
+        let msg = match item {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("jetstream message error: {e}");
+                continue;
             }
-            Err(e) => tracing::warn!("bad event payload: {e}"),
+        };
+        // The JetStream sequence is the dedup key; `delivered` lets us retry transient failures.
+        let (seq, delivered) = msg
+            .info()
+            .map(|i| (i.stream_sequence as i64, i.delivered))
+            .unwrap_or((0, 1));
+        match serde_json::from_slice::<EventEnvelope>(&msg.payload) {
+            Ok(ev) => match record_and_project(&pool, &ev, seq).await {
+                Ok(newly) => {
+                    if newly {
+                        tracing::info!("recorded event type={} stream={} seq={seq}", ev.typ, ev.stream_id);
+                    } else {
+                        tracing::info!("skip duplicate seq={seq} type={}", ev.typ);
+                    }
+                    let _ = msg.ack().await;
+                    if smoke {
+                        let n: i64 = sqlx::query_scalar("select count(*) from articles")
+                            .fetch_one(&pool)
+                            .await?;
+                        tracing::info!("smoke ok: articles projected = {n}");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("project failed (type={} seq={seq} delivered={delivered}): {e}", ev.typ);
+                    if delivered >= 6 {
+                        // Retries exhausted — record the failure for the operator console (P8 F4)
+                        // and ack so one poison event can't wedge the whole consumer.
+                        let dl = sqlx::query(
+                            "insert into dead_letters (stream_id, type, data, error, tenant_id) \
+                             values ($1, $2, $3, $4, $5)",
+                        )
+                        .bind(&ev.stream_id)
+                        .bind(&ev.typ)
+                        .bind(Json(&ev.data))
+                        .bind(e.to_string())
+                        .bind(&ev.tenant_id)
+                        .execute(&pool)
+                        .await;
+                        if let Err(de) = dl {
+                            tracing::error!("dead-letter insert failed: {de}");
+                        }
+                        let _ = msg.ack().await;
+                    } else {
+                        // Possibly transient (e.g. a DB blip) — let JetStream redeliver after ack_wait.
+                        let _ = msg.ack_with(async_nats::jetstream::AckKind::Nak(None)).await;
+                    }
+                }
+            },
+            Err(e) => {
+                tracing::warn!("bad event payload (seq={seq}): {e}");
+                let _ = msg.ack().await; // unparseable — drop, don't wedge the consumer
+            }
         }
     }
     Ok(())
 }
 
-/// Append the event to the log (source of truth), then fold the minimal projection.
-async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
-    sqlx::query("insert into events (stream_id, type, data, tenant_id) values ($1, $2, $3, $4)")
-        .bind(&ev.stream_id)
-        .bind(&ev.typ)
-        .bind(Json(&ev.data))
-        .bind(&ev.tenant_id)
-        .execute(pool)
-        .await?;
+/// Append the event to the log (source of truth), then fold the minimal projection — all in ONE
+/// transaction, keyed by the JetStream sequence. Returns Ok(true) if newly recorded, Ok(false) if
+/// the message was already processed on a prior delivery (a duplicate → exactly-once no-op).
+async fn record_and_project(pool: &PgPool, ev: &EventEnvelope, js_seq: i64) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let recorded = sqlx::query(
+        "insert into events (stream_id, type, data, tenant_id, js_seq) \
+         values ($1, $2, $3, $4, $5) on conflict (js_seq) do nothing",
+    )
+    .bind(&ev.stream_id)
+    .bind(&ev.typ)
+    .bind(Json(&ev.data))
+    .bind(&ev.tenant_id)
+    .bind(js_seq)
+    .execute(&mut *tx)
+    .await?;
+    if recorded.rows_affected() == 0 {
+        tx.commit().await?; // already folded on a prior delivery — nothing to do
+        return Ok(false);
+    }
 
     if ev.typ == "article.ingested" {
         sqlx::query(
@@ -122,7 +201,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(ev.data.get("language").and_then(|v| v.as_str()))
         .bind(ev.data.get("body").and_then(|v| v.as_str()))
         .bind(ev.data.get("image_url").and_then(|v| v.as_str()))
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -154,7 +233,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
             .bind(c.get("kind").and_then(|v| v.as_str()))
             .bind(c.get("is_synthesis").and_then(|v| v.as_bool()).unwrap_or(false))
             .bind(c.get("horizon").and_then(|v| v.as_str()))
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         }
     }
@@ -176,7 +255,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
             .bind(c.get("kind").and_then(|v| v.as_str()))
             .bind(c.get("is_synthesis").and_then(|v| v.as_bool()).unwrap_or(false))
             .bind(c.get("horizon").and_then(|v| v.as_str()))
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         }
     }
@@ -203,7 +282,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(d.get("claim_ids").map(Json))
         .bind(d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0))
         .bind(d.get("extremity").and_then(|v| v.as_str()).unwrap_or("notable"))
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -214,12 +293,14 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         let d = &ev.data;
         sqlx::query(
             "insert into cluster_snapshots \
-             (cluster_id, tenant_id, snapshot_day, fact, independent_originators, has_primary, extremity, confidence, harvested_at) \
-             values ($1, $2, ($3::timestamptz)::date, $4, $5, $6, $7, $8, $3::timestamptz) \
+             (cluster_id, tenant_id, snapshot_day, fact, independent_originators, has_primary, extremity, confidence, harvested_at, sources, originators, corrected, grounding) \
+             values ($1, $2, ($3::timestamptz)::date, $4, $5, $6, $7, $8, $3::timestamptz, $9, $10, $11, $12) \
              on conflict (cluster_id, snapshot_day) do update set \
                fact = excluded.fact, independent_originators = excluded.independent_originators, \
                has_primary = excluded.has_primary, extremity = excluded.extremity, \
-               confidence = excluded.confidence, harvested_at = excluded.harvested_at",
+               confidence = excluded.confidence, harvested_at = excluded.harvested_at, \
+               sources = excluded.sources, originators = excluded.originators, corrected = excluded.corrected, \
+               grounding = excluded.grounding",
         )
         .bind(d.get("cluster_id").and_then(|v| v.as_str()))
         .bind(&ev.tenant_id)
@@ -229,8 +310,56 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(d.get("has_primary").and_then(|v| v.as_bool()).unwrap_or(false))
         .bind(d.get("extremity").and_then(|v| v.as_str()).unwrap_or("notable"))
         .bind(d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0))
-        .execute(pool)
+        // #39 closing the loop: the reputation fold needs per-source independence (sources +
+        // collapsed originator groups); `corrected` carries the operator/reader refutation already
+        // on member claims into resolve_outcome. Default empty/false for pre-enrichment payloads.
+        .bind(Json(d.get("sources").cloned().unwrap_or_else(|| serde_json::json!([]))))
+        .bind(Json(d.get("originators").cloned().unwrap_or_else(|| serde_json::json!([]))))
+        .bind(d.get("corrected").and_then(|v| v.as_bool()).unwrap_or(false))
+        // #228: the primary-source grounding verdict rides the trajectory so a contradiction
+        // resolves the fact to REFUTED over time.
+        .bind(d.get("grounding").and_then(|v| v.as_str()))
+        .execute(&mut *tx)
         .await?;
+    }
+
+    if ev.typ == "cluster.grounded" {
+        // Primary-source grounding (#228): record the verdict + the grounding-refined confidence on
+        // the cluster the corroborate pass just (re)built. A no-op if the cluster id is already gone.
+        let d = &ev.data;
+        sqlx::query("update clusters set grounding = $2, confidence = $3 where id = $1")
+            .bind(d.get("cluster_id").and_then(|v| v.as_str()))
+            .bind(d.get("grounding").and_then(|v| v.as_str()))
+            .bind(d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if ev.typ == "claim.related" {
+        // Automated contradiction detection (#229): record the NLI relation between two claims.
+        // Idempotent per (claim_a, claim_b, relation); a re-run just refreshes the score.
+        let d = &ev.data;
+        sqlx::query(
+            "insert into claim_relations (tenant_id, claim_a, claim_b, relation, score) \
+             values ($1, $2::uuid, $3::uuid, $4, $5) \
+             on conflict (claim_a, claim_b, relation) do update set score = excluded.score",
+        )
+        .bind(&ev.tenant_id)
+        .bind(d.get("claim_a").and_then(|v| v.as_str()))
+        .bind(d.get("claim_b").and_then(|v| v.as_str()))
+        .bind(d.get("relation").and_then(|v| v.as_str()))
+        .bind(d.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if ev.typ == "claim.disputed" {
+        // #229: a stronger contradicting claim refutes this one — flag it so the harvester folds it
+        // into the cluster's `corrected` (→ REFUTED), the same path #227 built for operator fixes.
+        sqlx::query("update claims set disputed = true where id = $1::uuid")
+            .bind(ev.data.get("claim_id").and_then(|v| v.as_str()))
+            .execute(&mut *tx)
+            .await?;
     }
 
     if ev.typ == "story.graph.rebuilt" {
@@ -306,7 +435,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(d.get("kind").and_then(|v| v.as_str()))
         .bind(d.get("voice").and_then(|v| v.as_str()))
         .bind(d.get("speaker").and_then(|v| v.as_str()))
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -315,7 +444,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         sqlx::query("update claims set laundering_flag = $2, corrected = true where id = $1::uuid")
             .bind(d.get("target").and_then(|v| v.as_str()))
             .bind(d.get("abuse").and_then(|v| v.as_str()))
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
 
@@ -325,7 +454,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
     if ev.typ == "cluster.removed" {
         sqlx::query("delete from clusters where id = $1")
             .bind(ev.data.get("id").and_then(|v| v.as_str()))
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
 
@@ -336,7 +465,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         let key = d.get("key").and_then(|v| v.as_str());
         sqlx::query("update prompts set active = false where key = $1")
             .bind(key)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query(
             "insert into prompts (key, version, text, active, reason, actor) values \
@@ -347,7 +476,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(d.get("text").and_then(|v| v.as_str()))
         .bind(d.get("reason").and_then(|v| v.as_str()))
         .bind(d.get("actor").and_then(|v| v.as_str()))
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -382,7 +511,7 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
         .bind(d.get("utm_campaign").and_then(|v| v.as_str()))
         .bind(d.get("ua_family").and_then(|v| v.as_str()))
         .bind(d.get("visitor").and_then(|v| v.as_str()))
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
         if ev.typ == "acquisition.notify_requested" {
@@ -399,11 +528,12 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope) -> Result<()> {
                 .bind(d.get("referrer").and_then(|v| v.as_str()))
                 .bind(d.get("utm_source").and_then(|v| v.as_str()))
                 .bind(d.get("beta").and_then(|v| v.as_bool()).unwrap_or(false))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
             }
         }
     }
 
-    Ok(())
+    tx.commit().await?;
+    Ok(true)
 }

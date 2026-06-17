@@ -244,3 +244,61 @@ final class FeedStore {
         }
     }
 }
+
+// MARK: - Feedback (#210 / #58)
+
+/// The categories the reader's triage understands (`category_hint`); the label is what the user sees.
+enum FeedbackCategory: String, CaseIterable, Identifiable, Sendable {
+    case bug, ui
+    case veracityDispute = "veracity-dispute"
+    case sourceQuality = "source-quality"
+    case topicRequest = "topic-request"
+
+    var id: String { rawValue }
+    var hint: String { rawValue }
+    var label: String {
+        switch self {
+        case .bug: return "Something's broken"
+        case .ui: return "Layout or display"
+        case .veracityDispute: return "Wrong confidence or claim"
+        case .sourceQuality: return "Concern about a source"
+        case .topicRequest: return "Topic or coverage request"
+        }
+    }
+}
+
+protocol FeedbackService: Sendable {
+    func submit(text: String, category: FeedbackCategory?, storyID: String?) async throws
+}
+
+/// Posts user feedback to the reader's intake (`POST /api/feedback`, #58) so it lands in the
+/// triage/review loop. No account, no PII beyond what the user types — only the platform + app
+/// version travel along, in `source`, so the operator can tell iOS from macOS.
+struct APIFeedbackService: FeedbackService {
+    var baseURL: URL
+    var session: URLSession = .shared
+
+    func submit(text: String, category: FeedbackCategory?, storyID: String?) async throws {
+        var request = URLRequest(url: baseURL.appending(path: "api/feedback"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: String] = ["text": text, "category_hint": category?.hint ?? "", "source": Self.source]
+        if let storyID, !storyID.isEmpty { body["story_id"] = storyID }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, resp) = try await session.data(for: request)
+        guard let http = resp as? HTTPURLResponse else { return }
+        guard (200..<300).contains(http.statusCode) else { throw FeedError.badResponse(http.statusCode) }
+    }
+
+    /// Platform + app version (no PII) — e.g. "ios-app 1.0".
+    static var source: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        #if os(iOS)
+        return "ios-app \(version)"
+        #elseif os(macOS)
+        return "macos-app \(version)"
+        #else
+        return "app \(version)"
+        #endif
+    }
+}

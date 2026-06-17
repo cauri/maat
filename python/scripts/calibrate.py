@@ -12,7 +12,6 @@ Run: uv run python scripts/calibrate.py
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
@@ -32,6 +31,7 @@ from maat.learning.calibration import (
     tune_decay,
     tune_proposals,
 )
+from maat.learning.trajectory import load_trajectory
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -105,11 +105,8 @@ async def main() -> None:
     pool = await asyncpg.create_pool(
         os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
     )
-    rows = await pool.fetch(
-        "select data from events where type = 'cluster.corroborated' order by id"
-    )
+    history = await load_trajectory(pool)
     await pool.close()
-    history = [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
     obs = observations_from_history(history)
     print(_report(obs))
     if "--propose" in sys.argv:  # opt-in: file the suggestions as pending proposals

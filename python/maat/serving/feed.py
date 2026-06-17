@@ -40,7 +40,7 @@ import httpx
 from maat.agents.curation import Story as CurationStory, curate
 from maat.events import STORY_GEO_INFERRED
 from maat.learning.accuracy import lifecycle_by_fact
-from maat.learning.reputation import fold_reputation
+from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.source_learning import learn_preferences
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.source_flags import denied_sources
@@ -159,8 +159,12 @@ def _annotate_accuracy(payload: dict, lifecycle: dict) -> dict:
 def _reputation_map(reps) -> dict:
     """Per-source reputation (the §6 truthfulness-over-time fold) as {source: reputation} for the
     feed — surfacing the learned reputation into the PRODUCT (#199), not just the operator console.
+
+    `reps` are `SourceReputation` records (from `fold_reputation`); their 0..1 standing comes from
+    the `reputation_score` fold, NOT a `.reputation` attribute (there isn't one) — collapsing them
+    here is what `?reputation=1` does at read time.
     """
-    return {r.source: round(r.reputation, 4) for r in reps}
+    return {r.source: reputation_score(r) for r in reps}
 
 
 def _preferences_payload(prefs) -> dict:
@@ -181,8 +185,9 @@ def _preferences_payload(prefs) -> dict:
         ],
         "diversity_floor": sorted(prefs.diversity_floor),
         "note": "Learned acquisition preferences (#35): which sources have proven reliable, "
-        "computed read-time from the corroboration history. ACTUATION — biasing acquisition "
-        "toward these within the diversity floor — is a flagged policy decision, not yet enforced.",
+        "computed read-time from the corroboration history. The live ingestion clock ACTUATES these "
+        "— re-ranking fetch within a per-query budget and deepening the top proven sources, bounded "
+        "by the diversity floor + per-source cap (see maat/acquire/steer.py).",
     }
 
 
@@ -807,8 +812,8 @@ def _make_router() -> Any:
     @router.get("/source-preferences", response_class=JSONResponse)
     async def source_preferences_endpoint(request: Request):
         """Learned acquisition preferences (#35): fold the corroboration history into per-source
-        reputation, then rank sources by learned acquisition weight (diversity-floored). Wires the
-        previously-orphaned learn_preferences into a live read; acquisition actuation is flagged."""
+        reputation, then rank sources by learned acquisition weight (diversity-floored). The live
+        ingestion clock actuates these (re-rank within budget + deepen top sources, maat/acquire/steer.py)."""
         pool = request.app.state.pool
         history = await _load_corroboration_history(pool)
         prefs = learn_preferences(fold_reputation(history))

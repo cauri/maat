@@ -52,6 +52,7 @@ from maat.learning.reputation import (
     reputation_trajectories,
 )
 from maat.learning.rl import policy_step
+from maat.learning.trajectory import load_trajectory
 from maat.metrics import de_us
 from maat.obs_metrics import pipeline_health
 from maat.pipeline.corroborate import (
@@ -66,6 +67,7 @@ from maat.providers import seam
 from maat.serving import admin_auth
 from maat.serving import spend as spend_mod
 from maat.serving.feed import feed_router
+from maat.serving.social_api import social_router
 from maat.serving.translate import translate_text
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import record as feedback_record
@@ -108,6 +110,11 @@ app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "st
 # console reads. The router is None only if FastAPI is unavailable at import (test env guard).
 if feed_router is not None:
     app.include_router(feed_router)
+
+# Comments + pins (#49) — client-facing /api/v2 routes over the event-sourced social layer
+# (serving/social.py), folded read-time like the admin events. None only if FastAPI is absent.
+if social_router is not None:
+    app.include_router(social_router)
 
 
 # ============================ admin auth (P8, #163; D31/D32) ============================
@@ -663,7 +670,10 @@ async def prompts_view(key: str = "", ok: str = "") -> str:
     selected = key if key in prompts.PROMPTS_BY_KEY else next(
         (p["key"] for p in prompts.PROMPTS if p["status"] == "active"), prompts.PROMPTS[0]["key"]
     )
-    return _doc(_prompts_page(by_key, store_ready, selected), "prompts", "prompts", flash=ok)
+    # #189: which prompts still carry the "needs review" tag (draft-seed + not yet marked reviewed).
+    # Informational only — reads the events log in one pass, falling back to "all drafts" if absent.
+    review = await prompts.review_map(app.state.pool)
+    return _doc(_prompts_page(by_key, store_ready, selected, review), "prompts", "prompts", flash=ok)
 
 
 @app.post("/prompts/save")
@@ -712,12 +722,27 @@ async def prompts_rollback(key: str = Form(...), version: int = Form(...)):
     return _redirect("/prompts", msg)
 
 
+@app.post("/prompts/reviewed")
+async def prompts_reviewed(key: str = Form(...), reason: str = Form("")):
+    """#189 — clear the "needs review" tag on a draft prompt. Publishes admin.prompt.reviewed;
+    ``prompts.needs_review`` reads it back so the badge clears. Informational only — prompts are
+    already live, this changes nothing about whether any path runs. On-device is rejected."""
+    if key not in prompts.EDITABLE_KEYS:  # on-device prompts (Swift mirrors) carry no review action
+        return _redirect("/prompts", "This prompt can't be reviewed here.")
+    pub = await _publish(
+        events.ADMIN_PROMPT_REVIEWED, key,
+        events.admin_event(key, reason=reason or "reviewed", key=key),
+    )
+    msg = "Marked reviewed — the tag is cleared." if pub else _BUS_DOWN
+    return _redirect(f"/prompts?key={quote(key)}", msg)
+
+
 @app.post("/prompts/test")
 async def prompts_test(key: str = Form(...), text: str = Form(...)):
     """Eval-on-change: run the golden corpus with this candidate text (other stages stay on their
     active prompts) and report pass/fail — before the operator relies on it. Live LLM calls."""
-    if key not in prompts.EDITABLE_KEYS:  # only the editable backend prompts can be golden-tested
-        return _redirect("/prompts", "Unknown prompt.")
+    if key not in prompts.GOLDEN_EVAL_KEYS:  # only the golden-eval prompts have fixtures to test on
+        return _redirect("/prompts", "This prompt has no golden tests.")
     three = {}
     for k in ("extract", "classify", "extremity"):
         three[k] = text if k == key else await prompts.active_text(
@@ -866,12 +891,10 @@ async def assistant_chat(req: AssistantReq) -> JSONResponse:
 
 
 async def _corroboration_history(pool) -> list[dict]:
-    """The `cluster.corroborated` event stream, oldest→newest — the input every learning fold
-    (reputation, calibration, RL) reads. Same query `scripts/calibrate_prod.py` uses."""
-    rows = await pool.fetch(
-        "select data from events where type = 'cluster.corroborated' order by id"
-    )
-    return [_jobj(r["data"]) for r in rows]
+    """The truth-over-time trajectory every learning fold (reputation, calibration, RL) reads:
+    the `cluster_snapshots` projection, oldest→newest — falling back to the legacy
+    `cluster.corroborated` stream until the first harvest. See `maat.learning.trajectory`."""
+    return await load_trajectory(pool)
 
 
 @app.get("/reputation", response_class=HTMLResponse)
@@ -2505,19 +2528,50 @@ def _plain_group(g: str) -> str:
 # How each prompt status is presented on the Prompts page.
 _PROMPT_STATUS_BADGE = {  # status -> (badge text, badge css class, tooltip)
     "active": ("active", "fact", "Editable — saving makes it live on the next run"),
-    "draft": ("draft", "proj", "In code but gated off — surfaced for review, not live or editable"),
+    "draft": ("draft", "proj", "A draft prompt — live like any other, but pending your review"),
     "on-device": ("on-device", "attr", "Runs on the reader's phone (Apple) — display-only mirror"),
 }
+# The "needs review" tag (#189): shown on a draft-seed prompt until the operator clears it. Purely
+# informational — the prompt is already live; this never gates whether its path runs.
+_NEEDS_REVIEW_BADGE = ("needs review", "floor", "Pending your review — click 'Mark reviewed' to clear")
 
 
-def _prompt_active_block(p: dict, by_key: dict) -> str:
-    """An editable backend prompt: active text, version history, rollback, restore-default."""
+def _prompt_review_control(key: str, needs_review: bool) -> str:
+    """#189 — the inline 'Mark reviewed' button on a draft prompt that still carries the tag; nothing
+    once it's been reviewed (or for active / on-device prompts, which never carry it). Pure."""
+    if not needs_review:
+        return ""
+    k = html.escape(key)
+    return (
+        '<div class="bl mt"><form class="inline" method="post" action="/prompts/reviewed">'
+        f'<input type="hidden" name="key" value="{k}">'
+        '<span class="mut sm">This draft is live; it just hasn\'t been reviewed yet.</span> '
+        '<button title="Clear the needs-review tag — does not change anything about what runs">'
+        'Mark reviewed</button></form></div>'
+    )
+
+
+def _prompt_active_block(p: dict, by_key: dict, needs_review: bool = False) -> str:
+    """An editable prompt's full editor — active text, version history, rollback, restore-default.
+    Used for active AND draft prompts (drafts are live + editable like any other, #189); a draft that
+    still needs review also shows its 'needs review' badge + 'Mark reviewed' button."""
     key = p["key"]
     versions = by_key.get(key, [])
     active = next((v for v in versions if v["active"]), None)
     text = active["text"] if active else p["default"]
     ver = f'version {active["version"]}' if active else "built-in (no edits yet)"
-    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE["active"]
+    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE[p["status"]]
+    review_badge = _badge(*_NEEDS_REVIEW_BADGE) if needs_review else ""
+    review_ctl = _prompt_review_control(key, needs_review)
+    must_keep = (
+        f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
+        if p.get("placeholders") else ""
+    )
+    test_btn = (
+        '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
+        'this text first — live AI calls, takes a moment">Test on goldens</button>'
+        if key in prompts.GOLDEN_EVAL_KEYS else ""
+    )
     past = [v for v in versions if not v["active"]]
     hist = ""
     if past:
@@ -2534,18 +2588,18 @@ def _prompt_active_block(p: dict, by_key: dict) -> str:
     return (
         '<div class="box pedit">'
         f'<div class="cname">{html.escape(p["label"])} {_badge(badge, badge_cls, badge_tip)} '
-        f'<span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
+        f'{review_badge} <span class="mut sm">— {html.escape(key)} · {ver}</span></div>'
         f'<div class="deriv">{html.escape(p.get("description", ""))}</div>'
         f'<div class="mut sm" title="Where the built-in text lives">source '
         f'<span class="mono">{html.escape(p["source"])}</span></div>'
+        f'{review_ctl}'
         '<form method="post" action="/prompts/save">'
         f'<input type="hidden" name="key" value="{key}">'
         f'<textarea id="ta-{key}" class="prompt" name="text" rows="14">{html.escape(text)}</textarea>'
-        f'<div class="mut sm">must keep: <span class="mono">{html.escape(" ".join(p["placeholders"]))}</span></div>'
+        f'{must_keep}'
         '<input class="reason" name="reason" placeholder="reason (optional, saved to History)">'
         '<div class="btnrow">'
-        '<button formaction="/prompts/test" formnovalidate title="Run the golden tests with '
-        'this text first — live AI calls, takes a moment">Test on goldens</button>'
+        f'{test_btn}'
         '<button title="Saves a new version, live on the next run">Save new version</button>'
         '<button formaction="/prompts/restore" formnovalidate title="Replace with the original '
         'built-in version">Restore original</button>'
@@ -2576,17 +2630,18 @@ def _prompt_chat_panel(key: str) -> str:
 
 
 def _prompt_chat_unavailable() -> str:
-    """Right-column placeholder for draft / on-device prompts (read-only, no chat)."""
+    """Right-column placeholder for on-device prompts (Swift mirrors — read-only, no chat)."""
     return (
         '<div class="chat3"><div class="chat3-head">💬 Improve with Claude</div>'
-        '<div class="chat-help mut sm">Chat is available on the editable (Active) prompts. '
-        'This one is read-only — surfaced for review.</div></div>'
+        '<div class="chat-help mut sm">This prompt runs on the reader\'s phone (Apple) and is '
+        'mirrored here for review only — edit it in the Apple app.</div></div>'
     )
 
 
 def _prompt_readonly_block(p: dict) -> str:
-    """A draft or on-device prompt: label, status, source, and the full text — display-only."""
-    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE[p["status"]]
+    """An on-device prompt: label, status, source, and the full text — display-only (edited in the
+    Apple app; Swift can't be imported, so this is a mirror)."""
+    badge, badge_cls, badge_tip = _PROMPT_STATUS_BADGE["on-device"]
     return (
         '<div class="box" style="display:block">'
         f'<div class="cname">{html.escape(p["label"])} {_badge(badge, badge_cls, badge_tip)} '
@@ -2595,39 +2650,48 @@ def _prompt_readonly_block(p: dict) -> str:
         f'<div class="mut sm" title="Where the canonical text lives">source '
         f'<span class="mono">{html.escape(p["source"])}</span></div>'
         f'<textarea class="prompt" rows="14" readonly>{html.escape(p["default"])}</textarea>'
-        '<div class="mut sm">Read-only — surfaced for review, not edited here.</div>'
+        '<div class="mut sm">Read-only — runs on the reader\'s phone; edit in the Apple app.</div>'
         '</div>'
     )
 
 
-# Display order + short heading for each status group in the Prompts left-nav.
+# Display order + short heading for each status group in the Prompts left-nav. One continuous list,
+# ordered active → draft → on-device (#189): drafts are editable like any other, just tagged.
 _PROMPT_GROUPS = [
-    ("active", "Editable"),
+    ("active", "Active"),
     ("draft", "Draft"),
     ("on-device", "On-device"),
 ]
 
 
-def _prompt_nav(selected: str) -> str:
-    """Left column: every prompt as a selectable link to ``/prompts?key=…``, grouped by status."""
+def _prompt_nav(selected: str, review: dict[str, bool]) -> str:
+    """Left column: every prompt as ONE selectable list, grouped by status; a draft still pending
+    review carries the 'needs review' tag so the list shows what's left to look at (#189)."""
     out = []
     for status, short in _PROMPT_GROUPS:
         entries = [p for p in prompts.PROMPTS if p["status"] == status]
         if not entries:
             continue
-        items = "".join(
-            f'<a class="p3-item{" on" if p["key"] == selected else ""}" '
-            f'href="/prompts?key={quote(p["key"])}" title="{html.escape(p.get("description", ""))}">'
-            f'{html.escape(p["label"])}</a>'
-            for p in entries
-        )
+        items = ""
+        for p in entries:
+            tag = f' {_badge(*_NEEDS_REVIEW_BADGE)}' if review.get(p["key"]) else ""
+            items += (
+                f'<a class="p3-item{" on" if p["key"] == selected else ""}" '
+                f'href="/prompts?key={quote(p["key"])}" title="{html.escape(p.get("description", ""))}">'
+                f'{html.escape(p["label"])}{tag}</a>'
+            )
         out.append(f'<div class="p3-group">{html.escape(short)}</div>{items}')
     return "".join(out)
 
 
-def _prompts_page(by_key: dict, store_ready: bool = True, selected: str = "") -> str:
-    """P8 — three panels: agents (left), the selected agent's editor (middle), the always-open
-    Claude chat (right). Active prompts are editable + versioned; draft/on-device are read-only."""
+def _prompts_page(
+    by_key: dict, store_ready: bool = True, selected: str = "",
+    review: dict[str, bool] | None = None,
+) -> str:
+    """P8 — three panels: prompts (left, one list), the selected prompt's editor (middle), the
+    always-open Claude chat (right). Active AND draft prompts are editable + versioned (drafts are
+    live like any other, just tagged 'needs review' until cleared, #189); on-device is read-only."""
+    review = review or {}
     store_note = ""
     if not store_ready:
         store_note = (
@@ -2641,21 +2705,23 @@ def _prompts_page(by_key: dict, store_ready: bool = True, selected: str = "") ->
         selected = p["key"] if p else ""
     if p is None:
         middle, right = '<p class="empty">No prompts registered.</p>', ""
-    elif p["status"] == "active":
-        middle, right = _prompt_active_block(p, by_key), _prompt_chat_panel(selected)
-    else:
+    elif p["status"] == "on-device":  # Swift mirror — display-only, no chat
         middle, right = _prompt_readonly_block(p), _prompt_chat_unavailable()
+    else:  # active OR draft — both editable; a draft pending review adds its tag + Mark-reviewed
+        middle = _prompt_active_block(p, by_key, review.get(selected, False))
+        right = _prompt_chat_panel(selected)
     return (
         '<div class="ins">'
-        ''
-        '<div class="deriv">Pick an agent on the left to see and edit the exact instructions it runs '
-        'on. <b>Active</b> prompts are editable — saving makes it live on the next run, every version '
+        '<div class="deriv">Pick a prompt on the left to see and edit the exact instructions it runs '
+        'on. Every prompt is live — saving makes the change take effect on the next run, every version '
         'is kept, and you can roll back; keep the <span class="mono">{placeholders}</span> or the save '
-        'is refused. <b>Draft</b> and <b>on-device</b> prompts are read-only (shown for review). Use '
-        'the chat on the right to shape a revision with Claude.</div>'
+        'is refused. <b>Draft</b> prompts are editable just like the rest; they carry a '
+        '<b>needs review</b> tag until you click <b>Mark reviewed</b> (informational only — it does '
+        'not change what runs). <b>On-device</b> prompts run on the reader\'s phone (Apple) and are '
+        'read-only. Use the chat on the right to shape a revision with Claude.</div>'
         f'{store_note}'
         '<div class="prompts3">'
-        f'<aside class="p3-col p3-left">{_prompt_nav(selected)}</aside>'
+        f'<aside class="p3-col p3-left">{_prompt_nav(selected, review)}</aside>'
         f'<section class="p3-col p3-mid">{middle}</section>'
         f'<aside class="p3-col p3-right">{right}</aside>'
         '</div></div>'

@@ -5,7 +5,8 @@ a topic and fetch the bodies ourselves (`fetch.py`). This is the de-slanted acqu
 source-agnostic by construction, with optional sourcelang / sourcecountry filters to widen
 coverage on purpose (one query for "central bank interest rate" already returns Macedonian,
 Chinese, Hindi, Norwegian and Indian-English outlets). The learning loop that narrows toward
-rewarding sources is #35.
+rewarding sources (#35) steers this stream downstream — scripts/clock.py re-ranks these results by
+learned source weight and deepens the top proven sources; see maat/acquire/steer.py for the actuation.
 """
 
 from __future__ import annotations

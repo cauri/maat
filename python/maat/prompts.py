@@ -27,6 +27,7 @@ from maat.agents.triage import TRIAGE_LLM_PROMPT
 from maat.pipeline.classify import PROMPT as CLASSIFY_PROMPT
 from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
+from maat.pipeline.grounding import GROUNDING_PROMPT
 from maat.acquire.source_gate import PROMPT as SOURCE_GATE_PROMPT
 from maat.serving.topics import _LLM_PROMPT_TEMPLATE as TOPICS_LLM_PROMPT
 from maat.serving.topics import NEWS_QUERIES_PROMPT
@@ -199,20 +200,26 @@ PROMPTS: list[dict] = [
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
      "description": "Would turn a reader's natural-language interest ('West African politics') into "
-     "acquisition topics and filters. Gated OFF — deterministic keyword extraction runs today; the "
-     "model path awaits your review.",
+     "acquisition topics and filters. An optional LLM path — a deterministic keyword extraction "
+     "runs today.",
      "placeholders": []},
     {"key": "curation_geotag", "label": "Curation geo-tagger", "default": CURATION_GEOTAG_PROMPT,
      "status": "draft", "source": "maat/agents/curation.py",
      "description": "Would tag a story's primary country/region so curation can balance the feed's "
-     "geography and push back on Anglo-American slant. Gated OFF — pure heuristics run today; the "
-     "model path awaits your review.",
+     "geography and push back on Anglo-American slant. An optional LLM path — pure heuristics run "
+     "today.",
      "placeholders": []},
+    {"key": "grounding", "label": "Primary-source grounding judge", "default": GROUNDING_PROMPT,
+     "status": "draft", "source": "maat/pipeline/grounding.py",
+     "description": "Judges whether a cluster's fact is SUPPORTED / CONTRADICTED / NOT_ADDRESSED by "
+     "its primary source (#228) — measured against primary truth, never consensus. Gated by "
+     "MAAT_GROUNDING_LLM; the verdict refines the primary lift and a contradiction feeds REFUTED.",
+     "placeholders": ["{fact}", "{source_name}", "{primary_body}"]},
     {"key": "triage_llm", "label": "Feedback-triage refinement", "default": TRIAGE_LLM_PROMPT,
      "status": "draft", "source": "maat/agents/triage.py",
      "description": "Would refine how a piece of user feedback is categorised (veracity-dispute / "
-     "source-quality / bug / …) to route it to the review queue or an auto-fix. Gated OFF — the "
-     "rule-based classifier runs today; the model path awaits your review.",
+     "source-quality / bug / …) to route it to the review queue or an auto-fix. An optional LLM "
+     "path — the rule-based classifier runs today.",
      "placeholders": []},
     {"key": "prompt_chat_agent", "label": "Prompt-chat helper (console)", "default": PROMPT_CHAT_AGENT,
      "status": "draft", "source": "maat/prompts.py",
@@ -244,11 +251,21 @@ PROMPTS: list[dict] = [
 ]
 PROMPTS_BY_KEY: dict[str, dict] = {p["key"]: p for p in PROMPTS}
 
-# The editable subset — only these may be saved, restored, rolled back, or tested. Draft and
-# on-device prompts are surfaced for review but never become a live override.
+# Editable subset — these may be saved, restored, rolled back, or tested. Everything EXCEPT
+# on-device: the Apple prompts are Swift mirrors, display-only. Draft prompts are editable like any
+# other (#189) — they are LIVE, just tagged "needs review" until the operator clears the tag.
 EDITABLE_KEYS: frozenset[str] = frozenset(
-    p["key"] for p in PROMPTS if p["status"] == "active"
+    p["key"] for p in PROMPTS if p["status"] != "on-device"
 )
+
+# Prompts with a golden eval corpus — only these expose "Test on goldens"; the rest have no fixtures.
+GOLDEN_EVAL_KEYS: frozenset[str] = frozenset({"extract", "classify", "extremity"})
+
+
+def seed_status(key: str) -> str:
+    """The in-code status for a prompt (active / draft / on-device). Pure."""
+    p = PROMPTS_BY_KEY.get(key)
+    return p["status"] if p else ""
 
 
 def seed_default(key: str) -> str:
@@ -278,3 +295,51 @@ async def active_text(pool, key: str, default: str) -> str:
     except Exception:  # noqa: BLE001 - prompts table may not exist yet; fall back to the seed
         return default
     return row["text"] if row and row["text"] else default
+
+
+# ---------------------------------------------------------------------------
+# Review tag (#189) — a draft-seed prompt is LIVE like any other, but carries a "needs review"
+# marker until the operator clears it. Purely informational: it never gates whether a path runs.
+# Persisted as an ``admin.prompt.reviewed`` event read at runtime (like ``clocks.is_paused`` reads
+# ``admin.clock.set``) — no kernel projection, no migration.
+# ---------------------------------------------------------------------------
+
+
+def needs_review_given(reviewed_keys: set[str], key: str) -> bool:
+    """Pure: does `key` still need review? True when its seed status is "draft" and the operator has
+    not yet marked it reviewed (`key` absent from `reviewed_keys`). Active/on-device never need it."""
+    return seed_status(key) == "draft" and key not in reviewed_keys
+
+
+async def review_map(pool) -> dict[str, bool]:
+    """``{key: needs_review}`` for every registered prompt, in one pass. A draft-seed prompt needs
+    review until an ``admin.prompt.reviewed`` event exists for it. Resilient: no pool / un-migrated
+    events table → every draft still needs review (the safe default)."""
+    reviewed: set[str] = set()
+    if pool is not None:
+        try:
+            rows = await pool.fetch(
+                "select distinct data->>'key' as key from events "
+                "where type = 'admin.prompt.reviewed'"
+            )
+            reviewed = {r["key"] for r in rows if r["key"]}
+        except Exception:  # noqa: BLE001 - events table may not exist yet; treat nothing as reviewed
+            reviewed = set()
+    return {p["key"]: needs_review_given(reviewed, p["key"]) for p in PROMPTS}
+
+
+async def needs_review(pool, key: str) -> bool:
+    """Whether `key` still shows the "needs review" tag — its seed is a draft and no
+    ``admin.prompt.reviewed`` event exists for it yet. Resilient (see ``review_map``)."""
+    if seed_status(key) != "draft":
+        return False
+    if pool is None:
+        return True
+    try:
+        row = await pool.fetchrow(
+            "select 1 from events where type = 'admin.prompt.reviewed' and data->>'key' = $1 limit 1",
+            key,
+        )
+    except Exception:  # noqa: BLE001 - events table may not exist yet; still needs review
+        return True
+    return row is None

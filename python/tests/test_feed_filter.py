@@ -145,17 +145,30 @@ def test_source_preference_dataclass_has_serialised_fields():
 
 
 def test_reputation_map_serialises_per_source():
-    # #199 — surface the real reputation fold (per source) into the feed payload.
-    from types import SimpleNamespace
-
+    # #199 regression: _reputation_map must read the reputation_score FOLD over REAL SourceReputation
+    # records — NOT a `.reputation` attribute (there isn't one). The old mock used SimpleNamespace(
+    # reputation=...), so the unit test was green while `?reputation=1` 500'd in prod on the real
+    # fold output. This passes genuine fold_reputation records through, the shape the endpoint uses.
+    from maat.learning.reputation import fold_reputation, reputation_score
     from maat.serving.feed import _reputation_map
 
-    reps = [
-        SimpleNamespace(source="reuters.com", reputation=0.8765),
-        SimpleNamespace(source="blog.example", reputation=0.21),
+    history = [
+        {
+            "fact": "central bank holds rates",
+            "sources": ["reuters.com", "blog.example"],
+            "originators": [["a1"], ["b1"]],
+            "independent_originators": 2,
+            "has_primary": False,
+            "extremity": "notable",
+            "confidence": 0.8,
+        }
     ]
+    reps = fold_reputation(history)
+    assert reps, "fixture should fold to at least one SourceReputation"
     out = _reputation_map(reps)
-    assert out == {"reuters.com": 0.8765, "blog.example": 0.21}
+    # Real records flow through without AttributeError and collapse via the reputation_score fold.
+    assert out == {r.source: reputation_score(r) for r in reps}
+    assert all(isinstance(v, float) and 0.0 <= v <= 1.0 for v in out.values())
 
 
 def test_filter_denied_drops_fully_denied_stories():

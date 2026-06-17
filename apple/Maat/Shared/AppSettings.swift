@@ -10,10 +10,18 @@ final class AppSettings {
     /// The deployed Maat reader the app talks to by default (the Hetzner box, over HTTPS). Overridable
     /// in Settings; cleared → the bundled fixture (offline fallback). The feed store also falls back to
     /// the fixture automatically if the server is unreachable.
-    /// TODO: move to a per-build-config value (xcconfig) for Debug/Release split.
+    ///
+    /// Debug/Release split (#196): Release ships pointed at the production box; Debug uses the same
+    /// default but is the single place to point a development build at a local/staging reader (e.g.
+    /// "http://localhost:8000") without touching Release — change the Debug line below. An unreachable
+    /// dev URL just falls back to the bundled fixture, so this is safe to repoint.
     /// `nonisolated` so the (nonisolated) `IntentDataSource` in the App Intents extension can read this
     /// default reader URL; it's an immutable constant, so it's safe outside the main actor.
+    #if DEBUG
     nonisolated static let defaultAPIBaseURL = "https://api.maat.press"
+    #else
+    nonisolated static let defaultAPIBaseURL = "https://api.maat.press"
+    #endif
 
     /// Base URL of the Maat reader. Empty → bundled fixture. Defaults to `defaultAPIBaseURL`.
     var apiBaseURL: String {

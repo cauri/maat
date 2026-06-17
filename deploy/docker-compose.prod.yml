@@ -113,6 +113,10 @@ services:
       MAAT_STORY_GRAPH_LLM: ${MAAT_STORY_GRAPH_LLM:-1}   # canonical entity spine for thread attachment (#42)
       MAAT_TRIAGE_LLM: ${MAAT_TRIAGE_LLM:-1}             # feedback category/route refinement (#58/#189)
       MAAT_CURATION_LLM: ${MAAT_CURATION_LLM:-1}         # geo-tag clusters the TLD/lang heuristic can't place (#189)
+      MAAT_GROUNDING_LLM: ${MAAT_GROUNDING_LLM:-1}       # judge each primary-bearing cluster vs its primary source (#228)
+      MAAT_CONTRADICTION_NLI: ${MAAT_CONTRADICTION_NLI:-1}  # NLI contradiction detection (#229): pinned + smoke-tested ONNX MNLI cross-encoder
+      MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/nli-deberta-v3-small}  # DeBERTa-v3 NLI cross-encoder in ONNX (#229)
+      HF_HOME: /data/hf                                  # cache the NLI model on a volume so it isn't re-downloaded each deploy (#229)
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
     # by compose against the host env (unset → blank), breaking `sleep ""`.
@@ -123,6 +127,8 @@ services:
         while true; do
           echo "[clock] tick: acquire (topics: $${MAAT_TOPICS})";
           uv run --no-dev python scripts/clock.py || echo "[clock] acquire error";
+          echo "[clock] acquire-rss (balanced multipolar outlet feeds, #238)";
+          uv run --no-dev python scripts/acquire_rss.py || echo "[clock] rss error";
           echo "[clock] draining $${MAAT_TICK_DRAIN}s for extract+classify";
           sleep "$${MAAT_TICK_DRAIN}";
           echo "[clock] corroborate (recompute clusters)";
@@ -131,10 +137,16 @@ services:
           uv run --no-dev python -m maat.agents.story_graph_agent || echo "[clock] story-graph error";
           echo "[clock] geotag (infer country for clusters the heuristic can't place, #189)";
           uv run --no-dev python -m maat.agents.geotag_agent || echo "[clock] geotag error";
+          echo "[clock] grounding (judge primary-bearing clusters vs their primary source, #228)";
+          uv run --no-dev python -m maat.agents.grounding_agent || echo "[clock] grounding error";
+          echo "[clock] contradiction (NLI between a claim and its nearest neighbours, #229)";
+          uv run --no-dev python -m maat.agents.contradiction_agent || echo "[clock] contradiction error";
           echo "[clock] harvest (snapshot clusters for truth-over-time, #39)";
           uv run --no-dev python scripts/harvest.py || echo "[clock] harvest error";
           echo "[clock] triage (route submitted feedback to review/auto-fix, #58)";
           uv run --no-dev python -m maat.agents.triage || echo "[clock] triage error";
+          echo "[clock] file-issues (auto-fix feedback -> tracked issues, #214)";
+          uv run --no-dev python -m maat.serving.issue_filing || echo "[clock] issue-filing error";
           echo "[clock] tick done; sleeping $${MAAT_TICK_INTERVAL}s";
           sleep "$${MAAT_TICK_INTERVAL}";
         done
@@ -147,6 +159,8 @@ services:
         condition: service_started
       agents:
         condition: service_started
+    volumes:
+      - hfcache:/data/hf   # NLI model cache (#229) — persists across deploys
 
   reader:
     build: ./python
@@ -256,3 +270,4 @@ volumes:
   caddydata:
   caddyconfig:
   catcafedata:
+  hfcache:

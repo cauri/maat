@@ -26,6 +26,10 @@ ADMIN_SOURCE_FLAGGED = "admin.source.flagged"  # A2: allow / deny a source
 ADMIN_SOURCE_GROUPED = "admin.source.grouped"  # A2: ownership / wire / copy-network grouping
 ADMIN_CLOCK_SET = "admin.clock.set"  # A1: pause / resume a clock (the next tick reads the flag)
 ADMIN_PROMPT_UPDATED = "admin.prompt.updated"  # P8: a new active version of an agent prompt
+# P8/#189: operator cleared the "needs review" tag on a draft-seed prompt. Informational ONLY —
+# prompts are already live; this is just a review marker, fully decoupled from whether any path
+# runs. Read at runtime like admin.clock.set: ``prompts.needs_review`` checks for this event.
+ADMIN_PROMPT_REVIEWED = "admin.prompt.reviewed"  # the operator marked a draft prompt as reviewed
 ADMIN_CONFIG_PROMOTED = "admin.config.promoted"  # P8/#184: promote a proposed threshold to live
 # Admin-console login audit (#163; D31). The console publishes these best-effort so the audit
 # log records "who signed in, when"; auth itself is a stateless signed cookie (serving/admin_auth.py)
@@ -46,6 +50,7 @@ ADMIN_EVENT_TYPES = frozenset(
         ADMIN_SOURCE_GROUPED,
         ADMIN_CLOCK_SET,
         ADMIN_PROMPT_UPDATED,
+        ADMIN_PROMPT_REVIEWED,
         ADMIN_CONFIG_PROMOTED,
         ADMIN_SESSION_CREATED,
         ADMIN_SESSION_REVOKED,
@@ -59,6 +64,27 @@ ADMIN_EVENT_TYPES = frozenset(
 # despite the kernel updating `clusters` in place. maat-kerneld folds it into cluster_snapshots,
 # idempotent per (cluster_id, calendar-day).
 CLUSTER_SNAPSHOT = "cluster.snapshot"
+
+# Primary-source grounding (#228, §5/§8): the grounding agent (agents.grounding_agent) judges
+# whether a cluster's fact is SUPPORTED / CONTRADICTED / NOT_ADDRESSED by its primary source, and
+# emits this with the grounding-refined confidence. maat-kerneld updates the cluster row (grounding
+# + confidence); the harvester carries the verdict into cluster_snapshots so it rides the trajectory
+# (contradicted → REFUTED in resolve_outcome). stream_id IS the cluster_id.
+CLUSTER_GROUNDED = "cluster.grounded"
+
+# Automated contradiction detection (#229, §5/§8): the contradiction agent runs NLI between a claim
+# and its nearest neighbours and emits one CLAIM_RELATED per detected relation (contradicts /
+# entails) with the model's confidence score. maat-kerneld folds these into the claim_relations
+# projection (the story graph #42 later folds the SAME events into typed edges). A high-confidence
+# contradiction from a grounded / higher-confidence cluster feeds the refutation path. stream_id is
+# a stable hash of the unordered claim pair.
+CLAIM_RELATED = "claim.related"
+
+# A claim refuted by a STRONGER, contradicting claim (#229) — the contradiction agent arbitrates by
+# the two claims' cluster grounding / confidence and flags the loser. maat-kerneld sets claims.disputed,
+# which the harvester folds into the cluster's `corrected` exactly like an operator correction, so the
+# fact resolves REFUTED over time through the path #227 already built. stream_id IS the claim id.
+CLAIM_DISPUTED = "claim.disputed"
 
 # Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
 # typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
