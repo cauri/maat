@@ -47,6 +47,9 @@ geotag:
 backfill:
 	cd python && uv run python scripts/backfill.py
 
+ccnews-backfill:
+	cd python && uv run python scripts/backfill_ccnews.py
+
 triage:
 	cd python && uv run python -m maat.agents.triage
 
