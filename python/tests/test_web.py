@@ -184,7 +184,8 @@ def test_sources_page_registry_badges_and_proposal_note():
     out = _sources_page(srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}}, {"AFP": "Wire"})
     assert "European Central Bank" in out and "first-hand" in out  # first-hand source role shown
     assert "reprint" in out and "denied" in out and "group · Wire" in out
-    assert "preferences" in out  # saved-as-preference note surfaced
+    assert 'name="deny"' in out  # the deny toggle (one on/off control, no save button)
+    assert "corroboration" in out  # the enforcement note surfaced
 
 
 def test_nav_includes_all_p8_tabs():
