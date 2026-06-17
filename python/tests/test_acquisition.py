@@ -66,8 +66,7 @@ def test_acquisition_page_kpis_conversion_and_launch_list():
          "first_seen": dt.datetime(2026, 6, 15, 9, 0), "hits": 2},
     ]
     out = _acquisition_page(funnel, by_platform, referrers, daily, signups)
-    assert "Acquisition" in out
-    assert "25%" in out  # 50/200 view->click conversion, not a raw count
+    assert "25%" in out  # 50/200 view->click conversion, not a raw count (title now in shell)
     assert "beta testers" in out and ">7<" in out  # the beta KPI renders its count
     assert "iPhone · App Store" in out and "Mac" in out
     assert "news.ycombinator.com" in out

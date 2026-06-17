@@ -277,7 +277,7 @@ async def cluster_detail(cid: str, ok: str = "") -> str:
     pool = app.state.pool
     cl = await pool.fetchrow("select * from clusters where id = $1", cid)
     if cl is None:
-        return _doc('<div class="ins"><a class="back" href="/">← feed</a>'
+        return _doc('<div class="ins">'
                     '<p class="empty">No such cluster.</p></div>', "cluster", "content")
     member_ids = _jload(cl["claim_ids"])
     members = await pool.fetch(
@@ -303,7 +303,7 @@ async def claim_detail(clid: str, ok: str = "") -> str:
         clid,
     )
     if c is None:
-        return _doc('<div class="ins"><a class="back" href="/">← feed</a>'
+        return _doc('<div class="ins">'
                     '<p class="empty">No such claim.</p></div>', "claim", "content")
     prov = await pool.fetch(
         "select type, created_at from events where stream_id = $1 or data->>'target' = $2 "
@@ -1921,7 +1921,7 @@ def _cluster_page(cl, members, id_to_source, others) -> str:
             f'<div class="src">{html.escape(m["art_source"] or "")}</div>{move}</div>'
         )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<div class="ins">'
         f'{_headline(cl, id_to_source)}'
         f'<div class="deriv" title="The same calculation that produced the score above">'
         f'How this score was reached: {html.escape(deriv)}</div>'
@@ -1981,7 +1981,7 @@ def _claim_page(c, prov) -> str:
         '<div class="mut sm">Maat doesn\'t record which AI model judged this yet.</div>'
     )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
+        '<div class="ins">'
         f'<div class="cfact">{html.escape(c["text"])}</div>'
         f'<div class="bs">{_claim_badges(c)}</div>{meta}'
         f'{correct}{flag}{provenance}</div>'
@@ -2012,7 +2012,7 @@ def _action_label(event_type: str) -> str:
 def _audit_page(rows) -> str:
     if not rows:
         return (
-            '<div class="ins"><a class="back" href="/">← back to feed</a>'
+            '<div class="ins">'
             '<p class="empty">No changes yet. Anything you change in the console will be logged here.</p></div>'
         )
     trs = []
@@ -2030,8 +2030,8 @@ def _audit_page(rows) -> str:
             f'<td class="mono">{html.escape(ex)}</td></tr>'
         )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">History — every change made in this console</h3>'
+        '<div class="ins">'
+        ''
         '<table class="aud"><tr><th>when</th><th>what</th><th>item</th><th>who</th>'
         f'<th>why</th><th>details</th></tr>{"".join(trs)}</table></div>'
     )
@@ -2248,8 +2248,8 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
         "Quality tab). Total cost-per-run and re-building from scratch aren't wired up yet.</div>"
     )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Activity — what the system has done, and anything that failed</h3>'
+        '<div class="ins">'
+        ''
         f'<div class="mgrid">{pcells}</div>'
         '<div class="bl mt">Pipeline</div>'
         '<div class="runbar"><button id="run-btn" onclick="maatRunPipeline()">▶ Run the pipeline</button>'
@@ -2302,8 +2302,8 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | Non
         else '<span class="mut">cat-cafe not wired</span>'
     )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Spend — what Maat has cost so far</h3>'
+        '<div class="ins">'
+        ''
         f'<div class="mgrid">{cells}</div>'
         '<div class="bl mt">By stage</div>'
         '<table class="aud"><tr><th>stage</th><th>model</th>'
@@ -2320,8 +2320,8 @@ def _spend_page(rows, llm_total: float, apify_usd, otlp: str, budget: dict | Non
 def _acquisition_page(funnel, by_platform, referrers, daily, signups, ready: bool = True) -> str:
     """The maat.press funnel for the operator (pure): KPIs, platform split, referrers, the
     14-day trend, and the launch list. Degrades to a note when the projection isn't migrated."""
-    back = '<div class="ins"><a class="back" href="/">← back to feed</a>'
-    head = '<h3 class="ih">Acquisition — the maat.press funnel</h3>'
+    back = '<div class="ins">'
+    head = ''
     if not ready:
         return (
             f'{back}{head}<p class="empty">Not set up yet — restart the kernel (maat-kerneld) to '
@@ -2444,8 +2444,8 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict) -> str:
         '<p class="empty">No sources yet — pull some news first (the Updates tab).</p>'
     )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Sources — every outlet Maat reads, and how you want each treated</h3>'
+        '<div class="ins">'
+        ''
         f"{note}{body}</div>"
     )
 
@@ -2482,8 +2482,8 @@ def _clocks_page(ing, daily, topics: list, paused: bool) -> str:
         rows = "".join(f'<div class="kv"><b>{r["d"]:%Y-%m-%d}</b> {r["n"]} new</div>' for r in daily)
         deltas = f'<div class="bl mt">New articles per day (last 7 days)</div>{rows}'
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Updates — when Maat pulls in new news</h3>'
+        '<div class="ins">'
+        ''
         f"{ingest}{harvester}{deltas}</div>"
     )
 
@@ -2646,8 +2646,8 @@ def _prompts_page(by_key: dict, store_ready: bool = True, selected: str = "") ->
     else:
         middle, right = _prompt_readonly_block(p), _prompt_chat_unavailable()
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Prompts — the instructions each AI step runs on</h3>'
+        '<div class="ins">'
+        ''
         '<div class="deriv">Pick an agent on the left to see and edit the exact instructions it runs '
         'on. <b>Active</b> prompts are editable — saving makes it live on the next run, every version '
         'is kept, and you can roll back; keep the <span class="mono">{placeholders}</span> or the save '
@@ -2735,8 +2735,8 @@ def _config_page(
     For a pending weight proposal the A/B-on-replay impact (#123) is shown inline, plus a revert
     control and the per-knob change history."""
     out = [
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Settings — the dials Maat runs on</h3>'
+        '<div class="ins">'
+        ''
         '<div class="deriv">Changing a setting here records a <b>suggestion</b> (logged in History). '
         '<b>Applying suggestions to the live engine isn\'t wired up yet</b> — for now they\'re kept '
         'for review, and a scoring-weight change shows an <b>A/B-on-replay</b> preview (how it would '
@@ -2846,8 +2846,8 @@ def _reputation_page(reps, n_events: int) -> str:
             "(nothing has been corroborated to fold over).</p>"
         )
         return (
-            '<div class="ins"><a class="back" href="/">← back to feed</a>'
-            '<h3 class="ih">Reputation — how each source has held up over time</h3>'
+            '<div class="ins">'
+            ''
             f"{intro}{body}</div>"
         )
     rows = []
@@ -2878,8 +2878,8 @@ def _reputation_page(reps, n_events: int) -> str:
             f'{rep.facts_unresolved} in flight</div></div></div>'
         )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Reputation — how each source has held up over time</h3>'
+        '<div class="ins">'
+        ''
         f"{intro}"
         f'<div class="mut sm">{len(reps)} sources folded over {n_events} corroboration events</div>'
         f'{"".join(rows)}</div>'
@@ -2998,8 +2998,8 @@ def _calibration_page(status, breakdown, geo_dist, lang_dist, health) -> str:
         f'{health["projections"]["articles"]} articles</div>'
     )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Calibration — is the confidence read actually right, over time?</h3>'
+        '<div class="ins">'
+        ''
         f'{calib}</div>'
         '<div class="ins"><h3 class="ih">De-US-centering — is the feed countering Anglo slant?</h3>'
         f'{de_us_html}</div>'
@@ -3091,8 +3091,8 @@ def _review_page(review, autofix, fresh, coordinated) -> str:
     )
     total = len(review) + len(fresh)
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Review queue — user feedback that needs a decision</h3>'
+        '<div class="ins">'
+        ''
         f"{intro}{warn}"
         f'<div class="bl mt">Needs review ({total})</div>{review_html}{fresh_html}'
         f'<div class="bl mt">Safe to auto-fix ({len(autofix)})</div>{autofix_html}</div>'
@@ -3200,8 +3200,8 @@ def _policy_page(proposal, n_events: int) -> str:
         for g in _capability_grants()
     )
     return (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Policy — what the learning loop would change (and what it may never touch)</h3>'
+        '<div class="ins">'
+        ''
         f"{intro}"
         f'<div class="mut sm">Proposed over {n_events} corroboration events · '
         f'{proposal.n_observations} resolved observations</div>'
@@ -3228,8 +3228,8 @@ def _eval_page(report, err: str, otlp: str) -> str:
         f'<span class="mut sm">· {status}</span></div>'
     )
     head = (
-        '<div class="ins"><a class="back" href="/">← back to feed</a>'
-        '<h3 class="ih">Quality — automatic checks that Maat is still judging correctly</h3>'
+        '<div class="ins">'
+        ''
         f'{obs}'
     )
     if report is None:
@@ -3333,10 +3333,12 @@ def _doc(main_html: str, subtitle: str, active: str, flash: str = "") -> str:
         '<span class="ico">⏻</span>Sign out</a></div>'
         if _ADMIN.enabled else ""
     )
+    title = _PAGE_META.get(active, (active.replace("-", " ").title() or "Console", ""))[0]
     return (
         _DOC.replace("{{nav}}", _nav(active))
         .replace("{{foot}}", foot)
         .replace("{{assistant}}", _assistant_panel(active))
+        .replace("{{title}}", html.escape(title))
         .replace("{{subtitle}}", html.escape(subtitle))
         .replace("{{main}}", banner + main_html)
     )
@@ -3357,7 +3359,7 @@ _DOC = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 {{foot}}
 </aside>
 <main>
-<div class="topbar"><div class="subtitle">{{subtitle}}</div></div>
+<div class="topbar"><h1 class="ptitle">{{title}}</h1><div class="subtitle">{{subtitle}}</div></div>
 {{main}}
 </main>
 {{assistant}}
