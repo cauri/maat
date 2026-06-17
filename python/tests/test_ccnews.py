@@ -79,6 +79,20 @@ def test_iter_warc_skips_non_html_thin_and_non_response():
     assert [a.source for a in arts] == ["lemonde.fr"]
 
 
+def test_detect_lang_offline():
+    assert ccnews.detect_lang("The ministry confirmed the new policy will take effect next month.") == "en"
+    assert ccnews.detect_lang("") == ""               # nothing to judge
+    assert ccnews.detect_lang("hi") == ""             # too short
+
+
+def test_iter_warc_detects_language_when_header_absent():
+    # CC-NEWS records frequently lack WARC-Identified-Content-Language (verified live) → the body
+    # is language-detected so the de-slant still has a real stratum instead of "unknown".
+    stream = _warc_bytes([("https://lemonde.fr/x", _ARTICLE_HTML, "", "text/html")])  # no lang header
+    arts = list(ccnews.iter_warc(stream, min_chars=50))
+    assert arts and arts[0].language == "en"
+
+
 def test_iter_warc_respects_limit():
     records = [
         (f"https://lemonde.fr/a{i}", _ARTICLE_HTML, "fra", "text/html") for i in range(3)

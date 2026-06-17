@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import httpx
+import py3langid
 import trafilatura
 from trafilatura.metadata import extract_metadata
 from warcio.archiveiterator import ArchiveIterator
@@ -87,6 +88,21 @@ def normalise_lang(raw: str) -> str:
     return _LANG3TO2.get(first, first[:2])
 
 
+def detect_lang(text: str) -> str:
+    """Detect a 2-letter language from the article text. CC-NEWS records frequently OMIT the
+    CLD2 ``WARC-Identified-Content-Language`` header (verified on 2026-05 segments — every record
+    lacked it), and an unknown language collapses everything into one stratum, defeating the
+    de-slant. Offline + deterministic via py3langid; "" when there's too little text to judge."""
+    t = (text or "").strip()
+    if len(t) < 20:
+        return ""
+    try:
+        code, _ = py3langid.classify(t[:1000])
+        return (code or "").strip().lower()
+    except Exception:  # noqa: BLE001 - detection is best-effort enrichment, never fatal
+        return ""
+
+
 def warc_paths(year: int, month: int, *, client: httpx.Client | None = None, limit: int = 0) -> list[str]:
     """Fetch the CC-NEWS WARC path index for a month (``limit`` > 0 truncates)."""
     own = client is None
@@ -135,11 +151,14 @@ def iter_warc(stream: io.IOBase, *, limit: int = 0, min_chars: int = 400) -> Ite
         except Exception:  # noqa: BLE001 - metadata is best-effort enrichment, never fatal
             pass
         domain = _domain(url)
+        language = normalise_lang(rec.rec_headers.get_header("WARC-Identified-Content-Language") or "")
+        if not language:  # CC-NEWS often omits the CLD2 header — detect from the body instead
+            language = detect_lang(body)
         yield CCNewsArticle(
             url=url,
             title=title,
             source=domain,
-            language=normalise_lang(rec.rec_headers.get_header("WARC-Identified-Content-Language") or ""),
+            language=language,
             country=country_of(domain),
             body=body,
             image=image,

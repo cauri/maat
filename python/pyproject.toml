@@ -15,6 +15,7 @@ dependencies = [
     "trafilatura>=1.8",
     "numpy>=2.4.6",
     "warcio>=1.8.1",
+    "py3langid>=0.3.0",
 ]
 
 [project.optional-dependencies]
