@@ -1763,11 +1763,21 @@ def _claim(c) -> str:
     )
 
 
+def _extlink(url, text, *, cls: str = "") -> str:
+    """An external link that opens in a NEW TAB, or just the escaped text when there's no URL."""
+    t = html.escape(text or "")
+    u = (url or "").strip()
+    if not u:
+        return t
+    c = f' class="{cls}"' if cls else ""
+    return f'<a{c} href="{html.escape(u)}" target="_blank" rel="noopener noreferrer">{t}</a>'
+
+
 def _card(a, claims) -> str:
     rows = "".join(_claim(c) for c in claims) or '<div class="claim t muted">no claims</div>'
     return (
         f'<article class="card"><div class="src">{html.escape(a["source"] or "")}</div>'
-        f'<h2>{html.escape(a["title"] or "")}</h2>'
+        f'<h2>{_extlink(a.get("url"), a["title"])}</h2>'
         f'<div class="claims">{rows}</div>'
         f'<div class="foot">{len(claims)} claims</div></article>'
     )
@@ -1972,7 +1982,7 @@ def _claim_page(c, prov) -> str:
         for p in prov
     )
     meta = (
-        f'<div class="kv"><b>From article</b> {html.escape(c["art_title"] or "")} '
+        f'<div class="kv"><b>From article</b> {_extlink(c.get("art_url"), c["art_title"])} '
         f'<span class="mut">({html.escape(c["art_source"] or "")}, {html.escape(c["art_language"] or "?")})</span></div>'
         f'<div class="kv" title="The exact words this claim was pulled from">'
         f'<b>Exact wording</b> {html.escape(c["evidence_span"] or "—")}</div>'
