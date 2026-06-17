@@ -20,10 +20,11 @@ from dotenv import load_dotenv
 from maat import prompts
 from maat.bus import connect
 from maat.config import active_config, pipeline_overrides
-from maat.events import ADMIN_SOURCE_GROUPED, publish
+from maat.events import ADMIN_SOURCE_GROUPED, SOURCE_OWNERSHIP_RESOLVED, publish
 from maat.pipeline.corroborate import ClaimRow, corroborate
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
+from maat.pipeline.ownership import fold_ownership
 from maat.serving.translate import translate_text
 
 
@@ -50,15 +51,22 @@ async def main() -> None:
             pivots[d["claim_id"]] = d["text_en"]
     # Resolve the operator's active extremity prompt (P8) before closing the pool.
     extremity_prompt = await prompts.active_text(pool, "extremity", prompts.seed_default("extremity"))
-    # Ownership grouping (#41): fold the operator's admin.source.grouped events (latest per
-    # source) into a {canonical_source: group} map so co-owned outlets collapse to one
-    # independent originator in corroboration instead of inflating the count.
+    # Ownership grouping (#41): co-owned outlets collapse to one independent originator. Two sources,
+    # merged — the AUTO-resolved Wikidata graph (#254) UNDER the operator's manual groups, which
+    # OVERRIDE it (a wrong auto-merge would hide real corroboration, so the operator always wins).
+    resolved = await pool.fetch(
+        "select data from events where type = $1 order by id", SOURCE_OWNERSHIP_RESOLVED
+    )
+    auto = fold_ownership(
+        json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in resolved
+    )
     grps = await pool.fetch(
         "select distinct on (data->>'source') data->>'source' s, data->>'group' g "
         "from events where type = $1 order by data->>'source', id desc",
         ADMIN_SOURCE_GROUPED,
     )
-    ownership = {canonical_source(r["s"]): r["g"] for r in grps if r["s"] and r["g"]}
+    manual = {canonical_source(r["s"]): r["g"] for r in grps if r["s"] and r["g"]}
+    ownership = {**auto, **manual}  # manual overrides auto
     # Operator config enactment (#183/#184): the pipeline runs on the PROMOTED thresholds
     # (sign-off-gated), falling back to code defaults for anything not promoted.
     promoted = await pool.fetch(

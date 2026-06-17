@@ -86,6 +86,13 @@ CLAIM_RELATED = "claim.related"
 # fact resolves REFUTED over time through the path #227 already built. stream_id IS the claim id.
 CLAIM_DISPUTED = "claim.disputed"
 
+# Automatic source-ownership resolution (#41 / #254, integrity): the ownership agent resolves a new
+# source to its Wikidata entity and emits its direct controlling owners. corroborate folds these into
+# the same `ownership` map the manual `admin.source.grouped` feeds (manual overrides), so co-owned
+# outlets collapse to one independent originator without the operator typing each group. Conservative
+# + operator-overridable — a wrong merge would HIDE real corroboration. stream_id is the source.
+SOURCE_OWNERSHIP_RESOLVED = "source.ownership.resolved"
+
 # Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
 # typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
 # maat-kerneld projects it atomically into story_nodes / story_edges / story_node_clusters /
