@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import threading
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -57,6 +58,32 @@ def _post_json(url: str, *, headers: dict[str, str], payload: dict, timeout: htt
         resp.raise_for_status()
         return resp.json()
     raise AssertionError("unreachable")  # loop either returns or raises
+
+
+# Mistral enforces a per-minute REQUEST budget (the live response carries
+# ``x-ratelimit-limit-req-minute: 60``). A single corroborate pass bursts ~10 embedding batches
+# PLUS up to ~120 per-claim pivot translations back-to-back, which sails past 60/min and 429s
+# faster than backoff can recover — the retry above clears blips, not a sustained over-rate. So
+# pace Mistral calls PROACTIVELY, process-wide, to stay under the limit (default ~50/min). Claude
+# has its own, separate limits and is not throttled here. MAAT_MISTRAL_MIN_INTERVAL=0 disables.
+_MISTRAL_MIN_INTERVAL = float(os.environ.get("MAAT_MISTRAL_MIN_INTERVAL", "1.2"))  # s between calls
+_mistral_lock = threading.Lock()
+_mistral_next = [0.0]  # monotonic time at which the next Mistral request may proceed
+
+
+def _mistral_pace() -> None:
+    """Block until the next Mistral request is allowed, keeping calls ≥ _MISTRAL_MIN_INTERVAL apart
+    across all threads in this process. Called via asyncio.to_thread, so the event loop is free."""
+    if _MISTRAL_MIN_INTERVAL <= 0:
+        return
+    with _mistral_lock:
+        now = time.monotonic()
+        wait = _mistral_next[0] - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _mistral_next[0] = now + _MISTRAL_MIN_INTERVAL
+
 
 # Defaults; callers override per call (the whole point of the seam).
 # cauri: the "judge" default → Opus (was Haiku — "haiku is terrible"). This backs the careful
@@ -156,6 +183,7 @@ async def claude_stream(
 def mistral_complete(prompt: str, *, model: str = MISTRAL_BULK, max_tokens: int = 256) -> Reply:
     """Mistral — bulk / near-mechanical stages (and EU-sovereign)."""
     key = os.environ["MISTRAL_API_KEY"]
+    _mistral_pace()  # stay under Mistral's per-minute request budget (a pivot run bursts ~120 calls)
     with llm_span("bulk", model, prompt) as span:
         data = _post_json(
             MISTRAL_CHAT_URL,
@@ -188,6 +216,7 @@ def mistral_embed(texts: list[str], *, model: str = MISTRAL_EMBED) -> list[list[
     out: list[list[float]] = []
     for start in range(0, len(texts), _EMBED_BATCH):
         chunk = texts[start : start + _EMBED_BATCH]
+        _mistral_pace()  # one batch per interval — keeps the ~10-batch burst under the rate limit
         with llm_span("embed", model, f"{len(chunk)} texts") as span:
             data = _post_json(
                 MISTRAL_EMBED_URL,

@@ -51,6 +51,7 @@ def test_mistral_embed_batches_large_input(monkeypatch):
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test")
     monkeypatch.setattr(seam.httpx, "post", fake_post)
+    monkeypatch.setattr(seam, "_MISTRAL_MIN_INTERVAL", 0)  # don't real-sleep in the batching test
 
     out = seam.mistral_embed([f"claim {i}" for i in range(130)])
 
@@ -132,3 +133,30 @@ def test_post_json_honors_retry_after_header(monkeypatch):
 
     seam._post_json("https://x", headers={}, payload={}, timeout=seam._TIMEOUT)
     assert slept == [7.0]  # server-directed delay used verbatim
+
+
+def test_mistral_pace_spaces_calls_under_the_rate_limit(monkeypatch):
+    # Deterministic clock: monotonic advances only when we "sleep". Proves successive Mistral calls
+    # are forced ≥ _MISTRAL_MIN_INTERVAL apart (so a burst stays under Mistral's 60/min budget).
+    clock = {"t": 100.0}
+    slept: list[float] = []
+    monkeypatch.setattr(seam.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(d):
+        slept.append(d)
+        clock["t"] += d  # time only moves forward by what we sleep
+
+    monkeypatch.setattr(seam.time, "sleep", fake_sleep)
+    monkeypatch.setattr(seam, "_MISTRAL_MIN_INTERVAL", 1.2)
+    monkeypatch.setattr(seam, "_mistral_next", [0.0])
+
+    for _ in range(4):
+        seam._mistral_pace()
+    # first call: no wait (budget free); next three each wait the full interval
+    assert slept == pytest.approx([1.2, 1.2, 1.2])
+
+
+def test_mistral_pace_disabled_when_interval_zero(monkeypatch):
+    monkeypatch.setattr(seam, "_MISTRAL_MIN_INTERVAL", 0)
+    monkeypatch.setattr(seam.time, "sleep", lambda *_: (_ for _ in ()).throw(AssertionError("no sleep")))
+    seam._mistral_pace()  # returns immediately, never sleeps
