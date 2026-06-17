@@ -19,6 +19,7 @@ dependencies = [
     "onnxruntime>=1.27.0",
     "tokenizers>=0.23.1",
     "huggingface-hub>=1.19.0",
+    "feedparser>=6.0.12",
 ]
 
 [project.optional-dependencies]

@@ -127,6 +127,8 @@ services:
         while true; do
           echo "[clock] tick: acquire (topics: $${MAAT_TOPICS})";
           uv run --no-dev python scripts/clock.py || echo "[clock] acquire error";
+          echo "[clock] acquire-rss (balanced multipolar outlet feeds, #238)";
+          uv run --no-dev python scripts/acquire_rss.py || echo "[clock] rss error";
           echo "[clock] draining $${MAAT_TICK_DRAIN}s for extract+classify";
           sleep "$${MAAT_TICK_DRAIN}";
           echo "[clock] corroborate (recompute clusters)";

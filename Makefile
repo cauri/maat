@@ -50,6 +50,9 @@ backfill:
 ccnews-backfill:
 	cd python && uv run python scripts/backfill_ccnews.py
 
+acquire-rss:
+	cd python && uv run python scripts/acquire_rss.py
+
 triage:
 	cd python && uv run python -m maat.agents.triage
 
