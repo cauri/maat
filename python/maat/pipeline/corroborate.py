@@ -33,6 +33,11 @@ class ClaimRow:
     text: str
     article_id: str
     source: str
+    # Optional English pivot used ONLY for same-fact clustering (#240): a non-English claim
+    # translated to English so a fact reported across languages clusters as one (mistral_embed is
+    # multilingual but cross-lingual same-fact sits right at the 0.82 bar; the pivot lifts it
+    # clear). Empty → cluster on `text` (identical to pre-#240 behaviour). Display/fact stay `text`.
+    embed_text: str = ""
 
 
 @dataclass
@@ -404,7 +409,8 @@ def corroborate(
     if not claims:
         return []
     art_source = {c.article_id: c.source for c in claims}
-    clusters = group_by_similarity([c.text for c in claims], same_fact_threshold)
+    # Cluster on the English pivot when present (#240, cross-lingual), else the original text.
+    clusters = group_by_similarity([(c.embed_text or c.text) for c in claims], same_fact_threshold)
     results: list[Corroboration] = []
     for comp in clusters:
         members = [claims[i] for i in comp]
