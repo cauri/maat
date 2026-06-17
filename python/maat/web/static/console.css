@@ -161,6 +161,10 @@ label{font-size:14px}
 .box .reason,.inline .reason{flex:1;min-width:120px}
 .btnrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
 .ck{flex-basis:100%;font-size:14px;gap:7px}
+/* a checkbox + label that actually line up (Sources deny toggle, #187/#252) */
+.toggle{display:inline-flex;align-items:center;gap:7px;font-size:14px;line-height:1;
+  cursor:pointer;white-space:nowrap;user-select:none}
+.toggle input[type=checkbox]{width:16px;height:16px;margin:0;flex:none;accent-color:var(--acc);cursor:pointer}
 .mc{padding:10px 0;border-top:1px solid var(--line)}
 .mc .src{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-top:3px}
 .inline{display:flex;gap:6px;align-items:center;margin-top:7px}
