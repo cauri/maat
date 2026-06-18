@@ -1,7 +1,11 @@
 # AGENTS.md — working in this repo
 
 Maat — a veracity-weighted news feed. Architecture + decisions: `PLAN.md`, `DECISIONS.md`.
-Backlog: GitHub issues (epics P1–P8). Task tracker: `ba` (`.ba/issues.jsonl`).
+Backlog: GitHub issues (epics P1–P13; no milestone on epics). (`ba`/`.ba/` is not used in this repo.)
+
+**Operator console (rebuild):** being rebuilt from scratch under `console/` — Next.js + shadcn/ui with the
+**Sia** collaborator — replacing `python/maat/web/app.py`. Start at **`console/README.md`** (epic #302,
+decision D33); put new console work in `console/`, not `app.py`.
 
 ## Multi-agent coordination
 
