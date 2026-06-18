@@ -74,7 +74,11 @@ async def _apify_history(source: str, *, depth: int) -> list[HistoryArticle]:
     if not apify.available():
         return []
     try:
-        items = await asyncio.to_thread(apify.search_and_fetch, f"site:{source}", max_results=depth)
+        # rag-web-browser scrapes each result page in-run, so a big maxResults times out — cap it
+        # (Google site: search returns ~a dozen useful hits anyway) and give it a longer ceiling.
+        items = await asyncio.to_thread(
+            apify.search_and_fetch, f"site:{source} news", max_results=min(depth, 15), timeout=240.0
+        )
     except Exception as e:  # noqa: BLE001
         print(f"[history] {source} apify unavailable: {e}", flush=True)
         return []
@@ -90,7 +94,7 @@ async def _newsdata_history(source: str, *, depth: int) -> list[HistoryArticle]:
         return []
     try:
         arts = await asyncio.to_thread(
-            newsdata.search, "", domain=_norm(source), max_results=depth, pages=2
+            newsdata.search, "", domain=_norm(source), max_results=depth, pages=max(2, depth // 8)
         )
     except Exception as e:  # noqa: BLE001
         print(f"[history] {source} newsdata unavailable: {e}", flush=True)
@@ -119,9 +123,12 @@ async def fetch_source_history(
                 seen.add(a.url)
                 out.append(a)
 
-    add(await _gdelt_history(source, depth=depth, months=months, fetch_conc=fetch_conc))
+    # Order by reliability for a per-domain pull: NewsData (keyed → returns content, paginates) is
+    # the dependable one; GDELT is free but 429s hard under the clock's load; Apify site: is a capped
+    # top-up. Each only runs if the prior channels left the depth unmet.
+    add(await _newsdata_history(source, depth=depth))
+    if len(out) < depth:
+        add(await _gdelt_history(source, depth=depth - len(out), months=months, fetch_conc=fetch_conc))
     if len(out) < depth:
         add(await _apify_history(source, depth=depth - len(out)))
-    if len(out) < depth:
-        add(await _newsdata_history(source, depth=depth - len(out)))
     return out

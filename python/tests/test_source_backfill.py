@@ -92,22 +92,22 @@ def test_run_backfill_apify_acquisition_cost(monkeypatch):
 
 
 def test_fetch_history_tops_up_across_channels(monkeypatch):
-    # GDELT returns 2, Apify tops up to the cap, NewsData not needed — and URLs dedupe across channels.
+    # No NewsData key → empty; GDELT returns 2; Apify tops up to the cap; URLs dedupe across channels.
+    async def fake_newsdata(source, *, depth):
+        return []  # channel order is NewsData → GDELT → Apify; unkeyed NewsData falls through
+
     async def fake_gdelt(source, *, depth, months, fetch_conc):
         return [HistoryArticle(f"https://g/{i}", "g", source, "en", "b", "", "gdelt") for i in range(2)]
 
     async def fake_apify(source, *, depth):
-        return [HistoryArticle(f"https://g/0", "dup", source, "en", "b", "", "apify")] + [  # noqa: F541 - dup url
+        return [HistoryArticle("https://g/0", "dup", source, "en", "b", "", "apify")] + [
             HistoryArticle(f"https://a/{i}", "a", source, "en", "b", "", "apify") for i in range(depth)]
 
-    async def fake_newsdata(source, *, depth):
-        raise AssertionError("should not be reached once depth is met")
-
+    monkeypatch.setattr(history, "_newsdata_history", fake_newsdata)
     monkeypatch.setattr(history, "_gdelt_history", fake_gdelt)
     monkeypatch.setattr(history, "_apify_history", fake_apify)
-    monkeypatch.setattr(history, "_newsdata_history", fake_newsdata)
 
     out = asyncio.run(history.fetch_source_history("bbc.com", depth=5))
     assert len(out) == 5                          # capped at depth
     assert len({a.url for a in out}) == 5         # the duplicate g/0 was dropped
-    assert out[0].channel == "gdelt"              # gdelt first, then apify top-up
+    assert out[0].channel == "gdelt"              # NewsData empty → GDELT first, then apify top-up
