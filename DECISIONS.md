@@ -282,3 +282,28 @@ both reachability (WG) and login (Google allowlist) are independently gated. **R
 redirect-vs-device-flow question → redirect-flow:** the Google OIDC redirect URI is
 **`https://admin.maat.press/admin/callback`**. Realizes the "real domain" deferral from D27/#148 (api +
 admin now on `maat.press`); sslip.io drops to fallback. Tracked: #163.
+
+### D33 — Operator console v2: Next.js + shadcn over a FastAPI command/query API; the collaborator is "Sia"
+**Decision:** rebuild the operator console (P8) **from scratch** as a real web app — **Next.js (App
+Router) + shadcn/ui**, served at `admin.maat.press` behind the existing WireGuard + Google OIDC edge
+(D31/D32). The veracity/event logic **stays in Python**: a **FastAPI command/query API** reuses
+`events.py` (emit `ADMIN_*`) and reads the existing projections; the JS app is UI + the AI collaborator
+only, and Sia's tools *are* that API, so she runs the same audited, propose-don't-apply path a human
+does. The in-app AI is a **collaborator named "Sia"** (Egyptian *insight/perception*; joins the D1
+pantheon, distinct from the existing Thoth/scribe). Epic #302; stack + conventions in `console/README.md`.
+**Supersedes** the "evolve `python/maat/web/app.py`" implementation (and #292's split-the-file path); the
+event spine and propose-don't-apply guardrail from **D28** are unchanged.
+**Context:** the current console is ~4,200 lines of server-rendered HTML; per #181 only Prompts is wired
+end-to-end and most controls are display-only. cauri asked, from scratch, what we'd build given a real
+app stack — summary dashboards, page-level AI that changes settings/fields, live sort/group/filter,
+charts, and a visualisation of the corroboration graph.
+**Options:** (a) evolve / split `app.py` in place (#292) **vs** rebuild as a React app *(chosen)*; (b)
+data plane — Next.js full-stack with Node touching Postgres/NATS **vs** FastAPI command-API + Next.js
+frontend *(chosen)*.
+**Why (cauri):** the inline-HTML surface can't host a dashboard, live tables, a graph view, dynamic
+editing, or an actionable collaborator — rebuilding is cheaper than retrofitting. Keeping the
+command/query + event logic in Python preserves one source of truth next to the kernel/agents and reuses
+the audited spine, while the JS app gets the shadcn/AI-SDK ecosystem without a second backend.
+"Copilot/assistant" was rejected: the agent is a **collaborator** with a name (Sia). **Guardrail:** Sia's
+runtime persona/prompt is co-designed with cauri (D29), not authored solo. Tracked: #302 (sub-issues
+#303–#316).
