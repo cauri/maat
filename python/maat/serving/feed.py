@@ -37,6 +37,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from maat.acquire.clean import clean_article
 from maat.agents.curation import Story as CurationStory, curate
 from maat.events import STORY_GEO_INFERRED
 from maat.learning.accuracy import lifecycle_by_fact
@@ -932,12 +933,16 @@ def _make_router() -> Any:
                 "from articles where id = any($1::text[])",
                 article_ids,
             )
-            story["articles"] = [
-                {
+            articles = []
+            for r in full_rows:
+                # Strip scraped boilerplate on read so articles ingested before the cleaner landed
+                # (markdown links, nav/share chrome, publisher-in-title) still read clean (#33).
+                ct, cb = clean_article(r.get("title") or "", r.get("body") or "", r.get("source") or "")
+                articles.append({
                     "id": r["id"],
                     "source": r.get("source"),
-                    "title": r.get("title"),
-                    "body": r.get("body") or "",
+                    "title": ct,
+                    "body": cb,
                     "url": r.get("url"),
                     "language": r.get("language") or "en",
                     # Raw og:image for transparency; the client still loads it via the proxy
@@ -946,9 +951,8 @@ def _make_router() -> Any:
                     "ingested_at": (
                         r["ingested_at"].isoformat() if r.get("ingested_at") else None
                     ),
-                }
-                for r in full_rows
-            ]
+                })
+            story["articles"] = articles
         else:
             story["articles"] = []
 

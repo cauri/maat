@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 from maat import prompts
 from maat.acquire import apify
+from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
 from maat.acquire.gdelt import search
 from maat.acquire.source_gate import accept_source
@@ -151,8 +152,9 @@ async def main() -> None:
         body, image_url = await asyncio.to_thread(fetch_article, a.url)
         if not body:
             return False
+        title, body = clean_article(a.title, body, a.domain)  # strip scraped boilerplate (#33)
         await publish(nc, "article.ingested", _aid(a.url),
-                      {"title": a.title, "source": a.domain, "language": a.language,
+                      {"title": title, "source": a.domain, "language": a.language,
                        "body": body, "url": a.url, "image_url": image_url, "provider": "gdelt"})
         seen.add(a.url)
         new += 1
@@ -240,9 +242,10 @@ async def main() -> None:
                     seen.add(fa.url)
                     dropped += 1
                     continue
+                ct, cb = clean_article(fa.title, fa.body, fa.domain)  # strip scraped boilerplate (#33)
                 await publish(nc, "article.ingested", _aid(fa.url),
-                              {"title": fa.title, "source": fa.domain, "language": fa.language,
-                               "body": fa.body, "url": fa.url, "image_url": fa.image,
+                              {"title": ct, "source": fa.domain, "language": fa.language,
+                               "body": cb, "url": fa.url, "image_url": fa.image,
                                "provider": "apify"})
                 seen.add(fa.url)
                 new += 1

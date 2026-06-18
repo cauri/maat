@@ -55,6 +55,7 @@ from maat.learning.rl import policy_step
 from maat.learning.trajectory import load_trajectory
 from maat.serving.stories import StoryView, load_story_detail, load_story_views
 from maat.learning import source_registry as sreg
+from maat.acquire.clean import clean_article
 from maat.acquire.rss import load_feeds as _load_feeds
 from maat.metrics import de_us
 from maat.pipeline.identity import canonical_source
@@ -1547,11 +1548,12 @@ async def _article_full_map(pool) -> dict[str, dict]:
 
 def _article_json(a: dict) -> dict:
     ts = a.get("ingested_at")
+    ct, cb = clean_article(a.get("title") or "", a.get("body") or "", a.get("source") or "")  # #33
     return {
         "id": a["id"],
         "source": a.get("source"),
-        "title": a.get("title"),
-        "body": a.get("body") or "",
+        "title": ct,
+        "body": cb,
         "url": a.get("url"),
         "language": a.get("language") or "en",
         "ingested_at": ts.isoformat() if ts else None,

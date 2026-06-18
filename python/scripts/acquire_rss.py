@@ -22,6 +22,7 @@ from pathlib import Path
 import asyncpg
 from dotenv import load_dotenv
 
+from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
 from maat.acquire.rss import fetch_feed, load_feeds
 from maat.bus import connect
@@ -73,10 +74,11 @@ async def main() -> None:
             body, image = await asyncio.to_thread(fetch_article, it.url)
             if not body:
                 continue
+            title, body = clean_article(it.title, body, it.source)  # strip scraped boilerplate (#33)
             await publish(
                 nc, "article.ingested", _aid(it.url),
                 {
-                    "title": it.title, "source": it.source, "language": it.language,
+                    "title": title, "source": it.source, "language": it.language,
                     "body": body, "url": it.url, "image_url": image,
                     "provider": "rss", "alignment": it.alignment, "country": it.country,
                 },

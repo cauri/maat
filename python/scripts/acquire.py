@@ -17,6 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from maat.acquire import apify
+from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
 from maat.acquire.gdelt import search
 from maat.bus import connect
@@ -50,11 +51,12 @@ async def main() -> None:
         if not body:
             print(f"  skip (no body) {a.domain}")
             continue
+        ct, cb = clean_article(a.title, body, a.domain)  # strip scraped boilerplate (#33)
         await publish(
             nc,
             "article.ingested",
             _aid(a.url),
-            {"title": a.title, "source": a.domain, "language": a.language, "body": body,
+            {"title": ct, "source": a.domain, "language": a.language, "body": cb,
              "url": a.url, "image_url": image_url},
         )
         n += 1
@@ -64,11 +66,12 @@ async def main() -> None:
     if n == 0 and apify.available():
         print("GDELT yielded nothing — falling back to Apify rag-web-browser")
         for fa in await asyncio.to_thread(apify.search_and_fetch, query, max_results=maxrec):
+            ct, cb = clean_article(fa.title, fa.body, fa.domain)  # strip scraped boilerplate (#33)
             await publish(
                 nc,
                 "article.ingested",
                 _aid(fa.url),
-                {"title": fa.title, "source": fa.domain, "language": fa.language, "body": fa.body,
+                {"title": ct, "source": fa.domain, "language": fa.language, "body": cb,
                  "url": fa.url, "image_url": fa.image},
             )
             n += 1
