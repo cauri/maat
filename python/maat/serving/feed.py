@@ -46,6 +46,7 @@ from maat.learning.source_learning import learn_preferences
 from maat.learning.source_registry import fold_sources, pending_sources
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.source_flags import denied_sources
+from maat.serving.favicon import icon_bytes
 from maat.serving.stories import load_story_detail, load_story_views
 from maat.serving.topics import enriched_interest, parse_interest, story_matches
 
@@ -1009,6 +1010,16 @@ def _make_router() -> Any:
             content=data,
             media_type=ctype,
             headers={"Cache-Control": "public, max-age=86400"},  # let Caddy + client cache too
+        )
+
+    @router.get("/source-icon")
+    async def source_icon_endpoint(d: str = ""):
+        """An outlet's favicon for the app's Sources list (#sources). Fetched + cached by the box so
+        the device never loads a third-party image directly (privacy #1, same as /image). Lettered
+        monogram fallback so a row is never broken. ``d`` is a bare domain (validated, no SSRF)."""
+        body, ctype = await icon_bytes(d)
+        return Response(
+            content=body, media_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
         )
 
     return router

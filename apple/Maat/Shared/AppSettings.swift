@@ -91,6 +91,17 @@ final class AppSettings {
         return comps?.url
     }
 
+    /// URL for an outlet's favicon, served through the box's proxy (#1) so the device never loads a
+    /// third-party image host: the client passes the bare domain; the box fetches + caches it. nil in
+    /// fixture mode or when the base URL is invalid (the row then shows a drawn monogram).
+    func sourceIconURL(domain: String) -> URL? {
+        guard !apiBaseURL.isEmpty, let base = URL(string: apiBaseURL) else { return nil }
+        var comps = URLComponents(url: base.appending(path: "api/v2/source-icon"),
+                                  resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "d", value: domain)]
+        return comps?.url
+    }
+
     private enum Keys {
         static let api = "maat.apiBaseURL"
         static let onDevice = "maat.preferOnDeviceTranslation"
