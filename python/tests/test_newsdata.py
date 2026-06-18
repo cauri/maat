@@ -88,3 +88,22 @@ def test_search_uses_domainurl_and_header_auth(monkeypatch):
     assert "domain" not in seen["params"]
     assert "apikey" not in seen["params"]                 # key NOT in the URL
     assert seen["headers"]["X-ACCESS-KEY"] == "secret"    # key in the header instead
+
+
+def test_search_min_chars_zero_keeps_metadata_only_rows(monkeypatch):
+    monkeypatch.setenv("MAAT_NEWSDATA_KEY", "k")
+    payload = {"results": [{"link": "https://bbc.com/x", "title": "t",
+                            "content": "stub", "description": "short"}], "nextPage": None}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(newsdata.httpx, "get", lambda *a, **k: _R())
+    # default min_chars=200 drops the metadata-only row; min_chars=0 keeps it so the link survives
+    assert newsdata.search("", domain="bbc.com") == []
+    kept = newsdata.search("", domain="bbc.com", min_chars=0)
+    assert len(kept) == 1 and kept[0].url == "https://bbc.com/x"
