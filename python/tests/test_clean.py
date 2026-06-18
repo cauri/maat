@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from maat.acquire.clean import clean_body, clean_title
+from maat.acquire.clean import clean_body, clean_title, is_index_page
 
 
 # --- titles -----------------------------------------------------------------------------
@@ -93,3 +93,42 @@ def test_clean_body_leaves_trafilatura_prose_untouched():
         "Officials cited easing inflation and a resilient labour market as reasons to wait."
     )
     assert clean_body(prose) == prose
+
+
+def test_clean_body_strips_dangling_link_tails():
+    # the wired.com case: [label] and ](url) split across lines by markdown line-wrap
+    body = (
+        "My Father Wants to Age in Place. AI Will Be Watching\n"
+        "](/story/sensi-ai-seniors-home-care-aging-in-place/)\n"
+        "By Steven Blum"
+    )
+    out = clean_body(body)
+    assert "](" not in out and "/story/" not in out
+    assert "My Father Wants to Age in Place" in out   # the link label (prose) is kept
+
+
+# --- index / section pages --------------------------------------------------------------
+
+def test_index_page_detected_by_section_title():
+    assert is_index_page("Artificial Intelligence | Latest News, Photos & Videos", "")
+    assert is_index_page("Climate — News & Analysis", "")
+    assert is_index_page("Tech News Archives", "")
+
+
+def test_real_article_titles_are_not_index_pages():
+    assert not is_index_page("Fed holds rates steady as inflation cools", "Some real prose.")
+    assert not is_index_page("Latest news on the merger talks emerges", "")   # mid-headline, no delimiter
+    assert not is_index_page("Happy News: Stories to make you smile - BBC Newsround", "")
+
+
+def test_index_page_detected_by_link_dense_body():
+    body = "\n".join(f"[Headline number {i}](/story/{i})" for i in range(12))
+    assert is_index_page("Some Section", body)
+
+
+def test_prose_body_is_not_an_index_page():
+    body = "\n".join(
+        "The central bank held rates steady on Thursday, citing easing inflation pressures."
+        for _ in range(12)
+    )
+    assert not is_index_page("A real article", body)

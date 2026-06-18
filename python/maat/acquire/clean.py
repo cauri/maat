@@ -104,6 +104,7 @@ def clean_title(title: str, source: str = "") -> str:
 
 _MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")          # ![alt](src)
 _MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")           # [text](href) -> text
+_LINK_TAIL = re.compile(r"\]\([^)]*\)")                   # dangling ](href) when [text wrapped to a prior line
 _NAV_LINK_LINE = re.compile(r"\[[^\]]*\]\((?:/[^)]*|#[^)]*)\)")  # a lone link to a relative/anchor target
 _BARE_URL = re.compile(r"https?://\S+")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
@@ -142,7 +143,7 @@ def clean_body(text: str, *, title: str = "") -> str:
         if _NAV_LINK_LINE.fullmatch(line):            # a lone relative/anchor link == navigation
             continue
         line = _LIST_MARK.sub("", _HEADING.sub("", line))   # '# …' / '* …' markers
-        line = _BARE_URL.sub("", _MD_LINK.sub(r"\1", line)).strip()  # unwrap links, drop URLs
+        line = _BARE_URL.sub("", _LINK_TAIL.sub("", _MD_LINK.sub(r"\1", line))).strip()  # unwrap links, drop URLs + dangling tails
         if not line or _AGO.match(line):
             continue
         key = _norm(line)
@@ -168,3 +169,45 @@ def clean_article(title: str, body: str, source: str = "") -> tuple[str, str]:
     already-stored articles render clean too. Returns ``(clean_title, clean_body)``."""
     t = clean_title(title, source)
     return t, clean_body(body, title=t)
+
+
+# --- non-article (section / index) pages -------------------------------------------------
+
+# A section / index / topic / landing page is an amalgam of links to OTHER stories, not a single
+# article (e.g. "Artificial Intelligence | Latest News, Photos & Videos" — a list of headlines +
+# bylines + links). These are rejected at ingestion (#33) so they never become a "story", and
+# filtered out of the feed if already stored. The extract agent's LLM check is the second net for
+# the ones a heuristic misses.
+_INDEX_STRONG = re.compile(   # phrases that mark a section page even mid-title (rare in real headlines)
+    r"(?:news\s*,\s*photos|photos\s*(?:and|&)\s*videos|news\s+(?:and|&)\s+analysis|"
+    r"\barchives\b|all\s+(?:stories|articles|coverage))",
+    re.I,
+)
+_INDEX_WEAK = re.compile(     # a section LABEL only when it's the tail after a "Topic | Site" delimiter
+    r"(?:latest\s+news|latest\s+(?:stories|articles)|top\s+stories|breaking\s+news\s+headlines)\b",
+    re.I,
+)
+_TITLE_DELIMS = ("|", "–", "—", " - ", " · ")
+
+
+def is_index_page(title: str, body: str = "") -> bool:
+    """Heuristic: is this a section / index / landing page (an amalgam of links to OTHER stories)
+    rather than a single news article? Conservative — a section-label title is the high-precision
+    signal, an almost-all-links body the backup. Runs on the RAW scraped title/body (pre-clean)."""
+    t = (title or "").strip()
+    if t:
+        if _INDEX_STRONG.search(t):
+            return True
+        for d in _TITLE_DELIMS:
+            if d in t and _INDEX_WEAK.search(t.rsplit(d, 1)[-1].strip()):
+                return True
+    lines = [ln.strip() for ln in (body or "").splitlines() if ln.strip()]
+    if len(lines) < 8:
+        return False
+    link_lines = sum(1 for ln in lines if "](" in ln)
+    prose = sum(
+        1 for ln in lines
+        if len(ln.split()) >= 10 and ln.rstrip().endswith((".", "?", "!", "”", '"'))
+    )
+    # an amalgam of links/headlines with essentially no flowing prose
+    return link_lines >= 8 and link_lines >= 0.4 * len(lines) and prose <= 2

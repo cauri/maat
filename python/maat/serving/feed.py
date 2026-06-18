@@ -37,7 +37,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from maat.acquire.clean import clean_article
+from maat.acquire.clean import clean_article, is_index_page
 from maat.agents.curation import Story as CurationStory, curate
 from maat.events import STORY_GEO_INFERRED
 from maat.learning.accuracy import lifecycle_by_fact
@@ -534,6 +534,14 @@ def _hero_image_article_id(
 # ---------------------------------------------------------------------------
 
 
+def _cluster_is_index_page(cluster: dict[str, Any], article_meta: dict[str, dict[str, Any]]) -> bool:
+    """A cluster whose every source article is a section / index page (an amalgam of links, not a
+    real story) — filtered from the feed (#33). Title-based (article_meta carries no body here)."""
+    ids = [a for grp in _jload(cluster.get("originators")) for a in grp]
+    titles = [t for t in ((article_meta.get(a) or {}).get("title") or "" for a in ids) if t]
+    return bool(titles) and all(is_index_page(t) for t in titles)
+
+
 def build_feed(
     clusters: list[dict[str, Any]],
     claims_by_id: dict[str, dict[str, Any]],
@@ -582,6 +590,8 @@ def build_feed(
     curation_inputs: list[CurationStory] = []
 
     for cluster in clusters:
+        if _cluster_is_index_page(cluster, article_meta):   # section/index page, not a story (#33)
+            continue
         story = build_story(cluster, claims_by_id, article_meta)
         sid = story["id"]
         stories_by_id[sid] = story
@@ -936,6 +946,10 @@ def _make_router() -> Any:
             )
             articles = []
             for r in full_rows:
+                # Drop section/index pages that slipped in before the gate (an amalgam of links, not
+                # a real article) so the reader never opens one (#33).
+                if is_index_page(r.get("title") or "", r.get("body") or ""):
+                    continue
                 # Strip scraped boilerplate on read so articles ingested before the cleaner landed
                 # (markdown links, nav/share chrome, publisher-in-title) still read clean (#33).
                 ct, cb = clean_article(r.get("title") or "", r.get("body") or "", r.get("source") or "")
