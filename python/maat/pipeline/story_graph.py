@@ -379,6 +379,40 @@ def fold_clusters(
     return graph
 
 
+def fold_incremental(
+    existing_nodes: list[EventNode],
+    new_clusters: list[ClusterRow],
+    *,
+    entity_tau: float = _DEFAULT_ENTITY_TAU,
+    window_s: float = _DEFAULT_WINDOW_S,
+) -> tuple[StoryGraph, set[str], set[str]]:
+    """Attach only the NEW clusters onto the EXISTING graph (the scalable steady state, #42).
+
+    Re-folding the whole corpus each tick can't scale — the snapshot outgrows NATS's payload cap,
+    re-embeds every fact, and is O(corpus). Instead we seed the graph with the nodes already built,
+    fold only the new clusters onto them, and emit the difference.
+
+    The graph is seeded with ``existing_nodes`` (so a new cluster can thread onto a story already in
+    flight) but with EMPTY edge/mapping collections, so after the fold ``graph.edges`` /
+    ``node_clusters`` / ``claim_node_links`` hold ONLY the new contributions — exactly the delta to
+    persist. New clusters are folded in ``earliest_ts`` order so develops/spawns/merges edges point
+    the right way. Pure: no I/O, no LLM.
+
+    Returns ``(graph, touched_node_ids, created_node_ids)`` — every node a new cluster landed on
+    (whose updated state must be upserted), and the subset that were freshly created.
+    """
+    graph = StoryGraph(nodes={n.id: n for n in existing_nodes})
+    touched: set[str] = set()
+    created: set[str] = set()
+    for cluster in sorted(new_clusters, key=lambda r: r.earliest_ts):
+        result = attach_cluster(cluster, graph, entity_tau=entity_tau, window_s=window_s)
+        if result.is_new_node:
+            created.add(result.node_id)
+        _apply(graph, cluster, result)
+        touched.add(result.node_id)
+    return graph, touched, created
+
+
 # ---------------------------------------------------------------------------
 # Claim<->node query helpers (#43)
 # ---------------------------------------------------------------------------

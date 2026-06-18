@@ -11,10 +11,17 @@ DRAFT-prompted extractor when an API key is present, else this heuristic.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterable
 
-from maat.pipeline.story_graph import ClusterRow, StoryGraph, fold_clusters
+from maat.pipeline.story_graph import (
+    ClusterRow,
+    EventNode,
+    StoryGraph,
+    fold_clusters,
+    fold_incremental,
+)
 
 # A leading sentence-start word we never want as the head of an entity ("The ECB" -> "ECB").
 _LEADING_STOP = {
@@ -146,3 +153,119 @@ def graph_payload(graph: StoryGraph) -> dict:
             for lk in graph.claim_node_links
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Incremental delta build + emission (#42 at scale — see story_graph.fold_incremental)
+# ---------------------------------------------------------------------------
+
+# Well under NATS's 1 MB max_payload; the rest of the budget covers the event envelope + JSON keys.
+_DELTA_MAX_BYTES = 700_000
+
+
+def build_graph_incremental(
+    existing_nodes: list[EventNode],
+    new_clusters: list[dict],
+    claim_text: dict[str, str],
+    claim_article: dict[str, str],
+    art_ts: dict[str, float],
+    embeddings: Iterable[Iterable[float]],
+    *,
+    entity_fn: Callable[[str], list[str]] = entity_spine_heuristic,
+) -> tuple[StoryGraph, set[str], set[str]]:
+    """Fold only the NEW clusters onto the already-built graph (the per-tick steady state).
+
+    ``existing_nodes`` are rehydrated from ``story_nodes`` (entity spine + persisted centroid);
+    ``new_clusters`` / ``embeddings`` are parallel and cover ONLY the clusters not yet threaded.
+    Returns ``(graph, touched, created)`` — the graph holds only the new edges/mappings, ``touched``
+    is every node a new cluster landed on, ``created`` the freshly-minted subset. Pure.
+    """
+    rows: list[ClusterRow] = []
+    for c, emb in zip(new_clusters, embeddings):
+        cl_ids = [str(x) for x in (c.get("claim_ids") or [])]
+        texts = [claim_text.get(cid, "") for cid in cl_ids]
+        ts = [art_ts.get(claim_article.get(cid, ""), 0.0) for cid in cl_ids]
+        earliest = min([t for t in ts if t] or [0.0])
+        rows.append(
+            cluster_row(c["id"], c.get("fact", ""), texts, cl_ids, emb, earliest, entity_fn=entity_fn)
+        )
+    graph, touched, created = fold_incremental(existing_nodes, rows)
+    # Headline a NEWLY created node with the shortest fact among its clusters (it names the event);
+    # an existing node keeps the headline it was built with (we don't carry its old facts here).
+    fact_by = {c["id"]: (c.get("fact") or "") for c in new_clusters}
+    for nid in created:
+        facts = [fact_by[cid] for cid in graph.node_clusters.get(nid, []) if fact_by.get(cid)]
+        if facts:
+            graph.nodes[nid].headline = min(facts, key=len)
+    return graph, touched, created
+
+
+def _node_dict(node: EventNode, *, include_centroid: bool) -> dict:
+    d = {
+        "id": node.id,
+        "headline": node.headline,
+        "entity_spine": node.entity_spine,
+        "first_seen": node.first_seen,
+        "last_updated": node.last_updated,
+        "cluster_count": node.cluster_count,
+    }
+    # The centroid is a ~1k-float vector; only carry it while the node is still ACTIVE (could accrue
+    # another cluster). Settled nodes leave it null — they'll never be an attachment candidate again.
+    if include_centroid and node.topic_embedding:
+        d["topic_embedding"] = list(node.topic_embedding)
+    return d
+
+
+def delta_payload(
+    graph: StoryGraph, touched: set[str], *, active_since: float = float("-inf")
+) -> dict:
+    """Serialise the incremental delta: the touched nodes (centroid attached only while still within
+    the attach window, ``last_updated >= active_since``) + the new edges / node↔cluster /
+    claim↔node rows. The kernel applies these with insert/upsert — no full replace."""
+    nodes = [
+        _node_dict(graph.nodes[nid], include_centroid=graph.nodes[nid].last_updated >= active_since)
+        for nid in touched
+    ]
+    return {
+        "nodes": nodes,
+        "edges": [{"kind": e.kind, "from_id": e.from_id, "to_id": e.to_id} for e in graph.edges],
+        "node_clusters": [
+            {"node_id": nid, "cluster_id": cid}
+            for nid in touched
+            for cid in graph.node_clusters.get(nid, [])
+        ],
+        "claim_node_links": [
+            {"claim_id": lk.claim_id, "node_id": lk.node_id, "cluster_id": lk.cluster_id}
+            for lk in graph.claim_node_links
+        ],
+    }
+
+
+def chunk_delta(
+    payload: dict, *, reset: bool = False, max_bytes: int = _DELTA_MAX_BYTES
+) -> list[dict]:
+    """Split a delta into ``story.graph.delta`` chunks each safely under the bus payload cap.
+
+    Items from all four lists are greedily packed across chunks (order is irrelevant — the kernel
+    inserts each row independently and idempotently). ``reset`` (truncate-first) rides ONLY on
+    chunk 0, so a multi-chunk full rebuild clears once and the remaining chunks append. A reset with
+    no rows still yields one (empty) chunk so the truncate happens.
+    """
+    keys = ("nodes", "edges", "node_clusters", "claim_node_links")
+    stream = [(k, item) for k in keys for item in payload.get(k, [])]
+    chunks: list[dict] = []
+    cur: dict = {k: [] for k in keys}
+    size = 0
+    for k, item in stream:
+        item_bytes = len(json.dumps(item)) + 8
+        if size and size + item_bytes > max_bytes:
+            chunks.append(cur)
+            cur = {k2: [] for k2 in keys}
+            size = 0
+        cur[k].append(item)
+        size += item_bytes
+    if size or not chunks:
+        chunks.append(cur)
+    if reset:
+        chunks[0]["reset"] = True
+    return chunks

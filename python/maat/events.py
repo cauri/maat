@@ -102,8 +102,16 @@ ARTICLE_TITLE_EN = "article.title_en"
 # Whole story-graph rebuild (#42/#43/#44, P4): the builder folds clusters into event-nodes +
 # typed edges (develops/spawns/merges) + claim↔node links and emits the full graph in ONE event;
 # maat-kerneld projects it atomically into story_nodes / story_edges / story_node_clusters /
-# claim_node_links so the feed can return THREADED stories.
+# claim_node_links so the feed can return THREADED stories. Superseded by STORY_GRAPH_DELTA for the
+# live path; kept for replay of historical events.
 STORY_GRAPH_REBUILT = "story.graph.rebuilt"
+
+# Incremental story-graph delta (#42 at scale): the full-snapshot rebuild above outgrew NATS's 1 MB
+# max_payload once the corpus passed ~1k clusters and silently stopped landing. The builder now folds
+# only the NEW clusters each tick and emits the difference, chunked under the payload cap; the kernel
+# applies each chunk with insert/upsert (no full replace). ``reset`` on a chunk truncates first, so a
+# deliberate full rebuild can still be streamed in chunks. Same projection tables as the rebuild.
+STORY_GRAPH_DELTA = "story.graph.delta"
 
 # Inferred primary country for a story (#189, P6): the curation geo-tagger (agents.geotag_agent)
 # fills the de-US re-ranker's gaps for clusters the TLD/language heuristic can't place, one event
