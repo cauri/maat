@@ -421,6 +421,73 @@ async fn record_and_project(pool: &PgPool, ev: &EventEnvelope, js_seq: i64) -> R
         tx.commit().await?;
     }
 
+    if ev.typ == "story.graph.delta" {
+        // Story graph at scale (#42): the builder folds only the NEW clusters each tick and emits
+        // the difference, chunked under NATS's payload cap (the whole-graph rebuild above outgrew
+        // it). Apply with insert/upsert — NO full replace — so the projection grows incrementally.
+        // A `reset` chunk truncates first (a deliberate full rebuild streamed in chunks); every
+        // insert is idempotent (on conflict do nothing) so a re-delivered chunk can't duplicate.
+        let d = &ev.data;
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let mut tx = pool.begin().await?;
+        if d.get("reset").and_then(|v| v.as_bool()).unwrap_or(false) {
+            for t in ["story_nodes", "story_edges", "story_node_clusters", "claim_node_links"] {
+                sqlx::query(&format!("delete from {t} where tenant_id = $1"))
+                    .bind(&ev.tenant_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        for n in d.get("nodes").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            // Upsert: a touched node carries its updated count/centroid/last_updated. The centroid is
+            // omitted once a node settles, so coalesce keeps the last one we stored.
+            sqlx::query(
+                "insert into story_nodes (id, tenant_id, headline, entity_spine, first_seen, last_updated, cluster_count, topic_embedding) \
+                 values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict (id) do update set \
+                   headline = excluded.headline, entity_spine = excluded.entity_spine, \
+                   last_updated = excluded.last_updated, cluster_count = excluded.cluster_count, \
+                   topic_embedding = coalesce(excluded.topic_embedding, story_nodes.topic_embedding)",
+            )
+            .bind(n.get("id").and_then(|v| v.as_str()))
+            .bind(&ev.tenant_id)
+            .bind(n.get("headline").and_then(|v| v.as_str()))
+            .bind(n.get("entity_spine").cloned().map(Json))
+            .bind(n.get("first_seen").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .bind(n.get("last_updated").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .bind(n.get("cluster_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
+            .bind(n.get("topic_embedding").cloned().map(Json))
+            .execute(&mut *tx)
+            .await?;
+        }
+        for e in d.get("edges").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            sqlx::query("insert into story_edges (tenant_id, kind, from_id, to_id) values ($1, $2, $3, $4) on conflict do nothing")
+                .bind(&ev.tenant_id)
+                .bind(e.get("kind").and_then(|v| v.as_str()))
+                .bind(e.get("from_id").and_then(|v| v.as_str()))
+                .bind(e.get("to_id").and_then(|v| v.as_str()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        for nc in d.get("node_clusters").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            sqlx::query("insert into story_node_clusters (tenant_id, node_id, cluster_id) values ($1, $2, $3) on conflict do nothing")
+                .bind(&ev.tenant_id)
+                .bind(nc.get("node_id").and_then(|v| v.as_str()))
+                .bind(nc.get("cluster_id").and_then(|v| v.as_str()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        for l in d.get("claim_node_links").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            sqlx::query("insert into claim_node_links (tenant_id, claim_id, node_id, cluster_id) values ($1, $2, $3, $4) on conflict do nothing")
+                .bind(&ev.tenant_id)
+                .bind(l.get("claim_id").and_then(|v| v.as_str()))
+                .bind(l.get("node_id").and_then(|v| v.as_str()))
+                .bind(l.get("cluster_id").and_then(|v| v.as_str()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+    }
+
     // --- Admin / operator-console projections (P8, F3) -------------------------------------
     // Operator fixes are events; we fold them like any other and set `corrected` so the
     // pipeline (claims.classified) will not overwrite the fix on a re-run.
