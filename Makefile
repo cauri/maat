@@ -56,6 +56,9 @@ acquire-rss:
 acquire-locales:
 	cd python && uv run python scripts/acquire_locales.py
 
+acquire-newsdata:
+	cd python && uv run python scripts/acquire_newsdata.py
+
 triage:
 	cd python && uv run python -m maat.agents.triage
 
