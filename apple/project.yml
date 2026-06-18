@@ -60,7 +60,12 @@ targets:
   # in-place without launching the app. It shares Maat/Shared (models, on-device services, StoryEntity)
   # with the app and carries its own copy of the bundled feed/sources fixtures so it works offline.
   MaatIntentsExtension:
-    type: app-extension
+    # App Intents (ExtensionKit) extension — NOT a legacy PluginKit `app-extension`. This product type
+    # makes XcodeGen embed the .appex into Maat.app/Extensions/ (not PlugIns/), so installd routes it
+    # through ExtensionKit and honours the EXAppExtensionAttributes / com.apple.appintents-extension
+    # point. Built as `app-extension` it lands in PlugIns/, where installd's PluginKit path demands a
+    # legacy NSExtension dict and rejects the install (MIInstallerErrorDomain 39 / AppexBundleMissingNSExtensionDict).
+    type: com.apple.product-type.extensionkit-extension
     supportedDestinations: [iOS, macOS]
     sources:
       - path: Maat/Shared

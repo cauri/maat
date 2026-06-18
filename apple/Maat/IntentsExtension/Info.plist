@@ -26,15 +26,14 @@
 	<!--
 	  App Intents extension (#83). The EXAppExtensionAttributes / appintents-extension point is what
 	  makes the launch-free intents in this target run out of the app's process, so Siri / Shortcuts /
-	  Spotlight answer in-place without launching Maat. EXPrincipalClass names the AppIntentsExtension
-	  principal (Maat/IntentsExtension/MaatIntentsExtension.swift) under the generated module name.
+	  Spotlight answer in-place without launching Maat. The entry point is the `@main` AppIntentsExtension
+	  principal (Maat/IntentsExtension/MaatIntentsExtension.swift); ExtensionKit locates it via the swift
+	  entry section in the executable, so no PluginKit-style EXPrincipalClass is declared.
 	-->
 	<key>EXAppExtensionAttributes</key>
 	<dict>
 		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.appintents-extension</string>
 	</dict>
-	<key>EXPrincipalClass</key>
-	<string>$(PRODUCT_MODULE_NAME).MaatIntentsExtension</string>
 </dict>
 </plist>
