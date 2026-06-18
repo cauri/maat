@@ -57,14 +57,18 @@ main{flex:1;min-width:0;width:100%;max-width:1120px;margin:0 auto;padding:34px 4
   main{padding:16px}
 }
 
-/* ── tooltips (on-page, hover) ──────────────────────────────────────────────── */
+/* ── tooltips (on-page, hover — appear after a ~0.6s delay, hide instantly) ─────── */
 [data-tip]{position:relative}
-[data-tip]:hover::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 8px);z-index:80;
+[data-tip]::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 8px);z-index:80;
   background:#1c1b19;color:#f4f2ee;font:400 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   text-transform:none;letter-spacing:normal;padding:9px 11px;border-radius:var(--radius-sm);
-  width:max-content;max-width:300px;white-space:normal;box-shadow:var(--shadow-lg);pointer-events:none}
-[data-tip]:hover::before{content:"";position:absolute;left:12px;top:calc(100% + 2px);
-  border:6px solid transparent;border-bottom-color:#1c1b19;z-index:81}
+  width:max-content;max-width:300px;white-space:normal;box-shadow:var(--shadow-lg);pointer-events:none;
+  opacity:0;visibility:hidden;transform:translateY(-3px);transition:opacity .14s,visibility .14s,transform .14s}
+[data-tip]::before{content:"";position:absolute;left:12px;top:calc(100% + 2px);
+  border:6px solid transparent;border-bottom-color:#1c1b19;z-index:81;pointer-events:none;
+  opacity:0;visibility:hidden;transition:opacity .14s,visibility .14s}
+[data-tip]:hover::after{opacity:1;visibility:visible;transform:translateY(0);transition-delay:.6s}
+[data-tip]:hover::before{opacity:1;visibility:visible;transition-delay:.6s}
 .tip{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
   border:1px solid var(--line);border-radius:50%;color:var(--mut);font:700 12px/1 sans-serif;
   font-style:normal;cursor:help;margin-left:6px;vertical-align:middle;flex:none}
@@ -136,7 +140,20 @@ label{font-size:14px}
 .sup{display:flex;gap:8px;align-items:baseline;padding:2px 0;font-size:14px}
 .sup-pct{font-weight:700;font-variant-numeric:tabular-nums;min-width:34px}
 .sup-pct.hi{color:var(--ok)}.sup-pct.mid{color:var(--warn)}.sup-pct.lo{color:var(--bad)}.sup-pct.floor{color:var(--bad)}
+.sup-pct.proj{color:var(--mut)}
 .sup-fact{color:var(--ink2)}
+.sup-orig{font-size:13px;color:var(--mut);margin-top:1px;line-height:1.4}
+.sup-more{margin-top:7px}
+.sup-more summary{cursor:pointer;font-size:13px;color:var(--acc);list-style:none;user-select:none}
+.sup-more summary::-webkit-details-marker{display:none}
+.sup-more[open] summary{margin-bottom:5px}
+/* feed legibility (#feed): English-first gloss, projection marking, sources label */
+.cfact-orig{font-size:14px;color:var(--mut);margin-top:3px;line-height:1.45}
+.sources-head{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);font-weight:700;margin:11px 0 5px}
+.conf.proj .cfill{background:var(--mut)}
+.conf.proj .cpct{color:var(--ink2)}
+.conf.proj .label{background:var(--soft);color:var(--ink2)}
+.conf[data-tip]{cursor:help}
 
 /* ── claims / badges ───────────────────────────────────────────────────────── */
 .claim{padding:9px 0;border-top:1px solid var(--line)}

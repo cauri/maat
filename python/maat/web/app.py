@@ -271,9 +271,10 @@ async def feed(ok: str = "") -> str:
     )
     clusters = await pool.fetch(
         "select id, fact, sources, originators, independent_originators, has_primary, "
-        "confidence, extremity from clusters order by confidence desc, independent_originators desc"
+        "confidence, extremity, claim_ids from clusters order by confidence desc, independent_originators desc"
     )
     id_to_source = {a["id"]: a["source"] for a in articles}
+    claims_by_id = {str(c["id"]): c for c in claims}
     by_article: dict[str, list] = {}
     for c in claims:
         by_article.setdefault(c["article_id"], []).append(c)
@@ -283,7 +284,15 @@ async def feed(ok: str = "") -> str:
         d = _jobj(r["data"])
         if d.get("article_id") and d.get("title_en"):
             title_en[d["article_id"]] = d["title_en"]
-    return _feed_page(articles, by_article, clusters, id_to_source, title_en=title_en, flash=ok)
+    # English pivots of non-English CLAIMS (#240, computed once per claim for cross-lingual
+    # clustering). We reuse them to gloss the stories panel — no new translation calls.
+    pivots: dict[str, str] = {}
+    for r in await pool.fetch("select data from events where type = 'claim.pivot'"):
+        d = _jobj(r["data"])
+        if d.get("claim_id") and d.get("text_en"):
+            pivots[d["claim_id"]] = d["text_en"]
+    return _feed_page(articles, by_article, clusters, id_to_source,
+                      title_en=title_en, claims_by_id=claims_by_id, pivots=pivots, flash=ok)
 
 
 @app.get("/cluster/{cid}", response_class=HTMLResponse)
@@ -304,7 +313,12 @@ async def cluster_detail(cid: str, ok: str = "") -> str:
     others = await pool.fetch(
         "select id, fact from clusters where id <> $1 order by created_at desc", cid
     )
-    return _doc(_cluster_page(cl, members, id_to_source, others), "cluster", "content", flash=ok)
+    pivots: dict[str, str] = {}
+    for r in await pool.fetch("select data from events where type = 'claim.pivot'"):
+        d = _jobj(r["data"])
+        if d.get("claim_id") and d.get("text_en"):
+            pivots[d["claim_id"]] = d["text_en"]
+    return _doc(_cluster_page(cl, members, id_to_source, others, pivots), "cluster", "content", flash=ok)
 
 
 @app.get("/claim/{clid}", response_class=HTMLResponse)
@@ -1854,18 +1868,64 @@ def _group_stories(clusters) -> list[list]:
     return stories
 
 
-def _conf_bar(cl) -> str:
+def _fact_en(cl, claims_by_id, pivots) -> str | None:
+    """English gloss of a cluster's fact, reusing the #240 claim pivots (no render-time translation).
+    Match the fact back to its source claim by text, then look up that claim's stored English.
+    Returns None when the fact is already English (or no pivot exists)."""
+    fact = (cl["fact"] or "").strip()
+    for cid in _jload(_rget(cl, "claim_ids")):
+        c = claims_by_id.get(str(cid))
+        if c and (c["text"] or "").strip() == fact:
+            en = (pivots.get(str(cid)) or "").strip()
+            return en if en and en != fact else None
+    return None
+
+
+def _cluster_kind(cl, claims_by_id) -> str:
+    """The cluster's dominant claim kind — 'projection' (forecast/opinion/analysis, §5.3) vs
+    'fact'. Corroboration is a truth signal for facts but NOT for projections, so the feed marks
+    projections instead of showing them a truth %."""
+    kinds = [(claims_by_id.get(str(cid)) or {}).get("kind") for cid in _jload(_rget(cl, "claim_ids"))]
+    kinds = [k for k in kinds if k]
+    return "projection" if kinds and kinds.count("projection") > kinds.count("fact") else "fact"
+
+
+def _fact_block(cl, claims_by_id, pivots, *, cls: str = "cfact") -> str:
+    """The fact — English first (per cauri), original language muted beneath when non-English."""
+    fact = html.escape(cl["fact"] or "")
+    cid = _rget(cl, "id")
+    en = _fact_en(cl, claims_by_id, pivots)
+    head = html.escape(en) if en else fact
+    head_html = f'<a class="clink" href="/cluster/{cid}">{head}</a>' if cid else head
+    orig = (f'<div class="cfact-orig" title="Original language — the English above is display-only, '
+            f'never scored">{fact}</div>') if en else ""
+    return f'<div class="{cls}">{head_html}</div>{orig}'
+
+
+def _conf_bar(cl, *, kind: str = "fact") -> str:
     conf = float(cl["confidence"] or 0.0)
     pct = round(conf * 100)
     label, tier = _confidence_label(
-        conf,
-        independent_originators=cl["independent_originators"],
-        has_primary=cl["has_primary"],
-        extremity=cl["extremity"],
+        conf, independent_originators=cl["independent_originators"],
+        has_primary=cl["has_primary"], extremity=cl["extremity"],
     )
+    if kind == "projection":  # a forecast/opinion — corroboration is NOT truth here
+        tip = ("A forecast or opinion, not a checkable fact. Its accuracy is judged over time, not "
+               "by how many outlets repeat it — the bar shows how widely it's echoed, not truth.")
+        return (
+            f'<div class="conf proj" data-tip="{html.escape(tip)}">'
+            f'<div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
+            f'<span class="cpct">{pct}%</span>'
+            f'<span class="label proj">forecast · echoed, not verified</span></div>'
+        )
+    short = (label.split(" · ")[0].replace("Not yet established", "Not established")
+             .replace("Thinly corroborated", "Thin").replace("Well corroborated", "Established"))
+    tip = html.escape(derivation_explain(cl["independent_originators"], cl["has_primary"],
+                                         cl["extremity"] or "notable"))
     return (
-        f'<div class="conf {tier}"><div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
-        f'<span class="cpct">{pct}%</span><span class="label {tier}">{html.escape(label)}</span></div>'
+        f'<div class="conf {tier}" data-tip="{tip}">'
+        f'<div class="cbar"><div class="cfill" style="width:{pct}%"></div></div>'
+        f'<span class="cpct">{pct}%</span><span class="label {tier}">{html.escape(short)}</span></div>'
     )
 
 
@@ -1882,62 +1942,81 @@ def _originator_rows(cl, id_to_source) -> str:
     return "".join(rows)
 
 
-def _headline(cl, id_to_source) -> str:
+def _headline(cl, id_to_source, claims_by_id, pivots) -> str:
+    kind = _cluster_kind(cl, claims_by_id)
     primary = _badge("primary source", "fact") if cl["has_primary"] else ""
     n_src = len(_jload(cl["sources"]))
     extremity = cl["extremity"] or "notable"
     ex_text = "extraordinary · bar raised" if extremity == "extraordinary" else f"{extremity} claim"
-    ex_badge = f'<span class="ex {extremity}">{html.escape(ex_text)}</span>'
-    cid = _rget(cl, "id")
-    fact = html.escape(cl["fact"])
-    fact_html = f'<a class="clink" href="/cluster/{cid}">{fact}</a>' if cid else fact
+    ex_tip = ("How big a claim this is. Bigger claims must earn MORE independent corroboration to "
+              "clear — extraordinary claims, extraordinary evidence.")
+    ex_badge = f'<span class="ex {extremity}" data-tip="{html.escape(ex_tip)}">{html.escape(ex_text)}</span>'
+    kind_badge = ('<span class="b proj" data-tip="A forecast or opinion, not a checkable fact — judged '
+                  'for accuracy over time, not corroboration.">forecast</span>' if kind == "projection" else "")
+    src_tip = ("Outlets carrying this, collapsed to INDEPENDENT originators: wire reprints of one report "
+               "count once, not many. Confidence comes from independent corroboration, never raw spread.")
     return (
-        f'<div class="cfact">{fact_html}</div>'
-        f"{_conf_bar(cl)}"
-        f'<div class="cmeta"><b>{n_src}</b> sources &rarr; '
-        f'<b>{cl["independent_originators"]}</b> independent originators {ex_badge} {primary}</div>'
+        f'{_fact_block(cl, claims_by_id, pivots)}'
+        f"{_conf_bar(cl, kind=kind)}"
+        f'<div class="cmeta" data-tip="{html.escape(src_tip)}"><b>{n_src}</b> sources &rarr; '
+        f'<b>{cl["independent_originators"]}</b> independent originators {ex_badge} {kind_badge} {primary}</div>'
+        f'<div class="sources-head">Sources</div>'
         f'<div class="origs">{_originator_rows(cl, id_to_source)}</div>'
     )
 
 
-def _supporting(cl) -> str:
+def _supporting(cl, claims_by_id, pivots) -> str:
     conf = float(cl["confidence"] or 0.0)
     pct = round(conf * 100)
+    kind = _cluster_kind(cl, claims_by_id)
     _, tier = _confidence_label(conf)
     cid = _rget(cl, "id")
-    fact = html.escape(cl["fact"])
-    fact_html = f'<a class="clink" href="/cluster/{cid}">{fact}</a>' if cid else fact
+    fact = html.escape(cl["fact"] or "")
+    en = _fact_en(cl, claims_by_id, pivots)
+    head = html.escape(en) if en else fact
+    head_html = f'<a class="clink" href="/cluster/{cid}">{head}</a>' if cid else head
+    orig = f'<div class="sup-orig">{fact}</div>' if en else ""
+    cls = "proj" if kind == "projection" else tier
+    title = "forecast — echoed, not verified" if kind == "projection" else "confidence"
     return (
-        f'<div class="sup"><span class="sup-pct {tier}">{pct}%</span>'
-        f'<span class="sup-fact">{fact_html}</span></div>'
+        f'<div class="sup"><span class="sup-pct {cls}" title="{title}">{pct}%</span>'
+        f'<span class="sup-fact">{head_html}{orig}</span></div>'
     )
 
 
-def _story(group, id_to_source) -> str:
-    head = _headline(group[0], id_to_source)
+def _story(group, id_to_source, claims_by_id, pivots) -> str:
+    head = _headline(group[0], id_to_source, claims_by_id, pivots)
+    rest = group[1:]
     sup = ""
-    if len(group) > 1:
-        items = "".join(_supporting(c) for c in group[1:])
-        sup = f'<div class="sup-wrap"><div class="sup-head">Also corroborated in this story</div>{items}</div>'
+    if rest:
+        shown = "".join(_supporting(c, claims_by_id, pivots) for c in rest[:5])
+        more = ""
+        if len(rest) > 5:
+            extra = "".join(_supporting(c, claims_by_id, pivots) for c in rest[5:])
+            more = (f'<details class="sup-more"><summary>Show all {len(rest)} related facts</summary>'
+                    f'{extra}</details>')
+        sup = ('<div class="sup-wrap"><div class="sup-head" data-tip="Other facts threaded into the same '
+               'story (the story graph), each scored on its own.">Also in this story</div>'
+               f'{shown}{more}</div>')
     return f'<div class="story">{head}{sup}</div>'
 
 
-def _feed_page(articles, by_article, clusters, id_to_source, title_en=None, flash: str = "") -> str:
+def _feed_page(articles, by_article, clusters, id_to_source, title_en=None, claims_by_id=None,
+               pivots=None, flash: str = "") -> str:
+    title_en = title_en or {}
+    claims_by_id = claims_by_id or {}
+    pivots = pivots or {}
     panel = ""
-    n_stories = 0
     if clusters:
         stories = _group_stories(clusters)
-        n_stories = len(stories)
-        items = "".join(_story(g, id_to_source) for g in stories)
+        items = "".join(_story(g, id_to_source, claims_by_id, pivots) for g in stories)
         panel = (
-            '<section class="panel"><h3>Stories · corroboration over spread, confidence on '
-            f"every claim</h3>{items}</section>"
+            f'<section class="panel"><h3>Stories <span class="mut">· {len(stories)}</span></h3>{items}</section>'
         )
-    cards = "".join(_card(a, by_article.get(a["id"], []), (title_en or {}).get(a["id"], "")) for a in articles)
+    cards = "".join(_card(a, by_article.get(a["id"], []), title_en.get(a["id"], "")) for a in articles)
     if not cards:
         cards = '<p class="empty">No stories yet — pull some news from the Updates tab.</p>'
-    subtitle = f"{n_stories or len(articles)} stories · corroboration over spread · confidence on every claim"
-    return _doc(panel + cards, subtitle, "content", flash=flash)
+    return _doc(panel + cards, "", "content", flash=flash)
 
 
 # --- inspectors (F2) + correction forms (F3) ---
@@ -1950,7 +2029,9 @@ def _opts(others) -> str:
     )
 
 
-def _cluster_page(cl, members, id_to_source, others) -> str:
+def _cluster_page(cl, members, id_to_source, others, pivots=None) -> str:
+    pivots = pivots or {}
+    claims_by_id = {str(m["id"]): m for m in members}
     deriv = derivation_explain(
         cl["independent_originators"], cl["has_primary"], cl["extremity"] or "notable"
     )
@@ -1999,7 +2080,7 @@ def _cluster_page(cl, members, id_to_source, others) -> str:
         )
     return (
         '<div class="ins">'
-        f'{_headline(cl, id_to_source)}'
+        f'{_headline(cl, id_to_source, claims_by_id, pivots)}'
         f'<div class="deriv" title="The same calculation that produced the score above">'
         f'How this score was reached: {html.escape(deriv)}</div>'
         f'{split}{merge}'
