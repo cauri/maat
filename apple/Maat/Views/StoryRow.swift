@@ -27,6 +27,7 @@ private extension Story.ConfidenceLevel {
 /// The featured lead story at the top of Today.
 struct LeadStoryCard: View {
     var story: Story
+    var headline: String
     @Environment(AppSettings.self) private var settings
 
     private var heroURL: URL? {
@@ -43,7 +44,7 @@ struct LeadStoryCard: View {
                 if story.hasPrimary { Chip(text: "primary-source backed", style: .attributed) }
                 Spacer(minLength: 0)
             }
-            Text(story.fact)
+            Text(headline)
                 .font(.system(.title2, design: .serif).weight(.semibold))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
@@ -61,6 +62,7 @@ struct LeadStoryCard: View {
 /// A standard story cell in the Today list.
 struct StoryRow: View {
     var story: Story
+    var headline: String
     @Environment(AppSettings.self) private var settings
 
     private var thumbURL: URL? {
@@ -70,7 +72,7 @@ struct StoryRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(story.fact)
+                Text(headline)
                     .font(.system(.headline, design: .serif))
                     .foregroundStyle(Palette.ink)
                     .fixedSize(horizontal: false, vertical: true)
@@ -85,8 +87,8 @@ struct StoryRow: View {
                     if story.extremity == .extraordinary {
                         Chip(text: "extraordinary claim", style: .extraordinary)
                     }
-                    if story.primaryLanguage != "en" {
-                        Chip(text: "original: \(story.primaryLanguage.uppercased())", style: .neutral)
+                    if !settings.reads(story.primaryLanguage) {
+                        Chip(text: "original: \(AppSettings.languageName(story.primaryLanguage))", style: .neutral)
                     }
                     Spacer(minLength: 0)
                 }

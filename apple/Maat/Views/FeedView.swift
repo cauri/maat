@@ -4,7 +4,9 @@ struct FeedView: View {
     @Environment(FeedStore.self) private var feed
     @Environment(TopicStore.self) private var topics
     @Environment(AppRouter.self) private var router
+    @Environment(AppSettings.self) private var settings
     @State private var showSettings = false
+    @State private var titler = FeedTitleTranslator()
 
     var body: some View {
         @Bindable var router = router
@@ -22,8 +24,10 @@ struct FeedView: View {
 
                     let stories = feed.displayStories
                     if let lead = stories.first {
-                        NavigationLink(value: lead) { LeadStoryCard(story: lead) }
-                            .buttonStyle(.plain)
+                        NavigationLink(value: lead) {
+                            LeadStoryCard(story: lead, headline: titler.headline(for: lead))
+                        }
+                        .buttonStyle(.plain)
 
                         if stories.count > 1 {
                             Text("More stories")
@@ -33,8 +37,10 @@ struct FeedView: View {
                                 .padding(.top, 20)
                         }
                         ForEach(stories.dropFirst()) { story in
-                            NavigationLink(value: story) { StoryRow(story: story) }
-                                .buttonStyle(.plain)
+                            NavigationLink(value: story) {
+                                StoryRow(story: story, headline: titler.headline(for: story))
+                            }
+                            .buttonStyle(.plain)
                             Divider().overlay(Palette.line)
                         }
                     } else if !feed.isLoading {
@@ -68,7 +74,33 @@ struct FeedView: View {
                 await feed.applyRerank(FoundationModelsReranker(), topics: topics.topics)
                 await feed.refreshSources()
             }
+            #if canImport(Translation)
+            .translationTask(titler.controller.configuration) { session in
+                await titler.controller.fulfill(using: session)
+            }
+            #endif
+            .task(id: titleSyncKey) { await syncTitles() }
         }
+    }
+
+    /// Re-key the on-device headline translation when the feed or the reader's languages change.
+    private var titleSyncKey: String {
+        feed.displayStories.map(\.id).joined(separator: ",") + "|"
+            + settings.preferredLanguages.joined(separator: ",")
+    }
+
+    private func syncTitles() async {
+        let cloud = settings.apiBaseURL.isEmpty
+            ? nil
+            : URL(string: settings.apiBaseURL).map { CloudTranslator(baseURL: $0) }
+        await titler.sync(
+            feed.displayStories,
+            target: settings.displayLanguageCode,
+            preferredSignature: settings.preferredLanguages.joined(separator: ","),
+            reads: { settings.reads($0) },
+            preferOnDevice: settings.preferOnDeviceTranslation,
+            cloud: cloud
+        )
     }
 }
 

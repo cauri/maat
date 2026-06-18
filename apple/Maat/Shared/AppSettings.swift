@@ -33,9 +33,32 @@ final class AppSettings {
         didSet { defaults.set(preferOnDeviceTranslation, forKey: Keys.onDevice) }
     }
 
-    /// Target language for display translation. Defaults to the device language.
-    var displayLanguageCode: String {
-        didSet { defaults.set(displayLanguageCode, forKey: Keys.lang) }
+    /// Reading languages in preference order (PLAN §6 — per-user, on-device). The FIRST is the
+    /// translation TARGET for display; a title already in ANY of these is shown as-is, never
+    /// translated (#54). Persisted; nothing here leaves the device.
+    var preferredLanguages: [String] {
+        didSet { defaults.set(preferredLanguages, forKey: Keys.langs) }
+    }
+
+    /// Primary reading language — the target every non-preferred title/headline is translated into.
+    var displayLanguageCode: String { preferredLanguages.first ?? "en" }
+
+    /// True when `language` ("fr", "en-GB", "pt-BR", …) is one the reader already reads, so a title in
+    /// it is left in its original language rather than translated.
+    func reads(_ language: String) -> Bool {
+        let code = AppSettings.baseCode(language)
+        return !code.isEmpty && preferredLanguages.contains { AppSettings.baseCode($0) == code }
+    }
+
+    /// Base ISO code, region/script dropped: "en-GB" -> "en", "pt-BR" -> "pt".
+    nonisolated static func baseCode(_ s: String) -> String {
+        String(s.lowercased().split(separator: "-").first ?? "")
+    }
+
+    /// Full localised language name in the reader's own locale: "en" -> "English", "ja" -> "Japanese".
+    nonisolated static func languageName(_ code: String) -> String {
+        Locale.current.localizedString(forLanguageCode: baseCode(code))?.localizedCapitalized
+            ?? code.uppercased()
     }
 
     private let defaults: UserDefaults
@@ -44,8 +67,10 @@ final class AppSettings {
         self.defaults = defaults
         apiBaseURL = defaults.string(forKey: Keys.api) ?? Self.defaultAPIBaseURL
         preferOnDeviceTranslation = defaults.object(forKey: Keys.onDevice) as? Bool ?? true
-        displayLanguageCode = defaults.string(forKey: Keys.lang)
-            ?? Locale.current.language.languageCode?.identifier ?? "en"
+        let device = Locale.current.language.languageCode?.identifier ?? "en"
+        // Migrate the pre-#54 single `displayLanguageCode` into the ordered list on first launch.
+        preferredLanguages = defaults.stringArray(forKey: Keys.langs)
+            ?? [defaults.string(forKey: Keys.lang) ?? device]
     }
 
     func makeFeedService() -> FeedService {
@@ -69,8 +94,18 @@ final class AppSettings {
     private enum Keys {
         static let api = "maat.apiBaseURL"
         static let onDevice = "maat.preferOnDeviceTranslation"
-        static let lang = "maat.displayLanguageCode"
+        static let lang = "maat.displayLanguageCode"        // legacy (single) — migrated to `langs`
+        static let langs = "maat.preferredLanguages"
     }
+}
+
+/// The reading languages offered in Settings (#54). A broad curated set spanning Maat's locales (the
+/// on-device translator handles any pair the OS has a model for); each shown by full localised name.
+enum LanguageCatalog {
+    static let codes: [String] = [
+        "en", "es", "fr", "de", "it", "pt", "nl", "ru", "uk", "pl", "tr",
+        "ar", "fa", "he", "hi", "ur", "zh", "ja", "ko", "id", "vi", "th", "sw",
+    ]
 }
 
 /// The reader's natural-language topics (§6 — per-user, on-device). These steer the on-device

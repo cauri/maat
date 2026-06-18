@@ -128,3 +128,43 @@ final class TranslationController {
     }
     #endif
 }
+
+/// Translates Today-feed headlines (the corroborated facts) into the reader's PRIMARY language on
+/// device, skipping any story already in a language they read (#54). View-bound like
+/// `TranslationController`: the feed must host
+/// `.translationTask(titler.controller.configuration) { await titler.controller.fulfill(using: $0) }`.
+@MainActor
+@Observable
+final class FeedTitleTranslator {
+    private(set) var titles: [String: String] = [:]   // story id -> headline in the primary language
+    let controller = TranslationController()
+    private var signature = ""
+    private var translating = false
+
+    /// The headline to show for a story: its primary-language translation when we have one, else the
+    /// original fact (shown while a translation is still resolving, or when the story is already read).
+    func headline(for story: Story) -> String { titles[story.id] ?? story.fact }
+
+    /// Translate not-yet-done, non-preferred-language headlines into `target`. Idempotent; safe to call
+    /// on every feed/preference change. Changing the preferred set clears the cache so it re-translates
+    /// (a story now in a read language reverts to its original). `reads` decides which stories to skip.
+    func sync(_ stories: [Story], target: String, preferredSignature: String,
+              reads: (String) -> Bool, preferOnDevice: Bool, cloud: CloudTranslator?) async {
+        if preferredSignature != signature {
+            signature = preferredSignature
+            titles.removeAll()
+        }
+        guard !translating else { return }
+        let todo = stories.filter { titles[$0.id] == nil && !reads($0.primaryLanguage) }
+        guard !todo.isEmpty else { return }
+        translating = true
+        defer { translating = false }
+        controller.preferOnDevice = preferOnDevice
+        controller.cloud = cloud
+        let out = await controller.translate(todo.map(\.fact), to: target, from: nil)
+        guard out.count == todo.count else { return }
+        for (story, translated) in zip(todo, out) where !translated.isEmpty {
+            titles[story.id] = translated
+        }
+    }
+}

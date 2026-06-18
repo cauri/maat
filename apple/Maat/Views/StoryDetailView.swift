@@ -23,8 +23,10 @@ struct StoryDetailView: View {
     @State private var summarizing = false
 
     @State private var translator = TranslationController()
+    @State private var titleTranslator = TranslationController()   // auto preferred-language title (#54)
     @State private var showTranslated = false
     @State private var translating = false
+    @State private var autoTitle: [String: String] = [:]
     @State private var translatedTitle: [String: String] = [:]
     @State private var translatedBody: [String: String] = [:]
     @State private var translatedClaims: [String: String] = [:]
@@ -56,11 +58,13 @@ struct StoryDetailView: View {
     }
 
     private var articleLanguage: String { selectedArticle?.language ?? s.primaryLanguage }
-    private var needsTranslation: Bool { articleLanguage != settings.displayLanguageCode }
+    private var needsTranslation: Bool { !settings.reads(articleLanguage) }
 
     private var displayTitle: String {
         let original = selectedArticle?.title ?? s.fact
-        if showTranslated, let id = selectedArticle?.id, let t = translatedTitle[id] { return t }
+        guard let id = selectedArticle?.id else { return original }
+        if showTranslated, let t = translatedTitle[id] { return t }   // full manual translation
+        if let t = autoTitle[id] { return t }                          // auto preferred-language title (#54)
         return original
     }
 
@@ -129,8 +133,12 @@ struct StoryDetailView: View {
         .translationTask(translator.configuration) { session in
             await translator.fulfill(using: session)
         }
+        .translationTask(titleTranslator.configuration) { session in
+            await titleTranslator.fulfill(using: session)
+        }
         #endif
         .task { await load() }
+        .task(id: selectedArticleID) { await autoTranslateTitle() }
         .onAppear {
             openedAt = .now
             analytics.record(.storyOpened, storyID: story.id)
@@ -184,8 +192,8 @@ struct StoryDetailView: View {
                     .font(.caption).foregroundStyle(rating.band.color)
             }
             Spacer(minLength: 0)
-            if articleLanguage != "en" {
-                Text(articleLanguage.uppercased()).font(.caption2).foregroundStyle(Palette.muted)
+            if !settings.reads(articleLanguage) {
+                Text(AppSettings.languageName(articleLanguage)).font(.caption2).foregroundStyle(Palette.muted)
             }
         }
     }
@@ -206,8 +214,8 @@ struct StoryDetailView: View {
                 if translating { ProgressView() }
                 Image(systemName: "character.bubble")
                 Text(showTranslated
-                     ? "Show original (\(articleLanguage.uppercased()))"
-                     : "Translate to \(settings.displayLanguageCode.uppercased())")
+                     ? "Show original (\(AppSettings.languageName(articleLanguage)))"
+                     : "Translate to \(AppSettings.languageName(settings.displayLanguageCode))")
             }
         }
         .buttonStyle(.bordered)
@@ -393,6 +401,21 @@ struct StoryDetailView: View {
         }
         if selectedArticleID == nil { selectedArticleID = defaultArticle?.id }
         await summarize()
+    }
+
+    /// Auto-translate the article's title into the reader's primary language (#54) — shown in place of
+    /// the original unless its language is one the reader already reads. On-device; silently keeps the
+    /// original on failure. Re-runs when the reader switches outlets.
+    private func autoTranslateTitle() async {
+        guard let article = selectedArticle, !settings.reads(article.language),
+              autoTitle[article.id] == nil else { return }
+        let title = article.title ?? s.fact
+        guard !title.isEmpty else { return }
+        titleTranslator.preferOnDevice = settings.preferOnDeviceTranslation
+        titleTranslator.cloud = settings.apiBaseURL.isEmpty
+            ? nil : URL(string: settings.apiBaseURL).map { CloudTranslator(baseURL: $0) }
+        let out = await titleTranslator.translate([title], to: settings.displayLanguageCode, from: article.language)
+        if let translated = out.first, !translated.isEmpty { autoTitle[article.id] = translated }
     }
 
     private func summarize() async {
