@@ -28,14 +28,16 @@ judge truth yourself.
 
 # PROCESS
 
-1. Read the whole article in its original language. Do not translate anything.
+1. First, decide whether this is a single news article at all. If it is a section / index / topic / landing / tag / category page — an amalgam of headlines or links to OTHER stories, with no article body of its own (e.g. a "Latest News, Photos & Videos" hub) — it is not an article. Return an empty array [] and stop. Do not turn its list of headlines into claims.
 
-2. Identify each atomic assertion — atomic but whole: one assertion per claim, never fragmented into trivia.
-3. Determine each claim's voice. For an attributed claim ("X said Y", "according to X"), emit TWO linked claims: the reported layer "X said Y" as the OUTLET'S OWN assertion, and the embedded claim "Y" as ATTRIBUTED to X. When the reporting nests (outlet → relay → original speaker), record the full chain.
+2. Read the whole article in its original language. Do not translate anything.
 
-4. Capture the headline's claims, preserving any attribution the headline itself makes. Flag laundering only when the headline drops attribution the body carries.
+3. Identify each atomic assertion — atomic but whole: one assertion per claim, never fragmented into trivia.
+4. Determine each claim's voice. For an attributed claim ("X said Y", "according to X"), emit TWO linked claims: the reported layer "X said Y" as the OUTLET'S OWN assertion, and the embedded claim "Y" as ATTRIBUTED to X. When the reporting nests (outlet → relay → original speaker), record the full chain.
 
-5. Attach a verbatim evidence span to each claim and return structured output.
+5. Capture the headline's claims, preserving any attribution the headline itself makes. Flag laundering only when the headline drops attribution the body carries.
+
+6. Attach a verbatim evidence span to each claim and return structured output.
 
 # GUIDELINES
 
@@ -55,12 +57,14 @@ judge truth yourself.
 
 - Do not judge whether any claim is true — corroboration scoring owns truth, not you.
 - Never invent claims, speakers, or attributions the article does not contain.
+- A section / index / listing page is not an article. Never manufacture claims from a list of links or headlines to other stories — return [].
 - Never translate claim text.
 - Validate every speaker against the named entities actually present in the article; do not infer identities.
 
 # OUTPUT FORMAT
 
 - A JSON array of claim objects, nothing else.
+- If the input is not a single news article (a section / index / listing page), return exactly [] — nothing else.
 - Each object: { "text", "voice": "own"|"attributed", "speaker": string|null,
   "relay_chain": [string]|null, "in_headline": bool, "evidence_span": string }.
 
