@@ -31,9 +31,11 @@ struct SourcesView: View {
 
 struct SourceRow: View {
     var rating: SourceRating
+    @Environment(AppSettings.self) private var settings
 
     var body: some View {
         HStack(spacing: 12) {
+            SourceLogo(url: settings.sourceIconURL(domain: rating.name), name: rating.name)
             VStack(alignment: .leading, spacing: 2) {
                 Text(rating.name)
                     .font(.subheadline.weight(.medium))
@@ -48,6 +50,43 @@ struct SourceRow: View {
                 .frame(width: 56, height: 18)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// An outlet's favicon (square, rounded), loaded through the box proxy. Decorative and quiet: a
+/// neutral tile while loading, and a drawn lettered chip on failure — the box's monogram is an SVG
+/// the system image loader can't decode, so the chip is rendered natively here. Never blocks the row.
+struct SourceLogo: View {
+    let url: URL?
+    let name: String
+    var size: CGFloat = 28
+
+    var body: some View {
+        AsyncImage(url: url, transaction: Transaction(animation: .easeInOut(duration: 0.2))) { phase in
+            switch phase {
+            case .success(let image):
+                image.resizable().scaledToFit()
+            case .empty:
+                RoundedRectangle(cornerRadius: 6).fill(Palette.line)  // loading
+            default:
+                monogram
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityHidden(true)
+    }
+
+    private var monogram: some View {
+        let trimmed = name.hasPrefix("www.") ? String(name.dropFirst(4)) : name
+        let letter = String(trimmed.prefix(1)).uppercased()
+        return RoundedRectangle(cornerRadius: 6)
+            .fill(Palette.line)
+            .overlay(
+                Text(letter.isEmpty ? "?" : letter)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Palette.muted)
+            )
     }
 }
 

@@ -71,6 +71,7 @@ from maat.pipeline.corroborate import (
 )
 from maat.providers import seam
 from maat.serving import admin_auth
+from maat.serving import favicon
 from maat.serving import spend as spend_mod
 from maat.serving.feed import feed_router
 from maat.serving.social_api import social_router
@@ -2866,60 +2867,19 @@ def _reputation_cell(rep, fallback: float | None) -> str:
 
 
 # ── Source logos (favicon proxy, #sources) ───────────────────────────────────────────────────
-# Show each outlet's favicon in the Sources list. Fetched + cached SERVER-SIDE so the operator's
-# browser only ever talks to the box (privacy #1 — never load third-party images directly), with a
-# tidy lettered monogram when an outlet has no usable favicon.
-_ICON_CACHE: dict[str, tuple[bytes, str]] = {}
-_ICON_COLORS = ("#4263eb", "#1098ad", "#0ca678", "#e8590c", "#7048e8", "#c2255c", "#a8792e", "#3b5bdb")
-
-
-def _icon_monogram(domain: str) -> bytes:
-    """A deterministic lettered chip when no favicon resolves — reads as intentional, not broken."""
-    base = (domain or "").lower()
-    if base.startswith("www."):
-        base = base[4:]
-    letter = html.escape((base[:1] or "?").upper())
-    color = _ICON_COLORS[(sum(base.encode()) % len(_ICON_COLORS)) if base else 0]
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
-        f'<rect width="32" height="32" rx="7" fill="{color}"/>'
-        f'<text x="16" y="23" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" '
-        f'font-size="18" font-weight="600" fill="#fff">{letter}</text></svg>'
-    ).encode()
-
-
-def _valid_domain(d: str) -> bool:
-    return bool(d) and len(d) <= 253 and all(c.isalnum() or c in ".-" for c in d) and "." in d
+# Each outlet's favicon for the Sources list, served from the box so the operator's browser never
+# loads a third-party image directly (privacy #1). One implementation in maat.serving.favicon, shared
+# with the PUBLIC app endpoint (/api/v2/source-icon) so console and app show the same logos.
+_icon_monogram = favicon.monogram      # kept as module aliases for the tests
+_valid_domain = favicon.valid_domain
 
 
 @app.get("/source-icon")
 async def source_icon(d: str = "") -> Response:
-    """Favicon for one outlet domain — fetched once via DuckDuckGo's icon service, cached in-process,
-    and served from the box so the browser never touches a third party (privacy #1). Lettered
-    monogram fallback on any miss, so every row always shows something tidy."""
-    dom = (d or "").strip().lower()
-    headers = {"Cache-Control": "public, max-age=86400"}
-    if not _valid_domain(dom):
-        return Response(_icon_monogram(dom), media_type="image/svg+xml", headers=headers)
-    if dom in _ICON_CACHE:
-        body, ctype = _ICON_CACHE[dom]
-        return Response(body, media_type=ctype, headers=headers)
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=4.0, follow_redirects=True) as http:
-            r = await http.get(f"https://icons.duckduckgo.com/ip3/{dom}.ico")
-        ctype = r.headers.get("content-type", "").split(";")[0].strip()
-        # The service hands back a tiny blank placeholder for unknown domains — treat small or
-        # non-image payloads as a miss and fall through to the monogram.
-        if r.status_code == 200 and ctype.startswith("image/") and len(r.content) > 100:
-            _ICON_CACHE[dom] = (r.content, ctype)
-            return Response(r.content, media_type=ctype, headers=headers)
-    except Exception:  # noqa: BLE001 — any fetch/parse error → monogram, never a broken image
-        pass
-    mono = _icon_monogram(dom)
-    _ICON_CACHE[dom] = (mono, "image/svg+xml")
-    return Response(mono, media_type="image/svg+xml", headers=headers)
+    """Favicon for one outlet domain — fetched once + cached, served from the box (privacy #1), with a
+    lettered monogram fallback. The same bytes the app gets from /api/v2/source-icon."""
+    body, ctype = await favicon.icon_bytes(d)
+    return Response(body, media_type=ctype, headers={"Cache-Control": "public, max-age=86400"})
 
 
 def _sources_page(srcs, wire: set, flag_by: dict, owner_by: dict, registry: dict | None = None,
