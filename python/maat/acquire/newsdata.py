@@ -80,12 +80,14 @@ def search(
     *,
     language: str | None = None,
     country: str | None = None,
+    domain: str | None = None,
     max_results: int = 10,
     pages: int = 1,
     timeout: float = 30.0,
 ) -> list[NewsDataArticle]:
-    """Latest NewsData articles for a query (optionally scoped to a language / country). ``[]``
-    without a key. ``pages`` walks NewsData's ``nextPage`` token to gather up to ``max_results``."""
+    """Latest NewsData articles for a query (optionally scoped to a language / country / domain).
+    ``[]`` without a key. ``pages`` walks NewsData's ``nextPage`` token up to ``max_results``.
+    ``domain`` (e.g. "bbc.com") scopes to one outlet — used by the per-source history backfill."""
     key = os.environ.get("MAAT_NEWSDATA_KEY")
     if not key:
         return []
@@ -93,11 +95,15 @@ def search(
     page: str | None = None
     left = pages
     while left > 0 and len(out) < max_results:
-        params = {"apikey": key, "q": query}
+        params = {"apikey": key}
+        if query:  # q is optional when a domain/country filter is given; NewsData rejects an empty q
+            params["q"] = query
         if language:
             params["language"] = language
         if country:
             params["country"] = country
+        if domain:
+            params["domain"] = domain
         if page:
             params["page"] = page
         r = httpx.get(_LATEST_URL, params=params, timeout=timeout)

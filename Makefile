@@ -50,6 +50,9 @@ backfill:
 ccnews-backfill:
 	cd python && uv run python scripts/backfill_ccnews.py
 
+backfill-source:   # per-outlet reputation backfill (#241): make backfill-source SOURCE=bbc.com DEPTH=100
+	cd python && uv run python scripts/backfill_source.py "$(SOURCE)" $(DEPTH) --wait=900
+
 acquire-rss:
 	cd python && uv run python scripts/acquire_rss.py
 

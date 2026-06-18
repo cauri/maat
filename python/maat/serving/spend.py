@@ -152,6 +152,40 @@ def spend_by_provider(
     return out
 
 
+@dataclass(frozen=True)
+class BackfillCost:
+    acquisition_usd: float
+    extract_usd: float
+    classify_usd: float
+    embed_usd: float
+    extremity_usd: float
+    total_usd: float
+
+
+def backfill_cost(
+    *, n_articles: int, n_articles_with_claims: int, n_claims: int, n_clusters: int,
+    acquisition_usd: float = 0.0,
+) -> BackfillCost:
+    """Total cost of one per-source backfill (#241), pure so it serves both the up-front ESTIMATE
+    (expected counts) and the post-drain ACTUAL (measured counts). Acquisition is the channel's $
+    (GDELT free, Apify per-result, NewsData plan-flat); the rest is the pipeline LLM spend to turn
+    those articles into scored corroboration — extract (1/article) + classify (1/article, batched)
+    + embeddings (per claim) + extremity (per cluster the articles land in)."""
+    tin_e, tout_e, m_e = _PER_CALL["extract"]
+    tin_c, tout_c, m_c = _PER_CALL["classify"]
+    tin_x, tout_x, m_x = _PER_CALL["extremity"]
+    extract = n_articles * _llm_cost(m_e, tin_e, tout_e)
+    classify = n_articles_with_claims * _llm_cost(m_c, tin_c, tout_c)
+    embed = _llm_cost("mistral-embed", n_claims * _EMBED_TOKENS_PER_CLAIM, 0)
+    extremity = n_clusters * _llm_cost(m_x, tin_x, tout_x)
+    total = acquisition_usd + extract + classify + embed + extremity
+    return BackfillCost(
+        acquisition_usd=round(acquisition_usd, 4), extract_usd=round(extract, 4),
+        classify_usd=round(classify, 4), embed_usd=round(embed, 6),
+        extremity_usd=round(extremity, 4), total_usd=round(total, 4),
+    )
+
+
 def apify_spend_usd(*, timeout: float = 10.0) -> float | None:
     """Actual Apify spend this billing cycle (USD), via the Apify usage API. None if unavailable."""
     token = os.environ.get("APIFY_API_KEY")
