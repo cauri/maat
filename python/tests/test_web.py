@@ -211,6 +211,13 @@ def test_sources_page_registry_badges_and_proposal_note():
     assert "Russia" in out and "6 in feed" in out and "state-affiliated" in out
     # styled hover tooltips (data-tip), not bare browser title=
     assert "data-tip=" in out
+    # filter / sort / group controls + per-row data attributes for the client-side view
+    assert 'id="src-q"' in out and 'id="src-sort"' in out and 'id="src-group"' in out
+    assert 'class="src-tag" data-tag="state"' in out          # a tag-filter pill
+    assert 'data-tags=' in out and 'data-rep=' in out and 'data-country=' in out
+    assert 'id="src-list"' in out                              # container the JS sorts/groups
+    # lenta.ru carries its state tag + ru→Russia country so it's filterable + groupable
+    assert 'data-tags="state"' in out and 'data-country="Russia"' in out
 
 
 def test_nav_includes_all_p8_tabs():

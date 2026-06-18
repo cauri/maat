@@ -2782,47 +2782,59 @@ def _sources_page(srcs, wire: set, flag_by: dict, owner_by: dict, registry: dict
         first = f'{s["first"]:%Y-%m-%d}' if s.get("first") else "—"
         rec = registry.get(name)
         rep = rep_by.get(name) or rep_by.get(canonical_source(name))
-        # ── badges (all with the styled, delayed tooltip) ──────────────────────────────
-        badges = []
+        rep_val = reputation_score(rep) if rep is not None else (rec.reputation if rec else None)
+        # ── badges (all with the styled, delayed tooltip) + the filterable tag keys ──────
+        badges: list[str] = []
+        tags: list[str] = []
         if rec is not None:
             if rec.state == sreg.ACTIVE:
                 badges.append(_rbadge("active", "fact", "In the live feed — its stories are shown."))
+                tags.append("active")
             else:
                 badges.append(_rbadge(rec.state, "proj",
                     "Held out of the feed until its articles corroborate into stories and earn a "
                     "reputation (#241). Not an error — just not promoted yet."))
+                tags.append("pending")
         if is_primary_source(name):
             badges.append(_rbadge("first-hand", "fact",
                 "A primary source — it publishes its own statements (e.g. a central bank, ministry, "
                 "or company), so it can stand as first-hand evidence."))
+            tags.append("first-hand")
         if name in wire:
             badges.append(_rbadge("reprint", "proj",
                 "Counted as a wire reprint of another outlet on shared stories, so it doesn't inflate "
                 "corroboration as if it were independent confirmation."))
+            tags.append("reprint")
         align = align_by.get(name)
         if align == "state":
             badges.append(_rbadge("state-affiliated", "laun",
                 "State-controlled or state-funded outlet (e.g. RT, CGTN). Ingested for coverage but "
                 "never counted as independent corroboration."))
+            tags.append("state")
         elif align == "public":
             badges.append(_rbadge("public-service", "info",
                 "Public-service broadcaster (e.g. BBC, NPR) — editorially independent of government, "
                 "publicly funded."))
+            tags.append("public")
         fl = flag_by.get(name) or {}
         if fl.get("status") == "deny":
             badges.append(_rbadge("denied", "laun",
                 "You denied this source — stories sourced only from it are dropped from the feed."))
+            tags.append("denied")
         elif fl.get("status") == "allow":
             badges.append(_rbadge("allowed", "own", "You explicitly allowed this source."))
+            tags.append("allowed")
         ob = owner_by.get(name)
         if ob:
             how = "auto-resolved from Wikidata" if ob.get("auto") else "grouped by you"
             badges.append(_rbadge(f"owner · {ob['label']}", "syn",
                 f"Same-owner group ({how}): co-owned outlets count as ONE independent source in "
                 "corroboration, so common ownership can't fake agreement."))
+            tags.append("owner")
         # ── meta row ───────────────────────────────────────────────────────────────────
         country = _source_country(name)
         n_stories = stories_by.get(name, 0)
+        provider = rec.provider if (rec and rec.provider) else ""
         corr_tip = (f"Appears in {n_stories} corroborated feed stories, out of {s['n']} articles "
                     "ingested — how much of its output actually survived into the veracity feed.")
         meta = [
@@ -2833,11 +2845,23 @@ def _sources_page(srcs, wire: set, flag_by: dict, owner_by: dict, registry: dict
             f'<span data-tip="Languages this outlet publishes in (as ingested).">{html.escape(langs)}</span>',
             f'<span data-tip="First seen → last seen by Maat.">seen {first} → {last}</span>',
         ]
-        if rec is not None and rec.provider:
-            meta.append(f'<span data-tip="How Maat acquires this outlet.">via {html.escape(rec.provider)}</span>')
+        if provider:
+            meta.append(f'<span data-tip="How Maat acquires this outlet.">via {html.escape(provider)}</span>')
         meta_html = " · ".join(m for m in meta if m)
+        # data-* drive the client-side filter / sort / group (no reload).
+        attrs = (
+            f'data-name="{html.escape(name.lower())}" '
+            f'data-rep="{(rep_val if rep_val is not None else -1.0):.4f}" '
+            f'data-tags="{html.escape(" ".join(tags))}" '
+            f'data-country="{html.escape(country or "—")}" '
+            f'data-align="{html.escape(align or "—")}" '
+            f'data-lifecycle="{html.escape(rec.state if rec else "—")}" '
+            f'data-provider="{html.escape(provider or "—")}" '
+            f'data-articles="{s["n"]}" data-infeed="{n_stories}" '
+            f'data-first="{first}" data-last="{last}"'
+        )
         rows.append(
-            '<div class="srow2">'
+            f'<div class="srow2" {attrs}>'
             f'<div class="srepwrap"><span class="srep-cap">reputation</span>{_reputation_cell(rep, rec.reputation if rec else None)}</div>'
             f'<div><div class="sname">{esc} <span class="bs">{"".join(badges)}</span></div>'
             f'<div class="smeta-row mut sm">{meta_html}</div></div>'
@@ -2855,7 +2879,87 @@ def _sources_page(srcs, wire: set, flag_by: dict, owner_by: dict, registry: dict
     body = "".join(rows) or (
         '<p class="empty">No sources yet — pull some news first (the Updates tab).</p>'
     )
-    return f'<div class="ins">{note}{body}</div>'
+    return f'<div class="ins">{note}{_sources_controls()}<div id="src-list">{body}</div>{_SOURCES_JS}</div>'
+
+
+def _sources_controls() -> str:
+    """Search + sort + group-by + tag-filter bar driving the client-side view of the source list."""
+    pills = "".join(
+        f'<button type="button" class="src-tag" data-tag="{t}">{lbl}</button>'
+        for t, lbl in (
+            ("active", "active"), ("pending", "pending"), ("first-hand", "first-hand"),
+            ("reprint", "reprint"), ("state", "state"), ("public", "public"),
+            ("owner", "owner"), ("denied", "denied"),
+        )
+    )
+    return (
+        '<div class="src-controls">'
+        '<input id="src-q" class="src-search" type="search" placeholder="Search outlets…" '
+        'data-tip="Filter the list by outlet name">'
+        '<label class="src-ctl">Sort '
+        '<select id="src-sort">'
+        '<option value="rep">reputation ↓</option>'
+        '<option value="name">name A–Z</option>'
+        '<option value="articles">articles ↓</option>'
+        '<option value="infeed">in feed ↓</option>'
+        '<option value="first">first seen ↑</option>'
+        '<option value="last">last seen ↓</option>'
+        '</select></label>'
+        '<label class="src-ctl">Group '
+        '<select id="src-group">'
+        '<option value="none">none</option>'
+        '<option value="country">country</option>'
+        '<option value="align">alignment</option>'
+        '<option value="lifecycle">lifecycle</option>'
+        '<option value="provider">channel</option>'
+        '</select></label>'
+        f'<div class="src-tags" data-tip="Filter by tag — combine several to narrow (AND)">{pills}</div>'
+        '<span id="src-count" class="mut sm"></span>'
+        '</div>'
+    )
+
+
+# Client-side filter / sort / group over the (already-rendered) source rows — no reload. Inline is
+# safe here (the deny toggle already uses an inline handler, so the console runs inline JS).
+_SOURCES_JS = """<script>(function(){
+  var list=document.getElementById('src-list'); if(!list) return;
+  var rows=[].slice.call(list.querySelectorAll('.srow2'));
+  var q=document.getElementById('src-q'), sortSel=document.getElementById('src-sort'),
+      groupSel=document.getElementById('src-group'), countEl=document.getElementById('src-count');
+  var pills=[].slice.call(document.querySelectorAll('.src-tag')), active={};
+  function num(v){var n=parseFloat(v);return isNaN(n)?-1:n;}
+  function cmp(k){
+    if(k==='name') return function(a,b){return a.dataset.name.localeCompare(b.dataset.name);};
+    if(k==='first') return function(a,b){return (a.dataset.first||'').localeCompare(b.dataset.first||'');};
+    if(k==='last') return function(a,b){return (b.dataset.last||'').localeCompare(a.dataset.last||'');};
+    return function(a,b){return num(b.dataset[k])-num(a.dataset[k]);};
+  }
+  function apply(){
+    var term=(q.value||'').toLowerCase().trim();
+    var tags=Object.keys(active).filter(function(t){return active[t];});
+    var shown=rows.filter(function(r){
+      if(term && r.dataset.name.indexOf(term)<0) return false;
+      for(var i=0;i<tags.length;i++){ if((' '+r.dataset.tags+' ').indexOf(' '+tags[i]+' ')<0) return false; }
+      return true;
+    });
+    shown.sort(cmp(sortSel.value));
+    var g=groupSel.value; list.innerHTML='';
+    if(g==='none'){ shown.forEach(function(r){list.appendChild(r);}); }
+    else{
+      var groups={}, order=[];
+      shown.forEach(function(r){var k=r.dataset[g]||'—'; if(!groups[k]){groups[k]=[];order.push(k);} groups[k].push(r);});
+      order.sort();
+      order.forEach(function(k){
+        var h=document.createElement('div'); h.className='src-group-h'; h.textContent=k+'  ·  '+groups[k].length+' outlet'+(groups[k].length===1?'':'s');
+        list.appendChild(h); groups[k].forEach(function(r){list.appendChild(r);});
+      });
+    }
+    if(countEl) countEl.textContent=shown.length+' of '+rows.length+' outlets';
+  }
+  q.addEventListener('input',apply); sortSel.addEventListener('change',apply); groupSel.addEventListener('change',apply);
+  pills.forEach(function(p){ p.addEventListener('click',function(){var t=p.dataset.tag; active[t]=!active[t]; p.classList.toggle('on',!!active[t]); apply();}); });
+  apply();
+})();</script>"""
 
 
 def _clocks_page(ing, daily, topics: list, paused: bool) -> str:
