@@ -193,7 +193,7 @@ struct StoryDetailView: View {
             }
             Spacer(minLength: 0)
             if !settings.reads(articleLanguage) {
-                Text(AppSettings.languageName(articleLanguage)).font(.caption2).foregroundStyle(Palette.muted)
+                Text(AppSettings.languageName(articleLanguage).uppercased()).font(.caption2).foregroundStyle(Palette.muted)
             }
         }
     }
