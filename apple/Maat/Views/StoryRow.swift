@@ -88,7 +88,9 @@ struct StoryRow: View {
                         Chip(text: "extraordinary claim", style: .extraordinary)
                     }
                     if !settings.reads(story.primaryLanguage) {
-                        Chip(text: "original: \(AppSettings.languageName(story.primaryLanguage))", style: .neutral)
+                        // The story's original language, e.g. SPANISH / VIETNAMESE — full name in the
+                        // app's language, uppercased; the headline above is shown translated (#54).
+                        Chip(text: AppSettings.languageName(story.primaryLanguage).uppercased(), style: .neutral)
                     }
                     Spacer(minLength: 0)
                 }
