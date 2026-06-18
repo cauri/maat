@@ -14,6 +14,7 @@ import asyncpg
 from dotenv import load_dotenv
 
 from maat import prompts
+from maat.acquire.clean import is_index_page
 from maat.bus import run_agent
 from maat.events import publish
 from maat.pipeline.extract import extract_claims
@@ -24,6 +25,12 @@ _pool = None  # set in main(); used to resolve the operator's active prompt (P8)
 async def handle(nc: Any, event: dict[str, Any]) -> None:
     article_id = event["stream_id"]
     data = event.get("data", {})
+    # Skip section / index / landing pages — an amalgam of links to other stories, not an article
+    # (#33). The obvious ones are caught here by a heuristic; the extract prompt's LLM check is the
+    # second net. No claims → no cluster → it never becomes a story.
+    if is_index_page(data.get("title", ""), data.get("body", "")):
+        print(f"[extract] {article_id}: skipped — section/index page, not an article", flush=True)
+        return
     prompt = await prompts.active_text(_pool, "extract", prompts.seed_default("extract"))
     # extract_claims is sync (LLM call); keep the event loop free.
     claims = await asyncio.to_thread(
