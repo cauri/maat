@@ -117,7 +117,7 @@ services:
       MAAT_CONTRADICTION_NLI: ${MAAT_CONTRADICTION_NLI:-1}  # NLI contradiction detection (#229): pinned + smoke-tested ONNX MNLI cross-encoder
       MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/nli-deberta-v3-small}  # DeBERTa-v3 NLI cross-encoder in ONNX (#229)
       HF_HOME: /data/hf                                  # cache the NLI model on a volume so it isn't re-downloaded each deploy (#229)
-      MAAT_OWNERSHIP_LOOKUP: ${MAAT_OWNERSHIP_LOOKUP:-0}  # auto-resolve source ownership from Wikidata (#254) — OFF until the resolved groups are reviewed
+      MAAT_OWNERSHIP_LOOKUP: ${MAAT_OWNERSHIP_LOOKUP:-1}  # auto-resolve source ownership from Wikidata (#254); resolved owners are surfaced + overridable on /sources
       MAAT_TRANSLATE_TITLES: ${MAAT_TRANSLATE_TITLES:-1}  # English gloss for non-English feed titles (#54), display-only
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted

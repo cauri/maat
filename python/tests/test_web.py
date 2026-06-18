@@ -178,8 +178,12 @@ def test_sources_page_registry_badges_and_proposal_note():
     from maat.web.app import _sources_page
 
     srcs = [
-        {"source": "European Central Bank", "n": 3, "last": dt.datetime(2026, 6, 15), "langs": ["en"]},
-        {"source": "AFP", "n": 9, "last": dt.datetime(2026, 6, 15), "langs": ["en", "fr"]},
+        {"source": "European Central Bank", "n": 3, "first": dt.datetime(2026, 6, 1),
+         "last": dt.datetime(2026, 6, 15), "langs": ["en"]},
+        {"source": "AFP", "n": 9, "first": dt.datetime(2026, 6, 2),
+         "last": dt.datetime(2026, 6, 15), "langs": ["en", "fr"]},
+        {"source": "lenta.ru", "n": 5, "first": dt.datetime(2026, 6, 3),
+         "last": dt.datetime(2026, 6, 15), "langs": ["ru"]},
     ]
     from maat.learning.source_registry import fold_sources
 
@@ -187,15 +191,26 @@ def test_sources_page_registry_badges_and_proposal_note():
         {"source": "AFP", "state": "active", "reputation": 0.71, "at": "t"},
         {"source": "European Central Bank", "state": "registered", "at": "t"},
     ])
-    out = _sources_page(srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}}, {"AFP": "Wire"}, registry)
+    out = _sources_page(
+        srcs, {"AFP"}, {"AFP": {"status": "deny", "reason": "wire"}},
+        {"AFP": {"label": "Agence France-Presse", "auto": True}},  # owner_by
+        registry,
+        stories_by={"AFP": 6}, align_by={"lenta.ru": "state"},
+    )
     assert "European Central Bank" in out and "first-hand" in out  # first-hand source role shown
-    assert "reprint" in out and "denied" in out and "group · Wire" in out
+    assert "reprint" in out and "denied" in out
+    assert "owner · Agence France-Presse" in out  # owner group (auto-resolved) shown
+    assert "auto-resolved from Wikidata" in out  # tooltip distinguishes auto vs manual
     assert 'name="deny"' in out  # the deny toggle (one on/off control, no save button)
     assert "corroboration" in out  # the enforcement note surfaced
-    # #241 lifecycle: the registry state badge (by its unique tooltip) + reputation render per source
-    assert "In the live feed" in out  # active badge tooltip
-    assert "Held out of the feed" in out  # pending (registered) badge tooltip
-    assert "reputation 0.71" in out
+    # #241 lifecycle badges by their unique tooltips
+    assert "In the live feed" in out and "Held out of the feed" in out
+    # reputation is rendered BIG + bold (its own styled cell), not buried in the meta line
+    assert 'class="srep' in out and ">0.71<" in out
+    # new fields: country (ccTLD), corroboration count, state-media flag
+    assert "Russia" in out and "6 in feed" in out and "state-affiliated" in out
+    # styled hover tooltips (data-tip), not bare browser title=
+    assert "data-tip=" in out
 
 
 def test_nav_includes_all_p8_tabs():
