@@ -23,7 +23,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import asyncpg
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -55,7 +55,10 @@ from maat.learning.rl import policy_step
 from maat.learning.story_credibility import FactView, score_story
 from maat.learning.trajectory import load_trajectory
 from maat.learning import source_registry as sreg
+from maat.acquire.rss import load_feeds as _load_feeds
 from maat.metrics import de_us
+from maat.pipeline.identity import canonical_source
+from maat.pipeline.ownership import fold_ownership
 from maat.obs_metrics import pipeline_health
 from maat.pipeline.corroborate import (
     ClaimRow,
@@ -670,12 +673,20 @@ async def sources_view(ok: str = "") -> str:
     """A2 — source registry off ingested articles + operator allow/deny + ownership grouping."""
     pool = app.state.pool
     srcs = await pool.fetch(
-        "select source, count(*) n, max(ingested_at) last, array_agg(distinct language) langs "
-        "from articles where source is not null group by source order by n desc"
+        "select source, count(*) n, max(ingested_at) last, min(ingested_at) first, "
+        "array_agg(distinct language) langs from articles where source is not null "
+        "group by source order by n desc"
     )
     id_to_source = {a["id"]: a["source"] for a in await pool.fetch("select id, source from articles")}
     clusters = [dict(c) for c in await pool.fetch("select originators from clusters")]
     wire = wire_collapsed_sources(clusters, id_to_source)
+    # Corroboration contribution: how many corroborated clusters each source actually appears in
+    # (its work that survived into the feed), distinct from raw article count.
+    stories_by: dict[str, int] = {}
+    for c in clusters:
+        for s in {id_to_source.get(a) for g in (c.get("originators") or []) for a in g}:
+            if s:
+                stories_by[s] = stories_by.get(s, 0) + 1
     flags = await pool.fetch(
         "select distinct on (data->>'source') data->>'source' s, data->>'status' st, "
         "data->>'reason' r from events where type = $1 order by data->>'source', id desc",
@@ -687,7 +698,28 @@ async def sources_view(ok: str = "") -> str:
         events.ADMIN_SOURCE_GROUPED,
     )
     flag_by = {r["s"]: {"status": r["st"], "reason": r["r"]} for r in flags}
-    group_by = {r["s"]: r["g"] for r in grps}
+    manual_group = {r["s"]: r["g"] for r in grps}
+    # Owner grouping (#41/#254): the operator's manual groups, plus the auto-resolved Wikidata owners
+    # (same fold corroborate uses). Manual wins. Keyed for display by the raw source name.
+    auto_owner = fold_ownership(
+        json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
+        for r in await pool.fetch(
+            "select data from events where type = $1 order by id", events.SOURCE_OWNERSHIP_RESOLVED
+        )
+    )
+    owner_by: dict[str, dict] = {}
+    for r in srcs:
+        nm = r["source"]
+        if nm in manual_group:
+            owner_by[nm] = {"label": manual_group[nm], "auto": False}
+        elif auto_owner.get(canonical_source(nm or "")):
+            owner_by[nm] = {"label": auto_owner[canonical_source(nm)], "auto": True}
+    # Reputation records (the full breakdown, not just the 0..1 score) + the registry lifecycle.
+    history = [
+        json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
+        for r in await pool.fetch("select data from events where type='cluster.corroborated' order by id")
+    ]
+    rep_by = {r.source: r for r in fold_reputation(history)}
     reg_rows = await pool.fetch(
         "select data from events where type in ($1, $2) order by id",
         events.SOURCE_REGISTERED, events.SOURCE_STATE_CHANGED,
@@ -695,8 +727,17 @@ async def sources_view(ok: str = "") -> str:
     registry = sreg.fold_sources(
         json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in reg_rows
     )
-    return _doc(_sources_page(srcs, wire, flag_by, group_by, registry),
-                "Every outlet Maat reads, and how you want each one treated", "sources", flash=ok)
+    # State-affiliation from the curated multipolar feed set (#238): domain → independent/public/state.
+    align_by: dict[str, str] = {}
+    for f in _load_feeds():
+        d = urlparse(f.url).netloc.removeprefix("www.")
+        if d:
+            align_by[d] = f.alignment
+    return _doc(
+        _sources_page(srcs, wire, flag_by, owner_by, registry,
+                      stories_by=stories_by, rep_by=rep_by, align_by=align_by),
+        "Every outlet Maat reads, and how you want each one treated", "sources", flash=ok,
+    )
 
 
 @app.post("/sources/flag")
@@ -2670,14 +2711,67 @@ def wire_collapsed_sources(clusters, id_to_source: dict) -> set:
     return out
 
 
-def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict, registry: dict | None = None) -> str:
+# Readable country from a domain's ccTLD — display-only, covers the multipolar set the feed cares
+# about (generic .com/.org carry no country signal → shown as "—"). Kept tiny + inline so the web
+# app doesn't import the acquisition stack just for a label.
+_TLD_NAME = {
+    "ru": "Russia", "cn": "China", "in": "India", "br": "Brazil", "de": "Germany", "jp": "Japan",
+    "kr": "S. Korea", "id": "Indonesia", "tr": "Turkey", "fr": "France", "gb": "UK", "uk": "UK",
+    "es": "Spain", "it": "Italy", "ua": "Ukraine", "ir": "Iran", "sa": "Saudi Arabia", "qa": "Qatar",
+    "ng": "Nigeria", "za": "S. Africa", "mx": "Mexico", "ar": "Argentina", "au": "Australia",
+    "ca": "Canada", "il": "Israel", "eg": "Egypt", "pk": "Pakistan", "gr": "Greece", "pt": "Portugal",
+    "nl": "Netherlands", "se": "Sweden", "pl": "Poland", "ro": "Romania", "vn": "Vietnam",
+    "th": "Thailand", "ph": "Philippines", "my": "Malaysia", "ke": "Kenya",
+}
+
+
+def _source_country(domain: str) -> str:
+    tld = (domain or "").lower().rsplit(".", 1)[-1]
+    return _TLD_NAME.get(tld, "")
+
+
+def _rbadge(text: str, cls: str, tip: str) -> str:
+    """A badge carrying the on-page styled tooltip (data-tip, ~0.6s delay) instead of the bare
+    browser title — same look as _badge, nicer hover."""
+    return f'<span class="b {cls}" data-tip="{html.escape(tip)}">{html.escape(text)}</span>'
+
+
+def _reputation_cell(rep, fallback: float | None) -> str:
+    """Big, bold 0..1 reputation with a tier colour + a breakdown on hover. ``rep`` is a
+    SourceReputation (full signals) when we have one; ``fallback`` is the registry-recorded score."""
+    score = reputation_score(rep) if rep is not None else fallback
+    if score is None:
+        return ('<span class="srep-none" data-tip="No reputation yet — a source is scored once its '
+                'stories corroborate and those facts resolve over time.">—</span>')
+    tier = "hi" if score >= 0.7 else ("mid" if score >= 0.4 else "lo")
+    if rep is not None and getattr(rep, "outcome_n", 0) > 0:
+        tip = (f"Reputation {score:.2f} of 1.00. Appeared in {rep.appearances} corroborated "
+               f"stories · {rep.confirmation_rate:.0%} of its resolved facts held up over time · "
+               f"{rep.independent_rate:.0%} as an independent (non-reprint) originator. Higher = "
+               "more reliable; earned, not assigned.")
+    elif rep is not None:
+        tip = (f"Reputation {score:.2f} of 1.00 (provisional). In {rep.appearances} corroborated "
+               f"stories, {rep.independent_rate:.0%} as an independent originator; no facts have "
+               "resolved over time yet, so this is a starting estimate.")
+    else:
+        tip = f"Reputation {score:.2f} of 1.00 — earned from corroboration outcomes over time."
+    return f'<span class="srep {tier}" data-tip="{html.escape(tip)}">{score:.2f}</span>'
+
+
+def _sources_page(srcs, wire: set, flag_by: dict, owner_by: dict, registry: dict | None = None,
+                  *, stories_by: dict | None = None, rep_by: dict | None = None,
+                  align_by: dict | None = None) -> str:
     registry = registry or {}
+    owner_by = owner_by or {}
+    stories_by = stories_by or {}
+    rep_by = rep_by or {}
+    align_by = align_by or {}
     note = (
-        '<div class="deriv">Every outlet Maat has read. Its <b>lifecycle</b> runs registered → '
-        'backfilling → scored → active; only <b>active</b> sources show in the feed (a new source '
-        'is held until its articles corroborate and earn a reputation). <b>Deny</b> a source to drop '
-        'stories sourced only from it; <b>Group</b> same-owner outlets so they count as one source in '
-        'corroboration, not several.</div>'
+        '<div class="deriv">Every outlet Maat reads, with its earned <b>reputation</b> (0–1, from '
+        'corroboration outcomes over time) up front. Lifecycle runs registered → active; only '
+        '<b>active</b> sources show in the feed. Hover any tag or score for what it means. <b>Deny</b> '
+        'drops stories sourced only from an outlet; <b>Group</b> ties same-owner outlets together so '
+        'they count as one source in corroboration (auto-resolved from Wikidata, or set by hand).</div>'
     )
     rows = []
     for s in srcs:
@@ -2685,57 +2779,83 @@ def _sources_page(srcs, wire: set, flag_by: dict, group_by: dict, registry: dict
         esc = html.escape(name)
         langs = ", ".join(x for x in (s["langs"] or []) if x) or "—"
         last = f'{s["last"]:%Y-%m-%d}' if s["last"] else "—"
-        badges = []
+        first = f'{s["first"]:%Y-%m-%d}' if s.get("first") else "—"
         rec = registry.get(name)
+        rep = rep_by.get(name) or rep_by.get(canonical_source(name))
+        # ── badges (all with the styled, delayed tooltip) ──────────────────────────────
+        badges = []
         if rec is not None:
             if rec.state == sreg.ACTIVE:
-                badges.append(_badge("active", "fact", "In the live feed"))
+                badges.append(_rbadge("active", "fact", "In the live feed — its stories are shown."))
             else:
-                badges.append(_badge(rec.state, "proj",
-                                     "Held out of the feed until its backfill + scoring completes (#241)"))
+                badges.append(_rbadge(rec.state, "proj",
+                    "Held out of the feed until its articles corroborate into stories and earn a "
+                    "reputation (#241). Not an error — just not promoted yet."))
         if is_primary_source(name):
-            badges.append(_badge("first-hand", "fact",
-                                 "A first-hand source, e.g. a body publishing its own statement"))
+            badges.append(_rbadge("first-hand", "fact",
+                "A primary source — it publishes its own statements (e.g. a central bank, ministry, "
+                "or company), so it can stand as first-hand evidence."))
         if name in wire:
-            badges.append(_badge("reprint", "proj",
-                                 "Counted as a reprint of another outlet, not separate confirmation"))
+            badges.append(_rbadge("reprint", "proj",
+                "Counted as a wire reprint of another outlet on shared stories, so it doesn't inflate "
+                "corroboration as if it were independent confirmation."))
+        align = align_by.get(name)
+        if align == "state":
+            badges.append(_rbadge("state-affiliated", "laun",
+                "State-controlled or state-funded outlet (e.g. RT, CGTN). Ingested for coverage but "
+                "never counted as independent corroboration."))
+        elif align == "public":
+            badges.append(_rbadge("public-service", "info",
+                "Public-service broadcaster (e.g. BBC, NPR) — editorially independent of government, "
+                "publicly funded."))
         fl = flag_by.get(name) or {}
         if fl.get("status") == "deny":
-            badges.append(_badge("denied", "laun", "You marked this source to be denied"))
+            badges.append(_rbadge("denied", "laun",
+                "You denied this source — stories sourced only from it are dropped from the feed."))
         elif fl.get("status") == "allow":
-            badges.append(_badge("allowed", "own", "You marked this source as allowed"))
-        if group_by.get(name):
-            badges.append(_badge(f"group · {group_by[name]}", "syn",
-                                 "Grouped with same-owner outlets — they count as one source"))
-        extra = ""
-        if rec is not None:
-            if rec.reputation is not None:
-                extra += f' · reputation {rec.reputation:.2f}'
-            if rec.provider:
-                extra += f' · via {html.escape(rec.provider)}'
+            badges.append(_rbadge("allowed", "own", "You explicitly allowed this source."))
+        ob = owner_by.get(name)
+        if ob:
+            how = "auto-resolved from Wikidata" if ob.get("auto") else "grouped by you"
+            badges.append(_rbadge(f"owner · {ob['label']}", "syn",
+                f"Same-owner group ({how}): co-owned outlets count as ONE independent source in "
+                "corroboration, so common ownership can't fake agreement."))
+        # ── meta row ───────────────────────────────────────────────────────────────────
+        country = _source_country(name)
+        n_stories = stories_by.get(name, 0)
+        corr_tip = (f"Appears in {n_stories} corroborated feed stories, out of {s['n']} articles "
+                    "ingested — how much of its output actually survived into the veracity feed.")
+        meta = [
+            f'<span data-tip="Where the outlet is based (from its domain).">{html.escape(country)}</span>'
+            if country else "",
+            f'<span data-tip="Total articles Maat has ingested from this outlet.">{s["n"]} articles</span>',
+            f'<span data-tip="{html.escape(corr_tip)}">{n_stories} in feed</span>',
+            f'<span data-tip="Languages this outlet publishes in (as ingested).">{html.escape(langs)}</span>',
+            f'<span data-tip="First seen → last seen by Maat.">seen {first} → {last}</span>',
+        ]
+        if rec is not None and rec.provider:
+            meta.append(f'<span data-tip="How Maat acquires this outlet.">via {html.escape(rec.provider)}</span>')
+        meta_html = " · ".join(m for m in meta if m)
         rows.append(
-            f'<div class="srow2"><div><div class="sname">{esc} '
-            f'<span class="bs">{"".join(badges)}</span></div>'
-            f'<div class="mut sm">{s["n"]} articles · {html.escape(langs)} · last {last}{extra}</div></div>'
+            '<div class="srow2">'
+            f'<div class="srepwrap"><span class="srep-cap">reputation</span>{_reputation_cell(rep, rec.reputation if rec else None)}</div>'
+            f'<div><div class="sname">{esc} <span class="bs">{"".join(badges)}</span></div>'
+            f'<div class="smeta-row mut sm">{meta_html}</div></div>'
             '<form class="inline" method="post" action="/sources/flag">'
             f'<input type="hidden" name="source" value="{esc}">'
-            '<label class="toggle" title="Deny: drop feed stories sourced only from this outlet">'
+            '<label class="toggle" data-tip="Deny: drop feed stories sourced only from this outlet.">'
             '<input type="checkbox" name="deny" value="1" onchange="this.form.submit()"'
             f'{" checked" if fl.get("status") == "deny" else ""}>'
             ' Deny</label></form>'
             '<form class="inline" method="post" action="/sources/group">'
             f'<input type="hidden" name="source" value="{esc}">'
             '<input name="group" placeholder="same-owner group">'
-            '<button title="Outlets in one group count as a single source">Group</button></form></div>'
+            '<button data-tip="Tie same-owner outlets together — they then count as one source.">Group</button></form></div>'
         )
     body = "".join(rows) or (
         '<p class="empty">No sources yet — pull some news first (the Updates tab).</p>'
     )
-    return (
-        '<div class="ins">'
-        ''
-        f"{note}{body}</div>"
-    )
+    return f'<div class="ins">{note}{body}</div>'
 
 
 def _clocks_page(ing, daily, topics: list, paused: bool) -> str:
