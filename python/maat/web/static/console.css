@@ -199,6 +199,8 @@ label{font-size:14px}
 .sd-line.hi{stroke:var(--ok)}.sd-line.mid{stroke:var(--warn)}.sd-line.lo,.sd-line.floor{stroke:var(--bad)}.sd-line.proj{stroke:var(--mut)}
 .sd-dot{stroke:var(--surface);stroke-width:1.5}
 .sd-dot.hi{fill:var(--ok)}.sd-dot.mid{fill:var(--warn)}.sd-dot.lo,.sd-dot.floor{fill:var(--bad)}.sd-dot.proj{fill:var(--mut)}
+.sd-traj-mark{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+.sd-traj-mark.hi{fill:var(--ok)}.sd-traj-mark.mid{fill:var(--warn)}.sd-traj-mark.lo,.sd-traj-mark.floor{fill:var(--bad)}.sd-traj-mark.proj{fill:var(--mut)}
 .sd-fact{display:flex;gap:14px;align-items:flex-start;padding:13px 0;border-top:1px solid var(--line)}
 .sd-fact:first-of-type{border-top:0}
 .sd-fact-conf{flex:none;width:58px;text-align:center;padding-top:1px}
