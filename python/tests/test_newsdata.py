@@ -54,10 +54,11 @@ def test_search_paginates_and_caps(monkeypatch):
         def json(self):
             return self._p
 
-    def fake_get(url, *, params=None, timeout=None):
-        # the nextPage token from the previous page must be threaded through
+    def fake_get(url, *, params=None, headers=None, timeout=None):
+        # key travels in the X-ACCESS-KEY header, never the URL/params (no leak in logs/errors)
+        assert "apikey" not in params and headers.get("X-ACCESS-KEY") == "k"
         if calls["n"] == 1:
-            assert params.get("page") == "p2"
+            assert params.get("page") == "p2"  # nextPage threaded through
         resp = _Resp(pages[calls["n"]])
         calls["n"] += 1
         return resp
@@ -66,3 +67,24 @@ def test_search_paginates_and_caps(monkeypatch):
     out = newsdata.search("q", language="ru", max_results=5, pages=3)
     assert len(out) == 5            # capped at max_results across 2 fetched pages
     assert calls["n"] == 2          # stopped when nextPage was None
+
+
+def test_search_uses_domainurl_and_header_auth(monkeypatch):
+    monkeypatch.setenv("MAAT_NEWSDATA_KEY", "secret")
+    seen = {}
+
+    class _R:
+        def raise_for_status(self): pass
+        def json(self): return {"results": [], "nextPage": None}
+
+    def fake_get(url, *, params=None, headers=None, timeout=None):
+        seen["params"] = params
+        seen["headers"] = headers
+        return _R()
+
+    monkeypatch.setattr(newsdata.httpx, "get", fake_get)
+    newsdata.search("", domain="bbc.com", max_results=10)
+    assert seen["params"].get("domainurl") == "bbc.com"   # domain filter → domainurl
+    assert "domain" not in seen["params"]
+    assert "apikey" not in seen["params"]                 # key NOT in the URL
+    assert seen["headers"]["X-ACCESS-KEY"] == "secret"    # key in the header instead

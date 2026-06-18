@@ -95,18 +95,20 @@ def search(
     page: str | None = None
     left = pages
     while left > 0 and len(out) < max_results:
-        params = {"apikey": key}
+        params: dict[str, str] = {}
         if query:  # q is optional when a domain/country filter is given; NewsData rejects an empty q
             params["q"] = query
         if language:
             params["language"] = language
         if country:
             params["country"] = country
-        if domain:
-            params["domain"] = domain
+        if domain:  # filter by the outlet's domain URL (e.g. "bbc.com"); `domain` wants NewsData's IDs
+            params["domainurl"] = domain
         if page:
             params["page"] = page
-        r = httpx.get(_LATEST_URL, params=params, timeout=timeout)
+        # Auth via header, NOT the apikey query param — so the key never lands in a URL, error
+        # message, or access log (a 422 once echoed the full URL incl. the key).
+        r = httpx.get(_LATEST_URL, params=params, headers={"X-ACCESS-KEY": key}, timeout=timeout)
         r.raise_for_status()
         data = r.json()
         out.extend(parse_results(data.get("results")))
