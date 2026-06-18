@@ -25,10 +25,13 @@ from pathlib import Path
 import asyncpg
 from dotenv import load_dotenv
 
+from maat import prompts
 from maat.bus import connect
 from maat.events import SOURCE_REGISTERED, SOURCE_STATE_CHANGED, publish
 from maat.learning.reputation import fold_reputation, reputation_score
-from maat.learning.source_registry import fold_sources, plan_registry
+from maat.learning.source_backfill import run_backfill, run_id_for
+from maat.learning.source_registry import REGISTERED, fold_sources, plan_registry
+from maat.serving.source_flags import denied_sources
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -82,6 +85,25 @@ async def main() -> None:
         "select data from events where type in ($1, $2) order by id",
         SOURCE_REGISTERED, SOURCE_STATE_CHANGED,
     )))
+
+    # Auto-backfill (#241): when enabled, kick a bounded number of not-yet-backfilled REGISTERED
+    # sources through the real per-source backfill each pass — the production "registering a source
+    # kicks off backfill + reputation" path. OFF by default + bounded (a wrong burst would backfill
+    # the whole pending pool at once); the operator turns it on deliberately. The manual CLI
+    # (scripts/backfill_source.py) is always available regardless.
+    on_register_max = int(os.environ.get("MAAT_BACKFILL_ON_REGISTER", "0"))
+    backfill_cfg = None
+    if on_register_max > 0:
+        backfill_cfg = {
+            "gate_prompt": await prompts.active_text(pool, "source_gate", prompts.seed_default("source_gate")),
+            "known_good": frozenset(
+                (r["source"] or "").lower().removeprefix("www.")
+                for r in await pool.fetch("select distinct source from articles where source is not null")),
+            "denied": denied_sources(_rows_data(await pool.fetch(
+                "select data from events where type='admin.source.flagged' order by id"))),
+            "seen": {r["url"] for r in await pool.fetch("select url from articles where url is not null")},
+            "depth": int(os.environ.get("MAAT_BACKFILL_DEPTH", "100")),
+        }
     await pool.close()
 
     transitions = plan_registry(
@@ -91,7 +113,13 @@ async def main() -> None:
         sources_with_clusters=with_clusters,
         reputation_by_source=reputation_by_source,
     )
-    if not transitions:
+    # Registered sources not yet backfilled — the queue the auto-trigger draws from (bounded below).
+    will_register = {t.source for t in transitions if t.is_new and t.state == REGISTERED}
+    eligible = [s for s, r in records.items() if r.state == REGISTERED and not r.backfill_run_id]
+    eligible = list(dict.fromkeys(eligible + sorted(will_register)))
+    to_backfill = eligible[: (int(os.environ.get("MAAT_BACKFILL_ON_REGISTER", "0")))] if backfill_cfg else []
+
+    if not transitions and not to_backfill:
         print(f"[registry] no changes ({len(records)} sources, {len(sources_seen)} seen)")
         return
 
@@ -112,11 +140,24 @@ async def main() -> None:
             activated += 1
         else:
             refreshed += 1
+
+    # Auto-backfill the bounded slice of registered sources (production lifecycle: register → backfill).
+    backfilled = 0
+    for src in to_backfill:
+        res = await run_backfill(
+            nc, src, run_id=run_id_for(src, now), at=now, depth=backfill_cfg["depth"],
+            gate_prompt=backfill_cfg["gate_prompt"], known_good=backfill_cfg["known_good"],
+            denied=backfill_cfg["denied"], seen=backfill_cfg["seen"],
+        )
+        backfilled += 1
+        print(f"[registry] auto-backfill {src}: ingested {res.ingested}/{res.fetched}", flush=True)
+
     await nc.flush()
     await nc.close()
     print(
         f"[registry] {len(transitions)} transitions: {grandfathered} grandfathered active, "
         f"{registered} newly registered (pending), {activated} activated, {refreshed} reputation refresh"
+        + (f"; auto-backfilled {backfilled}" if backfilled else "")
     )
 
 
