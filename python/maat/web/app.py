@@ -52,8 +52,8 @@ from maat.learning.reputation import (
     reputation_trajectories,
 )
 from maat.learning.rl import policy_step
-from maat.learning.story_credibility import FactView, score_story
 from maat.learning.trajectory import load_trajectory
+from maat.serving.stories import StoryView, load_story_detail, load_story_views
 from maat.learning import source_registry as sreg
 from maat.acquire.rss import load_feeds as _load_feeds
 from maat.metrics import de_us
@@ -301,29 +301,21 @@ async def feed(ok: str = "") -> str:
 
 @app.get("/stories", response_class=HTMLResponse)
 async def stories(ok: str = "") -> str:
-    """The STORY feed (#264): every event with one credibility score, ranked. The facts/claims
-    inspector stays on /. select * so grounding (#228) / disputed (#229) ride along if present."""
-    pool = app.state.pool
-    clusters = await pool.fetch(
-        "select * from clusters order by confidence desc, independent_originators desc"
-    )
-    claims = await pool.fetch("select * from claims")
-    arts = await pool.fetch("select id, source from articles")
-    id_to_source = {a["id"]: a["source"] for a in arts}
-    claims_by_id = {str(c["id"]): c for c in claims}
-    pivots: dict[str, str] = {}
-    for r in await pool.fetch("select data from events where type = 'claim.pivot'"):
-        d = _jobj(r["data"])
-        if d.get("claim_id") and d.get("text_en"):
-            pivots[d["claim_id"]] = d["text_en"]
-    # Reputation of RATED sources only (a resolved track record); cold-start = absent = neutral.
-    history = await _corroboration_history(pool)
-    reputation = {r.source: reputation_score(r) for r in fold_reputation(history) if r.outcome_n > 0}
-    disputed_claims = {str(c["id"]) for c in claims if _rget(c, "disputed")}
-    return _doc(
-        _stories_page(clusters, claims_by_id, id_to_source, pivots, reputation, disputed_claims),
-        "Every event, ranked by one credibility score", "stories", flash=ok,
-    )
+    """The STORY feed (#264): every story on the real #42 story graph, ranked by one credibility
+    score. Tap a story for /story/{id} — the full derivation + its trajectory over time."""
+    views, total = await load_story_views(app.state.pool, limit=_STORIES_LIMIT)
+    return _doc(_stories_page(views, total), "Every story, ranked by one credibility score",
+                "stories", flash=ok)
+
+
+@app.get("/story/{node_id}", response_class=HTMLResponse)
+async def story_detail(node_id: str, ok: str = "") -> str:
+    """One story (a #42 story-graph node, or a not-yet-threaded cluster): the credibility score with
+    its full transparent derivation, its trajectory over time, and every fact and forecast in it."""
+    view = await load_story_detail(app.state.pool, node_id)
+    if view is None:
+        return _doc('<div class="ins"><p class="empty">No such story.</p></div>', "story", "stories")
+    return _doc(_story_detail_page(view), (view.headline or "Story")[:80], "stories", flash=ok)
 
 
 @app.get("/cluster/{cid}", response_class=HTMLResponse)
@@ -2091,67 +2083,172 @@ def _feed_page(articles, by_article, clusters, id_to_source, title_en=None, clai
 # ── Stories tab (#264): one credibility score per story, ranked ──────────────────────────────
 _BAND_TIER = {"established": "hi", "corroborated": "mid", "developing": "lo",
               "thin": "lo", "single": "floor", "disputed": "floor", "forecast": "proj"}
+_STORIES_LIMIT = 200  # the console ranks the whole corpus; render the top slice, count the rest
 
 
-def _story_facts(group, claims_by_id, disputed_claims, id_to_source):
-    """Split a story's clusters into FactViews (for the score) + a projection count (excluded)."""
-    facts, projections = [], 0
-    for cl in group:
-        if _cluster_kind(cl, claims_by_id) == "projection":
-            projections += 1
-            continue
-        groups = [[id_to_source.get(a, a) for a in grp] for grp in _jload(cl["originators"])]
-        disputed = any(str(x) in disputed_claims for x in _jload(_rget(cl, "claim_ids")))
-        facts.append(FactView(
-            confidence=float(cl["confidence"] or 0.0),
-            independent_originators=int(cl["independent_originators"] or 0),
-            has_primary=bool(cl["has_primary"]), extremity=cl["extremity"] or "notable",
-            originator_sources=groups, grounding=_rget(cl, "grounding"), disputed=disputed,
-        ))
-    return facts, projections
-
-
-def _story_score_card(group, s, facts, projections, claims_by_id, id_to_source, pivots) -> str:
-    lead = group[0]
-    cid = _rget(lead, "id")
-    en = _fact_en(lead, claims_by_id, pivots)
-    head = html.escape(en) if en else html.escape(lead["fact"] or "")
-    orig = (f'<div class="scard-orig">{html.escape(lead["fact"] or "")}</div>'
-            if en and not s.forecast_only else "")
-    n_src = len({x for cl in group for x in _jload(cl["sources"])})
-    tier = _BAND_TIER.get(s.band, "lo")
-    why = " · ".join(s.why[:3])
-    meta = f'{n_src} source{"s" if n_src != 1 else ""} · {len(facts)} fact{"s" if len(facts) != 1 else ""}'
-    if projections:
-        meta += f' · {projections} forecast{"s" if projections != 1 else ""}'
-    flags = ('<span class="b laun">disputed</span>' if s.band == "disputed" else "") + \
-            ('<span class="b own">unproven carriers</span>' if s.capped else "")
-    big = f"{s.score}%" if not s.forecast_only else "—"
+def _story_score_card(v: StoryView) -> str:
+    """One row in the story feed: the single credibility score + the headline it scores, linking to
+    the full breakdown at /story/{node_id}."""
+    tier = _BAND_TIER.get(v.score.band, "lo")
+    head = html.escape(v.headline)
+    orig = f'<div class="scard-orig">{html.escape(v.headline_orig)}</div>' if v.headline_orig else ""
+    why = " · ".join(v.score.why[:3])
+    nf, nfc = len(v.facts), len(v.forecasts)
+    meta = f'{v.source_count} source{"s" if v.source_count != 1 else ""} · {nf} fact{"s" if nf != 1 else ""}'
+    if nfc:
+        meta += f' · {nfc} forecast{"s" if nfc != 1 else ""}'
+    flags = ('<span class="b laun">disputed</span>' if v.score.band == "disputed" else "") + \
+            ('<span class="b own">unproven carriers</span>' if v.score.capped else "")
+    big = f"{v.score.score}%" if not v.score.forecast_only else "—"
     return (
-        f'<a class="scard {tier}" href="/cluster/{cid}">'
+        f'<a class="scard {tier}" href="/story/{html.escape(v.node_id)}">'
         f'<div class="scard-score"><span class="scard-pct">{big}</span>'
-        f'<span class="scard-band">{html.escape(s.label)}</span></div>'
+        f'<span class="scard-band">{html.escape(v.score.label)}</span></div>'
         f'<div class="scard-main"><div class="scard-head">{head}{orig}</div>'
         f'<div class="scard-why">{html.escape(why)}</div>'
         f'<div class="scard-meta">{meta} {flags}</div></div></a>'
     )
 
 
-def _stories_page(clusters, claims_by_id, id_to_source, pivots, reputation, disputed_claims) -> str:
-    note = ('<div class="deriv">Every event, ranked by one <b>credibility</b> score — rolled up from '
+def _stories_page(views: list[StoryView], total: int) -> str:
+    note = ('<div class="deriv">Every story, ranked by one <b>credibility</b> score — rolled up from '
             'how independently its core facts corroborate, the track record of the outlets carrying it, '
             'primary-source grounding, and any disputes. Forecasts and opinions don\'t count toward it. '
-            'Tap a story for the full breakdown.</div>')
-    items = []
-    for g in _group_stories(clusters):
-        facts, projections = _story_facts(g, claims_by_id, disputed_claims, id_to_source)
-        s = score_story(facts, reputation)
-        items.append((s.score if not s.forecast_only else -1,
-                      _story_score_card(g, s, facts, projections, claims_by_id, id_to_source, pivots)))
-    items.sort(key=lambda x: x[0], reverse=True)
-    body = "".join(h for _, h in items) or (
+            'Tap a story for the full breakdown and how its credibility moved over time.</div>')
+    body = "".join(_story_score_card(v) for v in views) or (
         '<p class="empty">No stories yet — pull some news from the Updates tab.</p>')
-    return f'<div class="ins">{note}{body}</div>'
+    more = (f'<div class="mut" style="margin-top:12px">Showing the top {len(views)} of {total} '
+            f'stories by credibility.</div>') if total > len(views) else ""
+    return f'<div class="ins">{note}{body}{more}</div>'
+
+
+def _fmt_day(ts: float) -> str:
+    return time.strftime("%b %-d, %Y", time.gmtime(ts)) if ts else ""
+
+
+def _trajectory_svg(points) -> str:
+    """A credibility-over-time sparkline (#39): each point is the story's score recomputed as of that
+    day from the cluster snapshots. One point shows as a dot; the line is coloured by the latest band."""
+    if not points:
+        return ('<p class="mut">No history yet — the trajectory builds as the story is re-checked '
+                'each day. Check back tomorrow.</p>')
+    w, h, pad = 560, 150, 30
+
+    def x(i):
+        return pad + (w - 2 * pad) * (i / (len(points) - 1) if len(points) > 1 else 0.5)
+
+    def y(sc):
+        return h - pad - (h - 2 * pad) * (max(0, min(100, sc)) / 100)
+
+    grid = "".join(
+        f'<line x1="{pad}" y1="{y(g):.0f}" x2="{w - pad}" y2="{y(g):.0f}" class="sd-grid"/>'
+        f'<text x="6" y="{y(g) + 3:.0f}" class="sd-axis">{g}</text>'
+        for g in (0, 50, 100)
+    )
+    line = ""
+    if len(points) > 1:
+        pts = " ".join(f"{x(i):.1f},{y(p.score):.1f}" for i, p in enumerate(points))
+        line = f'<polyline points="{pts}" class="sd-line {_BAND_TIER.get(points[-1].band, "lo")}"/>'
+    dots = "".join(
+        f'<circle cx="{x(i):.1f}" cy="{y(p.score):.1f}" r="4" class="sd-dot {_BAND_TIER.get(p.band, "lo")}">'
+        f'<title>{html.escape(p.day)}: {p.score}% · {html.escape(p.band)}</title></circle>'
+        for i, p in enumerate(points)
+    )
+    ends = (f'<text x="{pad}" y="{h - 8}" class="sd-axis">{html.escape(points[0].day)}</text>'
+            f'<text x="{w - pad}" y="{h - 8}" text-anchor="end" class="sd-axis">'
+            f'{html.escape(points[-1].day)}</text>')
+    return (f'<svg class="sd-traj" viewBox="0 0 {w} {h}" role="img" '
+            f'aria-label="credibility over time">{grid}{line}{dots}{ends}</svg>')
+
+
+def _sd_sources(sources) -> str:
+    rows = []
+    for grp in sources:
+        names = html.escape(", ".join(grp.names))
+        rep = (f'<span class="sd-rep" title="The outlet\'s truth-over-time reputation">rep '
+               f'{round(grp.reputation * 100)}</span>') if grp.reputation is not None else (
+               '<span class="sd-rep none" title="No resolved track record yet — neutral, not penalised">'
+               'unrated</span>')
+        tag = "wire" if grp.wire else "independent"
+        lbl = "wire · counted once" if grp.wire else "independent"
+        rows.append(f'<div class="sd-src {tag}"><span class="sd-src-tag">{lbl}</span>'
+                    f'<span class="sd-src-name">{names}</span>{rep}</div>')
+    return f'<div class="sd-srcs">{"".join(rows)}</div>'
+
+
+def _sd_fact(f) -> str:
+    pct = round(f.confidence * 100)
+    _, tier = _confidence_label(f.confidence)
+    tier = "proj" if f.is_projection else tier
+    head = html.escape(f.fact_en or f.fact)
+    link = f'<a class="clink" href="/cluster/{html.escape(f.cluster_id)}">{head}</a>'
+    orig = f'<div class="sd-fact-orig">{html.escape(f.fact)}</div>' if f.fact_en else ""
+    badges = []
+    if f.is_headline:
+        badges.append('<span class="b head" title="The fact the story\'s score is anchored on">headline</span>')
+    if f.has_primary and f.grounding == "supported":
+        badges.append('<span class="b fact" title="Backed by a primary source the pipeline checked">primary-backed</span>')
+    elif f.has_primary:
+        badges.append('<span class="b fact">primary source</span>')
+    if f.grounding == "contradicted":
+        badges.append('<span class="b laun" title="A primary source contradicts this">contradicted</span>')
+    if f.disputed:
+        badges.append('<span class="b laun" title="A stronger contradicting claim disputes this">disputed</span>')
+    if f.extremity in ("significant", "extraordinary"):
+        badges.append(f'<span class="ex {f.extremity}" title="A bigger claim must earn more corroboration">'
+                      f'{f.extremity}</span>')
+    n = f.independent_originators
+    count = (f'<span class="sd-fact-orig-count">{n} independent originator{"s" if n != 1 else ""}</span>'
+             if not f.is_projection else '<span class="sd-fact-orig-count proj">forecast · echoed, not verified</span>')
+    return (
+        f'<div class="sd-fact">'
+        f'<div class="sd-fact-conf {tier}"><span class="sd-fact-pct">{pct}%</span></div>'
+        f'<div class="sd-fact-body"><div class="sd-fact-head">{link} {" ".join(badges)}</div>{orig}'
+        f'<div class="sd-fact-meta">{count}</div>{_sd_sources(f.sources)}</div></div>'
+    )
+
+
+def _story_detail_page(v: StoryView) -> str:
+    s = v.score
+    tier = _BAND_TIER.get(s.band, "lo")
+    big = f"{s.score}%" if not s.forecast_only else "—"
+    orig = f'<div class="sd-orig">{html.escape(v.headline_orig)}</div>' if v.headline_orig else ""
+    bits = [f'{v.source_count} source{"s" if v.source_count != 1 else ""}',
+            f'{len(v.facts)} fact{"s" if len(v.facts) != 1 else ""}']
+    if v.forecasts:
+        bits.append(f'{len(v.forecasts)} forecast{"s" if len(v.forecasts) != 1 else ""}')
+    if v.first_seen and v.last_updated:
+        span = _fmt_day(v.first_seen)
+        if round(v.last_updated) != round(v.first_seen):
+            span += f' → {_fmt_day(v.last_updated)}'
+        bits.append(span)
+    header = (
+        f'<div class="sd-head {tier}">'
+        f'<div class="sd-score"><span class="sd-pct">{big}</span>'
+        f'<span class="sd-band">{html.escape(s.label)}</span></div>'
+        f'<div class="sd-headline"><h2>{html.escape(v.headline)}</h2>{orig}'
+        f'<div class="sd-meta">{" · ".join(bits)}</div></div></div>'
+    )
+    why = "".join(f"<li>{html.escape(w)}</li>" for w in s.why)
+    calc = ""
+    if v.facts and not s.forecast_only:
+        hf = v.facts[0]
+        calc = (f'<div class="sd-calc">Headline read: '
+                f'{html.escape(derivation_explain(hf.independent_originators, hf.has_primary, hf.extremity))}'
+                f'</div>')
+    deriv = (f'<section class="sd-sec"><h3>How this score was derived</h3>'
+             f'<ul class="sd-why">{why}</ul>{calc}</section>')
+    traj = (f'<section class="sd-sec"><h3>Credibility over time</h3>'
+            f'{_trajectory_svg(v.trajectory)}</section>')
+    facts_sec = ""
+    if v.facts:
+        facts_sec = (f'<section class="sd-sec"><h3>Core facts <span class="mut">· each scored on its '
+                     f'own</span></h3>{"".join(_sd_fact(f) for f in v.facts)}</section>')
+    fc_sec = ""
+    if v.forecasts:
+        fc_sec = (f'<section class="sd-sec"><h3>Forecasts &amp; opinions <span class="mut">· judged over '
+                  f'time, never counted as truth</span></h3>{"".join(_sd_fact(f) for f in v.forecasts)}</section>')
+    return f'<div class="ins sdetail">{header}{deriv}{traj}{facts_sec}{fc_sec}</div>'
 
 
 # --- inspectors (F2) + correction forms (F3) ---

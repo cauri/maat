@@ -45,6 +45,7 @@ from maat.learning.source_learning import learn_preferences
 from maat.learning.source_registry import fold_sources, pending_sources
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.serving.source_flags import denied_sources
+from maat.serving.stories import load_story_detail, load_story_views
 from maat.serving.topics import enriched_interest, parse_interest, story_matches
 
 # FastAPI is a hard dependency, but keep the import guarded so the pure builders above stay
@@ -703,6 +704,55 @@ async def _safe_image_fetch(url: str) -> tuple[bytes, str] | None:
 
 
 # ---------------------------------------------------------------------------
+# Story roll-up serialisers (#264/#42) — the SAME layer the console renders, as JSON for the app.
+# ---------------------------------------------------------------------------
+
+
+def _fact_to_json(f: Any) -> dict:
+    return {
+        "cluster_id": f.cluster_id,
+        "fact": f.fact,
+        "fact_en": f.fact_en,
+        "confidence": round(f.confidence, 4),
+        "independent_originators": f.independent_originators,
+        "has_primary": f.has_primary,
+        "extremity": f.extremity,
+        "grounding": f.grounding,
+        "disputed": f.disputed,
+        "is_headline": f.is_headline,
+        "is_projection": f.is_projection,
+        "sources": [{"names": s.names, "reputation": s.reputation, "wire": s.wire} for s in f.sources],
+    }
+
+
+def story_to_json(v: Any, *, full: bool = False) -> dict:
+    """Serialise a StoryView for the app. The list form carries the score + counts; ``full`` adds the
+    facts, forecasts, and credibility trajectory for the detail view."""
+    out = {
+        "id": v.node_id,
+        "headline": v.headline,
+        "headline_orig": v.headline_orig,
+        "score": v.score.score,
+        "band": v.score.band,
+        "label": v.score.label,
+        "forecast_only": v.score.forecast_only,
+        "capped": v.score.capped,
+        "why": v.score.why,
+        "source_count": v.source_count,
+        "fact_count": len(v.facts),
+        "forecast_count": len(v.forecasts),
+        "cluster_count": v.cluster_count,
+        "first_seen": v.first_seen,
+        "last_updated": v.last_updated,
+    }
+    if full:
+        out["facts"] = [_fact_to_json(f) for f in v.facts]
+        out["forecasts"] = [_fact_to_json(f) for f in v.forecasts]
+        out["trajectory"] = [{"day": p.day, "score": p.score, "band": p.band} for p in v.trajectory]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Thin FastAPI router (reads DB → calls pure builders — no app.py edits)
 # ---------------------------------------------------------------------------
 
@@ -903,6 +953,30 @@ def _make_router() -> Any:
             story["articles"] = []
 
         return JSONResponse(story)
+
+    @router.get("/stories", response_class=JSONResponse)
+    async def stories_endpoint(request: Request, limit: int = 100, offset: int = 0):
+        """The story feed (#264/#42): every story on the real story graph, ranked by ONE credibility
+        score — the same roll-up the console /stories shows, so app and console never diverge.
+        Paginated; ``total`` is the full count before the page slice."""
+        pool = request.app.state.pool
+        views, total = await load_story_views(pool)
+        lim = max(1, min(limit, 200))
+        off = max(0, offset)
+        return JSONResponse({
+            "total": total, "limit": lim, "offset": off,
+            "stories": [story_to_json(v) for v in views[off:off + lim]],
+        })
+
+    @router.get("/stories/{node_id}", response_class=JSONResponse)
+    async def story_node_endpoint(node_id: str, request: Request):
+        """One story with its full transparent breakdown + credibility trajectory over time (#39).
+        ``node_id`` is a story-graph node id, or ``cluster:<id>`` for a not-yet-threaded cluster."""
+        pool = request.app.state.pool
+        view = await load_story_detail(pool, node_id)
+        if view is None:
+            raise HTTPException(status_code=404, detail="no such story")
+        return JSONResponse(story_to_json(view, full=True))
 
     @router.get("/image")
     async def image_proxy(article: str, request: Request):
