@@ -1159,3 +1159,29 @@ def test_activity_has_one_run_button_not_per_step_logs():
     assert "Log a run" not in page and "/runs/trigger" not in page    # old per-step logs removed
     steps = _run_state()["steps"]
     assert len(steps) == 4 and steps[0]["label"] == "Find articles"   # the 4 pipeline steps
+
+
+def test_source_icon_monogram_is_deterministic_and_lettered():
+    """The Sources-list logo falls back to a tidy lettered chip when no favicon resolves, so a row
+    is never a broken image. Deterministic per outlet (#sources)."""
+    from maat.web.app import _icon_monogram, _valid_domain
+
+    assert _valid_domain("reuters.com") and _valid_domain("www.bbc.co.uk")
+    assert not _valid_domain("") and not _valid_domain("nodot") and not _valid_domain("a/b.com")
+
+    svg = _icon_monogram("reuters.com")
+    assert svg.startswith(b"<svg") and b">R<" in svg          # first letter, uppercased
+    assert _icon_monogram("reuters.com") == svg               # same outlet → same chip
+    assert _icon_monogram("bbc.com") != svg                   # different outlet → different chip
+    assert _icon_monogram("www.lemonde.fr").count(b">L<") == 1  # www. stripped before the letter
+
+
+def test_sources_page_renders_a_proxied_logo_per_row():
+    """Each source row shows its logo via the box proxy (never a third-party URL — privacy #1)."""
+    from maat.web.app import _sources_page
+
+    srcs = [{"source": "reuters.com", "langs": ["en"], "n": 5, "last": None, "first": None}]
+    html_out = _sources_page(srcs, set(), {}, {})
+    assert 'class="src-logo"' in html_out
+    assert 'src="/source-icon?d=reuters.com"' in html_out       # proxied through the box
+    assert "duckduckgo.com" not in html_out and "google.com/s2" not in html_out  # no client-side 3p
