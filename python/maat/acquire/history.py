@@ -89,21 +89,34 @@ async def _apify_history(source: str, *, depth: int) -> list[HistoryArticle]:
     ]
 
 
-async def _newsdata_history(source: str, *, depth: int) -> list[HistoryArticle]:
+async def _newsdata_history(source: str, *, depth: int, fetch_conc: int = 8) -> list[HistoryArticle]:
     if not newsdata.available():
         return []
     try:
-        arts = await asyncio.to_thread(
-            newsdata.search, "", domain=_norm(source), max_results=depth, pages=max(2, depth // 8)
+        # Most NewsData tiers return metadata only (``content`` is a paywall stub), so use it as a
+        # URL source — take the links, fetch the full bodies ourselves like GDELT. ``min_chars=0``
+        # keeps the metadata-only rows so we still get their links.
+        discovered = await asyncio.to_thread(
+            newsdata.search, "", domain=_norm(source), max_results=depth,
+            pages=max(2, depth // 8), min_chars=0,
         )
     except Exception as e:  # noqa: BLE001
         print(f"[history] {source} newsdata unavailable: {e}", flush=True)
         return []
-    return [
-        HistoryArticle(url=a.url, title=a.title, domain=_norm(a.domain or source),
-                       language=a.language or "", body=a.body, image_url=a.image_url, channel="newsdata")
-        for a in arts
-    ]
+    sem = asyncio.Semaphore(fetch_conc)
+
+    async def fetch(a) -> HistoryArticle | None:
+        async with sem:
+            body, image = await asyncio.to_thread(fetch_article, a.url)
+        if not body:
+            return None
+        return HistoryArticle(
+            url=a.url, title=a.title, domain=_norm(a.domain or source),
+            language=a.language or "", body=body, image_url=image or "", channel="newsdata",
+        )
+
+    out = await asyncio.gather(*(fetch(a) for a in discovered))
+    return [a for a in out if a]
 
 
 async def fetch_source_history(

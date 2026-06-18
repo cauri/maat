@@ -83,6 +83,7 @@ def search(
     domain: str | None = None,
     max_results: int = 10,
     pages: int = 1,
+    min_chars: int = 200,
     timeout: float = 30.0,
 ) -> list[NewsDataArticle]:
     """Latest NewsData articles for a query (optionally scoped to a language / country / domain).
@@ -111,7 +112,7 @@ def search(
         r = httpx.get(_LATEST_URL, params=params, headers={"X-ACCESS-KEY": key}, timeout=timeout)
         r.raise_for_status()
         data = r.json()
-        out.extend(parse_results(data.get("results")))
+        out.extend(parse_results(data.get("results"), min_chars=min_chars))
         page = data.get("nextPage")
         left -= 1
         if not page:
