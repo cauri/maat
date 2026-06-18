@@ -52,6 +52,7 @@ from maat.learning.reputation import (
     reputation_trajectories,
 )
 from maat.learning.rl import policy_step
+from maat.learning.story_credibility import FactView, score_story
 from maat.learning.trajectory import load_trajectory
 from maat.learning import source_registry as sreg
 from maat.metrics import de_us
@@ -293,6 +294,33 @@ async def feed(ok: str = "") -> str:
             pivots[d["claim_id"]] = d["text_en"]
     return _feed_page(articles, by_article, clusters, id_to_source,
                       title_en=title_en, claims_by_id=claims_by_id, pivots=pivots, flash=ok)
+
+
+@app.get("/stories", response_class=HTMLResponse)
+async def stories(ok: str = "") -> str:
+    """The STORY feed (#264): every event with one credibility score, ranked. The facts/claims
+    inspector stays on /. select * so grounding (#228) / disputed (#229) ride along if present."""
+    pool = app.state.pool
+    clusters = await pool.fetch(
+        "select * from clusters order by confidence desc, independent_originators desc"
+    )
+    claims = await pool.fetch("select * from claims")
+    arts = await pool.fetch("select id, source from articles")
+    id_to_source = {a["id"]: a["source"] for a in arts}
+    claims_by_id = {str(c["id"]): c for c in claims}
+    pivots: dict[str, str] = {}
+    for r in await pool.fetch("select data from events where type = 'claim.pivot'"):
+        d = _jobj(r["data"])
+        if d.get("claim_id") and d.get("text_en"):
+            pivots[d["claim_id"]] = d["text_en"]
+    # Reputation of RATED sources only (a resolved track record); cold-start = absent = neutral.
+    history = await _corroboration_history(pool)
+    reputation = {r.source: reputation_score(r) for r in fold_reputation(history) if r.outcome_n > 0}
+    disputed_claims = {str(c["id"]) for c in claims if _rget(c, "disputed")}
+    return _doc(
+        _stories_page(clusters, claims_by_id, id_to_source, pivots, reputation, disputed_claims),
+        "Every event, ranked by one credibility score", "stories", flash=ok,
+    )
 
 
 @app.get("/cluster/{cid}", response_class=HTMLResponse)
@@ -2019,6 +2047,72 @@ def _feed_page(articles, by_article, clusters, id_to_source, title_en=None, clai
     return _doc(panel + cards, "", "content", flash=flash)
 
 
+# ── Stories tab (#264): one credibility score per story, ranked ──────────────────────────────
+_BAND_TIER = {"established": "hi", "corroborated": "mid", "developing": "lo",
+              "thin": "lo", "single": "floor", "disputed": "floor", "forecast": "proj"}
+
+
+def _story_facts(group, claims_by_id, disputed_claims, id_to_source):
+    """Split a story's clusters into FactViews (for the score) + a projection count (excluded)."""
+    facts, projections = [], 0
+    for cl in group:
+        if _cluster_kind(cl, claims_by_id) == "projection":
+            projections += 1
+            continue
+        groups = [[id_to_source.get(a, a) for a in grp] for grp in _jload(cl["originators"])]
+        disputed = any(str(x) in disputed_claims for x in _jload(_rget(cl, "claim_ids")))
+        facts.append(FactView(
+            confidence=float(cl["confidence"] or 0.0),
+            independent_originators=int(cl["independent_originators"] or 0),
+            has_primary=bool(cl["has_primary"]), extremity=cl["extremity"] or "notable",
+            originator_sources=groups, grounding=_rget(cl, "grounding"), disputed=disputed,
+        ))
+    return facts, projections
+
+
+def _story_score_card(group, s, facts, projections, claims_by_id, id_to_source, pivots) -> str:
+    lead = group[0]
+    cid = _rget(lead, "id")
+    en = _fact_en(lead, claims_by_id, pivots)
+    head = html.escape(en) if en else html.escape(lead["fact"] or "")
+    orig = (f'<div class="scard-orig">{html.escape(lead["fact"] or "")}</div>'
+            if en and not s.forecast_only else "")
+    n_src = len({x for cl in group for x in _jload(cl["sources"])})
+    tier = _BAND_TIER.get(s.band, "lo")
+    why = " · ".join(s.why[:3])
+    meta = f'{n_src} source{"s" if n_src != 1 else ""} · {len(facts)} fact{"s" if len(facts) != 1 else ""}'
+    if projections:
+        meta += f' · {projections} forecast{"s" if projections != 1 else ""}'
+    flags = ('<span class="b laun">disputed</span>' if s.band == "disputed" else "") + \
+            ('<span class="b own">unproven carriers</span>' if s.capped else "")
+    big = f"{s.score}%" if not s.forecast_only else "—"
+    return (
+        f'<a class="scard {tier}" href="/cluster/{cid}">'
+        f'<div class="scard-score"><span class="scard-pct">{big}</span>'
+        f'<span class="scard-band">{html.escape(s.label)}</span></div>'
+        f'<div class="scard-main"><div class="scard-head">{head}{orig}</div>'
+        f'<div class="scard-why">{html.escape(why)}</div>'
+        f'<div class="scard-meta">{meta} {flags}</div></div></a>'
+    )
+
+
+def _stories_page(clusters, claims_by_id, id_to_source, pivots, reputation, disputed_claims) -> str:
+    note = ('<div class="deriv">Every event, ranked by one <b>credibility</b> score — rolled up from '
+            'how independently its core facts corroborate, the track record of the outlets carrying it, '
+            'primary-source grounding, and any disputes. Forecasts and opinions don\'t count toward it. '
+            'Tap a story for the full breakdown.</div>')
+    items = []
+    for g in _group_stories(clusters):
+        facts, projections = _story_facts(g, claims_by_id, disputed_claims, id_to_source)
+        s = score_story(facts, reputation)
+        items.append((s.score if not s.forecast_only else -1,
+                      _story_score_card(g, s, facts, projections, claims_by_id, id_to_source, pivots)))
+    items.sort(key=lambda x: x[0], reverse=True)
+    body = "".join(h for _, h in items) or (
+        '<p class="empty">No stories yet — pull some news from the Updates tab.</p>')
+    return f'<div class="ins">{note}{body}</div>'
+
+
 # --- inspectors (F2) + correction forms (F3) ---
 
 
@@ -3516,6 +3610,7 @@ def _eval_page(report, err: str, otlp: str) -> str:
 # hover tooltip AND the context the right-panel assistant gets about the current page.
 _NAV_TABS = [
     ("/", "Feed", "content", "📰", "The news feed — open any story to see or fix how Maat judged it"),
+    ("/stories", "Stories", "stories", "🗞️", "Every event ranked by one credibility score — the story view"),
     ("/runs", "Activity", "runs", "📊", "What the system has processed, and anything that failed"),
     ("/review", "Review", "review", "💬", "User feedback, triaged — what needs a decision"),
     ("/clocks", "Updates", "clocks", "⏱️", "When Maat pulls in new news — and a switch to pause it"),
