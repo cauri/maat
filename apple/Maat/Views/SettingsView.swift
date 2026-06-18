@@ -43,13 +43,34 @@ struct SettingsView: View {
                           systemImage: Intelligence.isAvailable ? "checkmark.seal" : "exclamationmark.triangle")
                 }
 
+                Section {
+                    ForEach(LanguageCatalog.codes, id: \.self) { code in
+                        Button {
+                            toggleLanguage(code)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(AppSettings.languageName(code)).foregroundStyle(Palette.ink)
+                                if settings.preferredLanguages.first == code {
+                                    Text("primary").font(.caption2).foregroundStyle(Palette.muted)
+                                }
+                                Spacer(minLength: 0)
+                                if settings.preferredLanguages.contains(code) {
+                                    Image(systemName: "checkmark").foregroundStyle(Palette.confHigh)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("Reading languages")
+                } footer: {
+                    Text("Headlines and titles not in one of these are translated into "
+                         + "\(AppSettings.languageName(settings.displayLanguageCode)) on this device. "
+                         + "The first one is your primary language.")
+                }
+
                 Section("Translation") {
                     Toggle("Prefer on-device translation", isOn: $settings.preferOnDeviceTranslation)
-                    TextField("Display language code", text: $settings.displayLanguageCode)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
                 }
 
                 Section("Privacy · captured signals") {
@@ -88,6 +109,19 @@ struct SettingsView: View {
         feed.setService(settings.makeFeedService())
         await feed.refresh()
         await feed.applyRerank(FoundationModelsReranker(), topics: topics.topics)
+    }
+
+    /// Toggle a reading language. Selection order is preference order (first = primary translation
+    /// target); at least one language always stays selected.
+    private func toggleLanguage(_ code: String) {
+        var langs = settings.preferredLanguages
+        if let index = langs.firstIndex(of: code) {
+            guard langs.count > 1 else { return }
+            langs.remove(at: index)
+        } else {
+            langs.append(code)
+        }
+        settings.preferredLanguages = langs
     }
 }
 
