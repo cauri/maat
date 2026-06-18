@@ -119,7 +119,12 @@ struct StoryDetailView: View {
             .padding()
         }
         .background(Palette.bg)
-        .navigationTitle(selectedArticle?.source ?? "Story")
+        // The source shows in the byline beneath the headline, so keep it OUT of the nav bar —
+        // no redundant "bbc.co.uk" publisher header sitting above the article title (#33).
+        .navigationTitle("")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
         #if canImport(Translation)
         .translationTask(translator.configuration) { session in
             await translator.fulfill(using: session)

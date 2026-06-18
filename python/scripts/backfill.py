@@ -36,6 +36,7 @@ import asyncpg
 from dotenv import load_dotenv
 
 from maat import prompts
+from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
 from maat.acquire.gdelt import search_window, week_windows
 from maat.acquire.source_gate import accept_source
@@ -159,9 +160,10 @@ async def main() -> None:
                 body, image_url = await asyncio.to_thread(fetch_article, a.url)
                 if not body:
                     continue
+                ct, cb = clean_article(a.title, body, a.domain)  # strip scraped boilerplate (#33)
                 await publish(
                     nc, "article.ingested", _aid(a.url),
-                    {"title": a.title, "source": a.domain, "language": a.language, "body": body,
+                    {"title": ct, "source": a.domain, "language": a.language, "body": cb,
                      "url": a.url, "image_url": image_url, "backfill": True, "seendate": a.seendate},
                 )
                 new += 1

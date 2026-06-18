@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 from maat import prompts
 from maat.acquire import apify
 from maat.acquire.ccnews import detect_lang
+from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
 from maat.acquire.gdelt import search
 from maat.acquire.locales import Locale, load_locales
@@ -110,6 +111,7 @@ class _Ctx:
             return False
         if provider == "apify-locale":  # metadata languageCode is unreliable — detect from the body
             language = detect_lang(body) or language
+        title, body = clean_article(title, body, source)  # strip scraped boilerplate (#33)
         await publish(
             self.nc, "article.ingested", _aid(url),
             {
