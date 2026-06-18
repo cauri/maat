@@ -2145,15 +2145,23 @@ def _trajectory_svg(points) -> str:
         f'<text x="6" y="{y(g) + 3:.0f}" class="sd-axis">{g}</text>'
         for g in (0, 50, 100)
     )
-    line = ""
-    if len(points) > 1:
-        pts = " ".join(f"{x(i):.1f},{y(p.score):.1f}" for i, p in enumerate(points))
-        line = f'<polyline points="{pts}" class="sd-line {_BAND_TIER.get(points[-1].band, "lo")}"/>'
     dots = "".join(
         f'<circle cx="{x(i):.1f}" cy="{y(p.score):.1f}" r="4" class="sd-dot {_BAND_TIER.get(p.band, "lo")}">'
         f'<title>{html.escape(p.day)}: {p.score}% · {html.escape(p.band)}</title></circle>'
         for i, p in enumerate(points)
     )
+    if len(points) == 1:
+        # One reading so far — label it plainly so the chart reads as "just started", not broken.
+        p = points[0]
+        cx, cy = x(0), y(p.score)
+        mark = (f'<text x="{cx:.1f}" y="{cy - 12:.1f}" text-anchor="middle" class="sd-traj-mark '
+                f'{_BAND_TIER.get(p.band, "lo")}">{p.score}%</text>')
+        cap = (f'<text x="{w / 2:.0f}" y="{h - 8}" text-anchor="middle" class="sd-axis">'
+               f'first reading · {html.escape(p.day)} · re-checked daily</text>')
+        return (f'<svg class="sd-traj" viewBox="0 0 {w} {h}" role="img" '
+                f'aria-label="credibility — first reading">{grid}{dots}{mark}{cap}</svg>')
+    pts = " ".join(f"{x(i):.1f},{y(p.score):.1f}" for i, p in enumerate(points))
+    line = f'<polyline points="{pts}" class="sd-line {_BAND_TIER.get(points[-1].band, "lo")}"/>'
     ends = (f'<text x="{pad}" y="{h - 8}" class="sd-axis">{html.escape(points[0].day)}</text>'
             f'<text x="{w - pad}" y="{h - 8}" text-anchor="end" class="sd-axis">'
             f'{html.escape(points[-1].day)}</text>')

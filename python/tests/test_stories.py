@@ -150,6 +150,13 @@ def test_empty_trajectory_renders_a_friendly_note():
     assert "No history yet" in _trajectory_svg([])
 
 
+def test_single_reading_trajectory_labels_itself_not_blank():
+    from maat.web.app import _trajectory_svg
+
+    svg = _trajectory_svg([TrajectoryPoint("2026-06-18", 81, "corroborated")])
+    assert "first reading" in svg and "81%" in svg and "<polyline" not in svg
+
+
 def test_story_to_json_round_trips_score_facts_and_trajectory():
     from maat.serving.feed import story_to_json
 
