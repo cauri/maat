@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
-import { RoomPlaceholder } from "@/components/shell/room-placeholder";
+import { FeedbackRoom } from "@/components/feedback/feedback-room";
 
 export const metadata: Metadata = { title: "Feedback" };
 
 export default function FeedbackPage() {
-  return <RoomPlaceholder id="feedback" />;
+  return <FeedbackRoom />;
 }

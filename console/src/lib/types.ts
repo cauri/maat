@@ -242,6 +242,19 @@ export interface AuditResponse {
   events: AuditEvent[];
 }
 
+// ── Feedback: triage queue (#313) ────────────────────────────────────────────────────────
+export interface FeedbackItem {
+  item_id: string;
+  text: string;
+  category_hint: string;
+  source: string;
+  submitted_at: string;
+}
+
+export interface FeedbackResponse {
+  queue: FeedbackItem[];
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;

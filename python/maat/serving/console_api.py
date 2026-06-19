@@ -539,6 +539,28 @@ def _make_console_router() -> Any:
     async def feedback(request: Request) -> dict[str, Any]:
         return {"queue": await feedback_mod.queue(_pool(request))}
 
+    @router.post("/feedback/{item_id}/triage")
+    async def triage_feedback(item_id: str, request: Request) -> dict[str, Any]:
+        """Operator-triages a feedback item — an audited ``feedback.triaged`` event (D5)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="request body must be a JSON object")
+        category = str(body.get("category", "")).strip()
+        route = str(body.get("route", "")).strip()
+        if not category or not route:
+            raise HTTPException(status_code=400, detail="`category` and `route` are required")
+        nc = getattr(request.app.state, "nats", None)
+        if nc is None:
+            raise HTTPException(status_code=503, detail="event bus unavailable — nothing was saved")
+        await feedback_mod.record_triage(
+            _pool(request), nc,
+            item_id=item_id, category=category, route=route, reason=str(body.get("reason", "")),
+        )
+        return {"ok": True, "item_id": item_id, "category": category, "route": route}
+
     # ---- business (spend) --------------------------------------------------------------
     @router.get("/spend")
     async def spend(request: Request) -> dict[str, Any]:
