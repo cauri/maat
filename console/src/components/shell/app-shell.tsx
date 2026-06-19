@@ -10,7 +10,7 @@ import { RAIL_COOKIE } from "@/lib/ui-prefs";
 import { AuditDrawer } from "./audit-drawer";
 import { CommandPalette } from "./command-palette";
 import { Rail } from "./rail";
-import { ShellContext, type ShellState } from "./shell-context";
+import { type PageSelection, ShellContext, type ShellState } from "./shell-context";
 import { SiaDock } from "./sia-dock";
 import { Topbar } from "./topbar";
 
@@ -39,6 +39,7 @@ export function AppShell({
   const [auditOpen, setAuditOpen] = useState(false);
   const [siaOpen, setSiaOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(initialRailCollapsed);
+  const [selection, setSelection] = useState<PageSelection | null>(null);
 
   const setRail = useCallback((value: boolean) => {
     setCollapsed(value);
@@ -77,8 +78,10 @@ export function AppShell({
       sia: { open: siaOpen, set: setSiaOpen, toggle: () => setSiaOpen((open) => !open) },
       rail: { collapsed, set: setRail, toggle: () => setRail(!collapsed) },
       stream,
+      selection,
+      setSelection,
     }),
-    [user, authEnabled, logoutPath, paletteOpen, auditOpen, siaOpen, collapsed, setRail, stream],
+    [user, authEnabled, logoutPath, paletteOpen, auditOpen, siaOpen, collapsed, setRail, stream, selection],
   );
 
   return (

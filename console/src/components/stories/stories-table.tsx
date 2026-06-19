@@ -7,6 +7,7 @@ import { RefreshCw } from "lucide-react";
 
 import { ColumnHeader } from "@/components/data-table/column-header";
 import { DataTable } from "@/components/data-table/data-table";
+import { useShell } from "@/components/shell/shell-context";
 import { Button } from "@/components/ui/button";
 import { useStories } from "@/hooks/use-stories";
 import { ApiError } from "@/lib/api";
@@ -59,7 +60,17 @@ const columns: ColumnDef<Story>[] = [
 
 export function StoriesTable() {
   const { data, isLoading, error, isFetching, refetch } = useStories();
+  const { setSelection } = useShell();
   const [activeId, setActiveId] = useState<string | null>(null);
+
+  const openStory = (story: Story) => {
+    setActiveId(story.id);
+    setSelection({ kind: "story", id: story.id, label: story.headline });
+  };
+  const closeStory = () => {
+    setActiveId(null);
+    setSelection(null);
+  };
 
   return (
     <div className="flex h-full flex-col gap-3 p-4">
@@ -88,13 +99,13 @@ export function StoriesTable() {
           isLoading={isLoading}
           error={error ? (error instanceof ApiError ? error.message : "Failed to load stories") : null}
           searchPlaceholder="Search stories…"
-          onRowClick={(s) => setActiveId(s.id)}
+          onRowClick={openStory}
           activeRowId={activeId ?? undefined}
           emptyMessage="No stories yet — once the pipeline corroborates clusters, they appear here."
         />
       </div>
 
-      <StoryWorkspace nodeId={activeId} onClose={() => setActiveId(null)} />
+      <StoryWorkspace nodeId={activeId} onClose={closeStory} />
     </div>
   );
 }
