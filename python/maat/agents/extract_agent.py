@@ -21,6 +21,11 @@ from maat.pipeline.extract import extract_claims
 _pool = None  # set in main(); used to resolve the operator's active prompt (P8)
 
 
+async def _has_claims(pool: Any, article_id: str) -> bool:
+    """True if this article already produced claims (so a redelivery can skip re-extraction)."""
+    return bool(await pool.fetchval("select 1 from claims where article_id = $1 limit 1", article_id))
+
+
 async def handle(nc: Any, event: dict[str, Any]) -> None:
     article_id = event["stream_id"]
     data = event.get("data", {})
@@ -29,6 +34,15 @@ async def handle(nc: Any, event: dict[str, Any]) -> None:
     # second net. No claims → no cluster → it never becomes a story.
     if is_index_page(data.get("title", ""), data.get("body", "")):
         print(f"[extract] {article_id}: skipped — section/index page, not an article", flush=True)
+        return
+    # Idempotency (#297): claim ids are content-random, so re-running extract on an at-least-once
+    # redelivery (worker crash / AckWait) would append a SECOND set of claims — the kernel dedups
+    # claims.extracted by claim id, which a fresh extraction doesn't collide on. If this article
+    # already has claims the work is done, so skip. (Every OTHER stage is keyed by a deterministic
+    # id — claims.classified / cluster.corroborated / claim.related all upsert — so extract is the
+    # one stage that needs an explicit guard.)
+    if _pool is not None and await _has_claims(_pool, article_id):
+        print(f"[extract] {article_id}: already extracted — skipping (idempotent redelivery, #297)", flush=True)
         return
     prompt = await prompts.active_text(_pool, "extract", prompts.seed_default("extract"))
     # extract_claims is sync (LLM call); keep the event loop free.
