@@ -636,6 +636,48 @@ def _make_console_router() -> Any:
             ]
         }
 
+    # ---- graph (cross-cutting · the corroboration graph) -------------------------------
+    @router.get("/graph")
+    async def graph(request: Request, limit: int = 60) -> dict[str, Any]:
+        """The corroboration graph: clusters (facts) and the independent sources that report
+        them. Edges = "this source corroborated this fact"; a fact with many independent
+        in-edges is well corroborated. Built from clusters + claims (the story-graph
+        projection #42 is the richer source once it's populated)."""
+        pool = _pool(request)
+        lim = max(1, min(limit, 200))
+        clusters = await pool.fetch(
+            "select id, fact, confidence, extremity, independent_originators, claim_ids "
+            "from clusters order by independent_originators desc, id limit $1",
+            lim,
+        )
+        claim_src = {
+            str(r["id"]): r["source"]
+            for r in await pool.fetch(
+                "select c.id, a.source from claims c join articles a on a.id = c.article_id "
+                "where a.source is not null"
+            )
+        }
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        seen_sources: set[str] = set()
+        for cl in clusters:
+            cid = str(cl["id"])
+            nodes.append({
+                "id": cid, "type": "cluster", "label": (cl["fact"] or "")[:90],
+                "confidence": cl["confidence"], "extremity": cl["extremity"],
+                "originators": cl["independent_originators"],
+            })
+            cl_sources = {
+                claim_src.get(str(x)) for x in (_jload(cl["claim_ids"]) or [])
+            } - {None}
+            for s in cl_sources:
+                sid = f"src:{s}"
+                if s not in seen_sources:
+                    seen_sources.add(s)
+                    nodes.append({"id": sid, "type": "source", "label": s})
+                edges.append({"source": sid, "target": cid})
+        return {"nodes": nodes, "edges": edges}
+
     # ---- commands (the only path that mutates state) -----------------------------------
     @router.get("/commands")
     async def commands_manifest() -> dict[str, Any]:
