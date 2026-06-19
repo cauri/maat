@@ -133,6 +133,39 @@ export interface ClaimDetail extends Claim {
   cluster: ClaimCluster | null;
 }
 
+// ── Pipeline health (#311) ──────────────────────────────────────────────────────────────
+export interface PipelineStage {
+  stage: string;
+  event_type: string;
+  count: number;
+  last_seen: string | null;
+  freshness: string;
+  age_s: number | null;
+}
+
+export interface PipelineHealth {
+  as_of: string;
+  status: string;
+  stages: PipelineStage[];
+  dead_letters: {
+    total: number;
+    recent: { type: string; error: string; created_at: string }[];
+    error_preview: string;
+  };
+  projections: { articles: number; claims: number; clusters: number };
+  throughput: { newest_event_age_s: number | null; newest_event_at: string | null; freshness: string };
+  calibration: {
+    n: number;
+    well_corroborated: number;
+    thinly_sourced: number;
+    single_source: number;
+    has_primary_count: number;
+    mean_confidence: number;
+    confidence_distribution: { hi: number; mid: number; lo: number; floor: number };
+  };
+  alerts: string[];
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;

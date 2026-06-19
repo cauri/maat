@@ -11,6 +11,7 @@ import type {
   ClaimsResponse,
   CommandResult,
   Overview,
+  PipelineHealth,
   SourcesResponse,
   StoriesPage,
   StoryDetail,
@@ -101,4 +102,8 @@ export function getClaims(
 
 export function getClaim(claimId: string, signal?: AbortSignal): Promise<ClaimDetail> {
   return apiGet<ClaimDetail>(`/claims/${encodeURIComponent(claimId)}`, signal);
+}
+
+export function getPipeline(signal?: AbortSignal): Promise<PipelineHealth> {
+  return apiGet<PipelineHealth>("/pipeline", signal);
 }
