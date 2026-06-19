@@ -24,7 +24,7 @@ from maat.pipeline.corroborate import ClaimRow, corroborate
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
 from maat.pipeline.ownership import fold_ownership
-from maat.serving.translate import translate_text
+from maat.translate import translate_text
 from maat.ids import cluster_id
 
 

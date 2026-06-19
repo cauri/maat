@@ -2,7 +2,7 @@
 
 The feed's curation step (``agents.curation.curate``) balances the feed across countries so no
 single region dominates, but only for stories whose country the TLD/language heuristic
-(``serving.feed._infer_country``) can place. English-language wire copy about a non-Anglophone
+(``maat.geo.infer_country``) can place. English-language wire copy about a non-Anglophone
 event often carries no country signal, so it slips the de-US cap entirely. This agent runs the
 SAME heuristic the feed runs, and for each cluster it leaves UNPLACED it asks the bulk model for
 the country, emitting ``story.geo_inferred`` events the feed folds at read time.
@@ -27,7 +27,7 @@ from maat.db import get_pool
 from maat.bus import connect
 from maat.events import STORY_GEO_INFERRED, publish
 from maat.pipeline.geotag import llm_country
-from maat.serving.feed import _infer_country  # reuse the EXACT heuristic the feed applies
+from maat.geo import infer_country  # reuse the EXACT heuristic the feed applies (#291: neutral home)
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -57,7 +57,7 @@ async def main() -> None:
     }
     await pool.close()
 
-    # article_meta / claims shaped exactly as serving.feed builds them, so _infer_country behaves
+    # article_meta / claims shaped exactly as serving.feed builds them, so infer_country behaves
     # identically here: it reads each claim's language (attached from its article) and each
     # originator article's source TLD.
     article_meta = {str(r["id"]): {"source": r["source"], "language": r["language"]} for r in arts}
@@ -74,7 +74,7 @@ async def main() -> None:
         if r["id"] in done:
             continue
         cl_claims = [claims_by_id[c] for c in (str(x) for x in _jload(r["claim_ids"])) if c in claims_by_id]
-        if _infer_country(cl_claims, article_meta, r["originators"]):
+        if infer_country(cl_claims, article_meta, r["originators"]):
             continue  # heuristic already places it — no LLM spend
         todo.append((r["id"], r["fact"] or ""))
 

@@ -40,6 +40,7 @@ import httpx
 from maat.acquire.clean import clean_article, is_index_page
 from maat.agents.curation import Story as CurationStory, curate
 from maat.events import STORY_GEO_INFERRED
+from maat.geo import infer_country
 from maat.learning.accuracy import lifecycle_by_fact
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.source_learning import learn_preferences
@@ -416,66 +417,6 @@ def build_deeper(
     }
 
 
-# ---------------------------------------------------------------------------
-# Geography inference helpers (best-effort, no LLM — for de-US ranking only)
-# ---------------------------------------------------------------------------
-
-# Language → most-probable country (rough, for de-US balancing only — not truth claims)
-_LANG_TO_COUNTRY: dict[str, str] = {
-    "ar": "SA", "de": "DE", "es": "ES", "fr": "FR", "hi": "IN", "it": "IT",
-    "ja": "JP", "ko": "KR", "nl": "NL", "pl": "PL", "pt": "BR", "ru": "RU",
-    "sv": "SE", "tr": "TR", "uk": "UA", "zh": "CN",
-}
-
-# TLD → country (for bare-domain sources like "bbc.co.uk", "lemonde.fr")
-_TLD_TO_COUNTRY: dict[str, str] = {
-    "co.uk": "GB", "uk": "GB", "fr": "FR", "de": "DE", "it": "IT", "es": "ES",
-    "nl": "NL", "pt": "PT", "com.br": "BR", "br": "BR", "au": "AU", "ca": "CA",
-    "cn": "CN", "jp": "JP", "kr": "KR", "ru": "RU", "co.in": "IN", "in": "IN",
-    "co.za": "ZA", "za": "ZA", "ng": "NG", "ke": "KE", "eg": "EG",
-    "ar": "AR", "mx": "MX", "tr": "TR", "se": "SE", "no": "NO", "pl": "PL",
-}
-
-
-def _source_country(source: str) -> str:
-    """Guess ISO-3166-1 alpha-2 country from a source domain. Empty string if unknown."""
-    s = (source or "").lower().strip()
-    if not s:
-        return ""
-    # Longest-match TLD suffix first
-    for tld, country in sorted(_TLD_TO_COUNTRY.items(), key=lambda x: -len(x[0])):
-        if s.endswith("." + tld) or s == tld:
-            return country
-    return ""
-
-
-def _infer_country(
-    claims: list[dict[str, Any]],
-    article_meta: dict[str, dict[str, Any]],
-    originators_raw: Any,
-) -> str:
-    """Best-effort country inference for curation — not a veracity signal.
-
-    Order of preference:
-    1. Source-domain TLD from independent originator articles.
-    2. Language of the claims (non-English only — English doesn't narrow to a country).
-    Falls back to "" (unknown) — curate() treats unknown country as uncapped.
-    """
-    for grp in _jload(originators_raw):
-        for aid in grp:
-            art = article_meta.get(aid) or {}
-            c = _source_country(art.get("source") or "")
-            if c:
-                return c
-    for claim in claims:
-        lang = (claim.get("language") or "").lower()[:2]
-        if lang and lang != "en":
-            c = _LANG_TO_COUNTRY.get(lang, "")
-            if c:
-                return c
-    return ""
-
-
 def _resolve_country(
     claims: list[dict[str, Any]],
     article_meta: dict[str, dict[str, Any]],
@@ -486,7 +427,7 @@ def _resolve_country(
     """Country for curation: the TLD/language heuristic first, then the LLM geo-tagger's
     inference (#189) only for the gap the heuristic left blank. The heuristic stays
     authoritative — the override never replaces a country the heuristic could place."""
-    country = _infer_country(claims, article_meta, originators_raw)
+    country = infer_country(claims, article_meta, originators_raw)
     if not country and geo_overrides:
         country = geo_overrides.get(cluster_id, "")
     return country

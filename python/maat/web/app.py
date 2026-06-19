@@ -77,7 +77,7 @@ from maat.serving import spend as spend_mod
 from maat.serving.console_api import console_router
 from maat.serving.feed import feed_router
 from maat.serving.social_api import social_router
-from maat.serving.translate import translate_text
+from maat.translate import translate_text
 from maat.serving.feedback import queue as feedback_queue
 from maat.serving.feedback import record as feedback_record
 from maat.serving.feedback import record_triage as feedback_record_triage
@@ -1379,11 +1379,11 @@ def de_us_breakdown(articles) -> tuple[de_us.ScoreBreakdown, dict, dict]:
     Each article becomes a `de_us.SourceMeta` — origin country guessed from the source domain
     (the feed's own best-effort TLD map), language straight off the row. Returns the per-axis
     score breakdown plus the geographic + language distributions for the dashboard. Pure."""
-    from maat.serving.feed import _source_country  # reuse the TLD→country guess
+    from maat.geo import source_country  # reuse the TLD→country guess (#291: neutral home)
 
     metas = [
         de_us.SourceMeta(
-            source_country=(_source_country(a["source"] or "") or None),
+            source_country=(source_country(a["source"] or "") or None),
             language=(a["language"] or None),
         )
         for a in articles
