@@ -15,10 +15,12 @@ import {
 } from "lucide-react";
 
 import { ScoreBadge } from "@/components/stories/score-badge";
+import { useShell } from "@/components/shell/shell-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useOverview } from "@/hooks/use-overview";
 import { useStories } from "@/hooks/use-stories";
 import { isStale, relativeTime } from "@/lib/time";
@@ -49,14 +51,43 @@ function attentionReason(story: Story): string | null {
 export function OverviewDashboard() {
   const overview = useOverview();
   const stories = useStories();
+  const { audit } = useShell();
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 p-4 sm:p-6">
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <KpiCard icon={Newspaper} label="Articles" value={overview.data?.counts.articles} loading={overview.isLoading} />
-        <KpiCard icon={ListChecks} label="Claims" value={overview.data?.counts.claims} loading={overview.isLoading} />
-        <KpiCard icon={Network} label="Clusters" value={overview.data?.counts.clusters} loading={overview.isLoading} />
-        <KpiCard icon={Activity} label="Events" value={overview.data?.counts.events} loading={overview.isLoading} />
+        <KpiCard
+          icon={Newspaper}
+          label="Articles"
+          value={overview.data?.counts.articles}
+          loading={overview.isLoading}
+          href="/pipeline"
+          digest="Articles ingested into the pipeline. Open Pipeline for stage health →"
+        />
+        <KpiCard
+          icon={ListChecks}
+          label="Claims"
+          value={overview.data?.counts.claims}
+          loading={overview.isLoading}
+          href="/claims"
+          digest="Claims extracted from articles. Open the claim inspector →"
+        />
+        <KpiCard
+          icon={Network}
+          label="Clusters"
+          value={overview.data?.counts.clusters}
+          loading={overview.isLoading}
+          href="/graph"
+          digest="Corroborated fact clusters. Open the corroboration graph →"
+        />
+        <KpiCard
+          icon={Activity}
+          label="Events"
+          value={overview.data?.counts.events}
+          loading={overview.isLoading}
+          onClick={audit.toggle}
+          digest="Events on the append-only log. Open the audit log →"
+        />
       </section>
 
       <section className="grid gap-4 lg:grid-cols-2">
@@ -74,14 +105,20 @@ function KpiCard({
   label,
   value,
   loading,
+  digest,
+  href,
+  onClick,
 }: {
   icon: typeof Newspaper;
   label: string;
   value: number | undefined;
   loading: boolean;
+  digest: string;
+  href?: string;
+  onClick?: () => void;
 }) {
-  return (
-    <Card>
+  const inner = (
+    <Card className="h-full transition-colors hover:border-ring/40 hover:bg-muted/40">
       <CardContent className="flex items-center justify-between gap-3 py-4">
         <div className="flex flex-col gap-1">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
@@ -96,6 +133,24 @@ function KpiCard({
         <Icon className="size-5 shrink-0 text-muted-foreground/60" />
       </CardContent>
     </Card>
+  );
+
+  const cls = "block rounded-xl text-left outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  const trigger = href ? (
+    <Link href={href} className={cls}>
+      {inner}
+    </Link>
+  ) : (
+    <button type="button" onClick={onClick} className={cn(cls, "w-full")}>
+      {inner}
+    </button>
+  );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+      <TooltipContent>{digest}</TooltipContent>
+    </Tooltip>
   );
 }
 
