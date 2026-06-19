@@ -83,9 +83,8 @@ def _node(
 
 def _graph_with(*nodes: EventNode) -> StoryGraph:
     """Build a StoryGraph pre-seeded with the given nodes (for gate / edge tests)."""
-    g = StoryGraph()
+    g = StoryGraph(nodes={n.id: n for n in nodes})  # constructor builds the entity index (#285)
     for n in nodes:
-        g.nodes[n.id] = n
         g.node_clusters[n.id] = []
     return g
 
