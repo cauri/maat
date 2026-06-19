@@ -30,9 +30,11 @@ from maat.learning.reputation import (
     reputation_trajectories,
 )
 from maat.learning import source_registry as sreg
+from maat.obs import emit_consumer_health
 from maat.obs_metrics import pipeline_health
 from maat.serving import feedback as feedback_mod
 from maat.serving import spend as spend_mod
+from maat.serving.consumer_health import consumer_health, dead_letters_by_stage, health_as_dicts
 from maat.serving.feed import story_to_json
 from maat.serving.stories import load_story_detail, load_story_views
 
@@ -449,7 +451,31 @@ def _make_console_router() -> Any:
             {"confidence": r["confidence"], "extremity": r["extremity"]}
             for r in await pool.fetch("select confidence, extremity from clusters")
         ]
-        return pipeline_health(event_rows, dead_rows, counts, clusters=clusters)
+        # Per-stage durable-consumer health (#299): live lag/in-flight/redelivered from JetStream +
+        # per-stage dead-letter count — so the operator sees WHERE the pipeline backs up.
+        nc = getattr(request.app.state, "nats", None)
+        health = health_as_dicts(await consumer_health(nc, await dead_letters_by_stage(pool)))
+        emit_consumer_health(health)  # → cat-cafe (no-op without an OTLP endpoint)
+        result = pipeline_health(event_rows, dead_rows, counts, clusters=clusters)
+        result["consumers"] = health
+        return result
+
+    @router.post("/dead-letters/{dl_id}/replay")
+    async def replay_dead_letter(dl_id: int, request: Request) -> dict[str, Any]:
+        """Re-publish a dead-lettered event so its stage re-processes it (#299). Idempotent handlers
+        (#297) make a replay safe; a still-poison event simply dead-letters again."""
+        pool = _pool(request)
+        row = await pool.fetchrow(
+            "select stream_id, type, data, tenant_id from dead_letters where id = $1", dl_id
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"no dead-letter #{dl_id}")
+        nc = getattr(request.app.state, "nats", None)
+        if nc is None:
+            raise HTTPException(status_code=503, detail="event bus unavailable — nothing was replayed")
+        data = row["data"] if isinstance(row["data"], dict) else json.loads(row["data"] or "{}")
+        await events.publish(nc, row["type"], row["stream_id"] or "", data, row["tenant_id"] or "cauri")
+        return {"replayed": dl_id, "type": row["type"], "stream_id": row["stream_id"]}
 
     # ---- config (engine · tuning, sign-off) --------------------------------------------
     @router.get("/config")

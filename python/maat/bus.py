@@ -49,6 +49,27 @@ def _dead_letter(name: str, event: dict[str, Any], exc: Exception, delivered: in
     print(f"[{name}] DEAD-LETTER after {delivered} deliveries (stream_id={sid}, type={event.get('type','?')}): {exc!r}", flush=True)
 
 
+async def _persist_dead_letter(name: str, event: dict[str, Any], exc: Exception) -> None:
+    """Best-effort: record the dead-letter in the ``dead_letters`` table, tagged with the stage, so
+    the operator console can SURFACE and replay it (#299) — not just the log line above. Failure here
+    never raises (a short-lived pool; the structured log from ``_dead_letter`` is the floor)."""
+    try:
+        from maat.db import get_pool
+
+        pool = await get_pool()
+        try:
+            await pool.execute(
+                "insert into dead_letters (stream_id, type, data, error, stage) "
+                "values ($1, $2, $3::jsonb, $4, $5)",
+                event.get("stream_id"), event.get("type") or "?",
+                json.dumps(event.get("data") or {}), repr(exc), name,
+            )
+        finally:
+            await pool.close()
+    except Exception as persist_exc:  # noqa: BLE001 - best-effort; the structured log is the floor
+        print(f"[{name}] dead-letter persist failed: {persist_exc}", flush=True)
+
+
 async def _process_msg(name: str, handler: Handler, nc: Any, msg: Any, max_deliver: int) -> None:
     """Decode → run handler → ack / nak / dead-letter ONE message.
 
@@ -70,6 +91,7 @@ async def _process_msg(name: str, handler: Handler, nc: Any, msg: Any, max_deliv
     except Exception as exc:  # noqa: BLE001 - a handler error must not kill the worker
         if delivered >= max_deliver:
             _dead_letter(name, event, exc, delivered)
+            await _persist_dead_letter(name, event, exc)  # #299: surface on the console, not just logs
             await msg.ack()  # acked so the poison event can't wedge the stage
         else:
             print(f"[{name}] handler error (delivery {delivered}/{max_deliver}), nak: {exc}", flush=True)

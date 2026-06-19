@@ -551,8 +551,13 @@ async def runs(ok: str = "") -> str:
         dead_ready = True
     except asyncpg.UndefinedTableError:  # migration not applied yet — degrade, don't 500
         dead, dead_ready = [], False
+    # Per-stage durable-consumer health (#299): live lag/throughput + dead-letter count.
+    from maat.serving.consumer_health import consumer_health, dead_letters_by_stage
+
+    health = await consumer_health(getattr(app.state, "nats", None), await dead_letters_by_stage(pool))
     return _doc(
-        _runs_page(stage_summary(counts), proj, recent, dead, dead_ready), "runs", "runs", flash=ok
+        _runs_page(stage_summary(counts), proj, recent, dead, dead_ready, health=health),
+        "runs", "runs", flash=ok,
     )
 
 
@@ -2611,7 +2616,7 @@ def stage_summary(counts: dict) -> list[dict]:
     return rows
 
 
-def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
+def _runs_page(stages, proj, recent, dead, dead_ready: bool = True, health=None) -> str:
     pcells = "".join(
         f'<div class="mcell"><div class="mk">{html.escape(k)}</div><div class="mv">{v}</div></div>'
         for k, v in proj.items()
@@ -2645,6 +2650,23 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
             '<table class="aud"><tr><th>when</th><th title="Pipeline stage — the internal event name for what ran">step</th><th>item</th><th>error</th></tr>'
             f"{drows}</table>"
         )
+    health_html = ""
+    if health:
+        hrows = "".join(
+            f'<tr><td class="mono">{html.escape(h.stage)}</td>'
+            f'<td>{h.pending if h.present else "—"}</td><td>{h.in_flight if h.present else "—"}</td>'
+            f'<td>{h.redelivered if h.present else "—"}</td><td>{h.delivered if h.present else "—"}</td>'
+            f'<td style="{"color:#b3402e" if h.dead_letters else ""}">{h.dead_letters}</td></tr>'
+            for h in health
+        )
+        health_html = (
+            '<div class="bl mt" title="Live durable-consumer queue depth per stage — where the '
+            'pipeline backs up">Pipeline health — per stage</div>'
+            '<table class="aud"><tr><th>stage</th><th title="events waiting (lag)">lag</th>'
+            '<th title="delivered, being worked">in-flight</th><th title="transient retries">redeliv</th>'
+            '<th title="total delivered (throughput odometer)">throughput</th><th>dead</th></tr>'
+            f'{hrows}</table>'
+        )
     rrows = "".join(
         f'<tr><td class="mut">{r["created_at"]:%m-%d %H:%M}</td>'
         f'<td><span class="atype">{html.escape(r["type"])}</span></td>'
@@ -2663,6 +2685,7 @@ def _runs_page(stages, proj, recent, dead, dead_ready: bool = True) -> str:
         '<div class="runbar"><button id="run-btn" onclick="maatRunPipeline()">▶ Run the pipeline</button>'
         '<span class="run-status" id="run-status"></span></div>'
         f'{"".join(srows)}'
+        f'{health_html}'
         f'{dead_html}<div class="bl mt">Recent activity</div>'
         f'<table class="aud"><tr><th>when</th><th title="Pipeline stage — the internal event name for what ran">step</th><th>item</th></tr>{rrows}</table>{note}</div>'
     )

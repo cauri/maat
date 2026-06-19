@@ -72,6 +72,20 @@ def llm_span(capability: str, model: str, prompt: str = ""):
         yield span
 
 
+def emit_consumer_health(stages: list[dict]) -> None:
+    """Emit one span carrying per-stage durable-consumer health (#299) to cat-cafe — lag / in-flight /
+    redelivered / throughput / dead-letters as attributes. No-op without an OTLP endpoint. Triggered
+    on the console's /pipeline poll, so the metrics flow whenever an operator is watching the queue."""
+    tracer = _tracer()
+    if tracer is None or not stages:
+        return
+    with tracer.start_as_current_span("pipeline.consumer_health") as span:
+        for s in stages:
+            stg = s.get("stage", "?")
+            for key in ("pending", "in_flight", "redelivered", "delivered", "dead_letters"):
+                span.set_attribute(f"maat.consumer.{stg}.{key}", int(s.get(key, 0) or 0))
+
+
 def record_completion(span, text: str, *, input_tokens: int = 0, output_tokens: int = 0) -> None:
     """Record an LLM completion + token usage on a span (no-op if span is None)."""
     if span is None:
