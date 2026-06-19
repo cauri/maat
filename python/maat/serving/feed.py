@@ -46,6 +46,7 @@ from maat.learning.source_learning import learn_preferences
 from maat.learning.source_registry import fold_sources, pending_sources
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.pipeline.curation import Story as CurationStory, curate
+from maat.serving.buildcache import VersionCache, data_version
 from maat.serving.source_flags import denied_sources
 from maat.serving.favicon import icon_bytes
 from maat.serving.stories import load_story_detail, load_story_views
@@ -583,6 +584,10 @@ def build_feed(
 _IMAGE_TIMEOUT = 6.0
 _IMAGE_MAX_BYTES = 8 * 1024 * 1024  # 8 MB — generous for a hero image, bounds memory/abuse
 _IMAGE_CACHE_MAX = 256  # FIFO cap; per-process, lossy across workers (fine — it's a cache)
+
+# The built feed is a global fold; cache it keyed by params + data-version so it rebuilds only when
+# new events land, not per request (#283). Module-level: one warm cache per reader process.
+_FEED_CACHE = VersionCache()
 _image_cache: dict[str, tuple[bytes, str]] = {}
 
 
@@ -821,6 +826,13 @@ def _make_router() -> Any:
         ``?reputation=1`` adds a {source: reputation} map (#199). Omitted → the full,
         un-annotated feed (backward-compatible)."""
         pool = request.app.state.pool
+        # Serve from the version cache (#283): the feed only changes when new events land, so a
+        # whole-corpus re-fold per request is wasted work. Cheap version probe, then build on a miss.
+        version = await data_version(pool)
+        cache_key = ("feed", topics, int(accuracy), int(reputation))
+        cached = _FEED_CACHE.get(cache_key, version)
+        if cached is not None:
+            return JSONResponse(cached)
         clusters = await _load_clusters(pool)
         article_meta = await _load_article_meta(pool)
         claims_by_id = await _load_claims_by_id(pool)
@@ -845,6 +857,7 @@ def _make_router() -> Any:
                 )
             if history and reputation:
                 payload["source_reputation"] = _reputation_map(fold_reputation(history))
+        _FEED_CACHE.put(cache_key, version, payload)
         return JSONResponse(payload)
 
     @router.get("/source-preferences", response_class=JSONResponse)
