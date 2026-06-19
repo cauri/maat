@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
-import { RoomPlaceholder } from "@/components/shell/room-placeholder";
+import { StoriesTable } from "@/components/stories/stories-table";
 
 export const metadata: Metadata = { title: "Stories" };
 
 export default function StoriesPage() {
-  return <RoomPlaceholder id="stories" />;
+  return <StoriesTable />;
 }
