@@ -25,9 +25,9 @@ import json
 import os
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat.bus import connect
 from maat.events import STORY_GRAPH_DELTA, publish
 from maat.pipeline.story_graph import _DEFAULT_WINDOW_S, EventNode  # window mirrors the attach gate
@@ -95,9 +95,7 @@ async def main() -> None:
     tenant = os.environ.get("MAAT_TENANT_ID", "cauri")
     reset = os.environ.get("MAAT_STORY_GRAPH_RESET") == "1"
     window_s = _DEFAULT_WINDOW_S
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     crows = await pool.fetch("select id, fact, claim_ids from clusters where tenant_id = $1", tenant)
     claims = await pool.fetch("select id, text, article_id from claims")
     arts = await pool.fetch("select id, extract(epoch from ingested_at) ts from articles")

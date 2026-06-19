@@ -241,16 +241,14 @@ async def run(
 
 
 async def _main() -> None:
-    import asyncpg
     from dotenv import load_dotenv
     from pathlib import Path
 
     from maat.bus import connect
+    from maat.db import get_pool
 
     load_dotenv(Path(__file__).resolve().parents[3] / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     nc = await connect()
     repo = os.environ.get("MAAT_GH_REPO", "")
     token = os.environ.get("MAAT_GH_ISSUE_TOKEN", "")

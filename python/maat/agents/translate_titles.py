@@ -15,9 +15,9 @@ import asyncio
 import os
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat.bus import connect
 from maat.events import ARTICLE_TITLE_EN, publish
 from maat.serving.translate import translate_text
@@ -35,9 +35,7 @@ async def main() -> None:
         return
     load_dotenv(ROOT / ".env")
     tenant = os.environ.get("MAAT_TENANT_ID", "cauri")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     arts = await pool.fetch(
         "select id, title, language from articles where tenant_id = $1 and title is not null", tenant
     )

@@ -10,12 +10,11 @@ Run: make eval-prompt   (or uv run python scripts/eval_prompt.py)
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.eval_prompt import eval_goldens, summary
 
@@ -23,9 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 async def _active_prompts() -> dict[str, str]:
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     try:
         return {
             k: await prompts.active_text(pool, k, prompts.seed_default(k))

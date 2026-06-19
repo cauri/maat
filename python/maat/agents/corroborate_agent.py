@@ -14,9 +14,9 @@ import os
 from functools import partial
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.bus import connect
 from maat.config import active_config, pipeline_overrides
@@ -34,9 +34,7 @@ def _cluster_id(claim_ids: list[str]) -> str:
 
 async def main() -> None:
     load_dotenv(Path(__file__).resolve().parents[3] / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     arts = await pool.fetch("select id, source, body, language from articles")
     src = {r["id"]: r["source"] for r in arts}
     bodies = {r["id"]: r["body"] for r in arts}

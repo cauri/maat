@@ -41,6 +41,7 @@ from maat import config, events, prompts
 from maat.agents.triage import classify as triage_classify
 from maat.bus import connect as nats_connect
 from maat.clocks import is_paused, read_topics
+from maat.db import get_pool
 from maat.eval_prompt import eval_goldens
 from maat.eval_prompt import summary as eval_prompt_summary
 from maat.evals import evaluate, load_expectations
@@ -85,8 +86,6 @@ CATCAFE_URL = os.environ.get("CATCAFE_URL", "http://localhost:8800")
 ROOT = Path(__file__).resolve().parents[3]  # repo root (for config/topics.txt)
 _BUS_DOWN = "Couldn't reach the event bus — nothing was saved."
 
-DB = os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-
 # Local admin event type (#123) — kept here, never edited into events.py (the kernel folds it
 # the same way it folds admin.threshold.changed; for the console it is purely an audit marker).
 ADMIN_THRESHOLD_REVERTED = "admin.threshold.reverted"
@@ -94,7 +93,7 @@ ADMIN_THRESHOLD_REVERTED = "admin.threshold.reverted"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pool = await asyncpg.create_pool(DB)
+    app.state.pool = await get_pool()
     try:
         app.state.nats = await nats_connect()
     except Exception as exc:  # noqa: BLE001 - the reader must still serve if NATS is down

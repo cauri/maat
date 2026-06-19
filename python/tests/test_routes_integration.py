@@ -109,9 +109,9 @@ async def _teardown() -> None:
 
 
 async def _run_all() -> None:
-    import asyncpg
     import httpx
 
+    from maat.db import get_pool
     from maat.web import app as appmod
 
     # Keep this harness LLM-free + deterministic: the /prompts/test smoke must take the
@@ -119,7 +119,7 @@ async def _run_all() -> None:
     os.environ.pop("ANTHROPIC_API_KEY", None)
     os.environ.pop("MISTRAL_API_KEY", None)
     await _setup()
-    pool = await asyncpg.create_pool(TEST_URL)
+    pool = await get_pool(TEST_URL)
     appmod.app.state.pool = pool
     appmod.app.state.nats = None  # read routes don't need the bus
     try:

@@ -19,9 +19,9 @@ import os
 from collections import Counter
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
 from maat.acquire.rss import fetch_feed, load_feeds
@@ -40,9 +40,7 @@ async def main() -> None:
     load_dotenv(ROOT / ".env")
     per_feed = int(os.environ.get("MAAT_RSS_PER_FEED", "12"))
 
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     seen = {r["url"] for r in await pool.fetch("select url from articles where url is not null")}
     denied = denied_sources(
         (json.loads(r["data"]) if isinstance(r["data"], str) else r["data"])

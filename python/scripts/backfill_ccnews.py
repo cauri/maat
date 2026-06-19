@@ -24,9 +24,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.acquire import ccnews
 from maat.acquire.source_gate import accept_source
@@ -60,9 +60,7 @@ async def main() -> None:
     per_warc = int(os.environ.get("MAAT_CCNEWS_PER_WARC", "200"))
     per_stratum = int(os.environ.get("MAAT_CCNEWS_PER_STRATUM", "8"))
 
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     seen = {r["url"] for r in await pool.fetch("select url from articles where url is not null")}
     gate_prompt = await prompts.active_text(pool, "source_gate", prompts.seed_default("source_gate"))
     known_good = frozenset(
