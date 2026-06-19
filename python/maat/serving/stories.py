@@ -26,6 +26,7 @@ from typing import Any
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.story_credibility import FactView, StoryScore, score_story
 from maat.learning.trajectory import load_trajectory
+from maat.serving.buildcache import VersionCache, data_version
 
 
 def _jload(v: Any) -> list:
@@ -318,22 +319,31 @@ def _rank_key(v: StoryView) -> tuple:
     return (not v.score.forecast_only, v.score.score, v.last_updated)
 
 
+_STORIES_CACHE = VersionCache()
+
+
 async def load_story_views(pool: Any, *, limit: int | None = None) -> tuple[list[StoryView], int]:
     """Every story, ranked by credibility. Returns ``(views, total)`` — ``total`` is the full count
     before ``limit`` so callers can show "showing N of M". Threaded nodes plus a one-cluster story
-    for any cluster not yet in the graph (total coverage)."""
-    c = await _load_common(pool)
-    views: list[StoryView] = []
-    noded: set[str] = set()
-    for node_id, cids in c.node_clusters.items():
-        noded.update(cids)
-        views.append(_assemble(c, node_id, cids))
-    for cid in c.clusters_by_id:
-        if cid not in noded:
-            views.append(_assemble(c, f"cluster:{cid}", [cid]))
-    views.sort(key=_rank_key, reverse=True)
-    total = len(views)
-    return (views[:limit] if limit else views), total
+    for any cluster not yet in the graph (total coverage).
+
+    The credibility fold is global (so it can't be SQL-paged) but only changes when new events land,
+    so the full sorted list is cached by data-version (#283); ``limit`` slices the cached result."""
+    version = await data_version(pool)
+    views = _STORIES_CACHE.get("views", version)
+    if views is None:
+        c = await _load_common(pool)
+        views = []
+        noded: set[str] = set()
+        for node_id, cids in c.node_clusters.items():
+            noded.update(cids)
+            views.append(_assemble(c, node_id, cids))
+        for cid in c.clusters_by_id:
+            if cid not in noded:
+                views.append(_assemble(c, f"cluster:{cid}", [cid]))
+        views.sort(key=_rank_key, reverse=True)
+        _STORIES_CACHE.put("views", version, views)
+    return (views[:limit] if limit else views), len(views)
 
 
 async def load_story_detail(pool: Any, node_id: str) -> StoryView | None:
