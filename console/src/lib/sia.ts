@@ -1,5 +1,7 @@
 import "server-only";
 
+import { createAnthropic } from "@ai-sdk/anthropic";
+
 /**
  * Server-side Sia config (#306). Sia's persona is a **managed prompt** in the Python registry
  * (`prompts.py` key `sia`), served by the command/query API and reviewable/editable in-console
@@ -17,6 +19,27 @@ export const SIA_MODEL = "claude-opus-4-8";
 
 export function siaApiOrigin(): string {
   return INTERNAL_API;
+}
+
+/**
+ * Normalise `ANTHROPIC_BASE_URL` for the Vercel AI SDK. The official Anthropic SDKs take a base of
+ * `https://api.anthropic.com` and append `/v1/messages`; `@ai-sdk/anthropic` instead expects the base
+ * to already include the version segment and appends `/messages`. cauri's shell (and the box env)
+ * export the official-SDK form, so without this the SDK would hit `…/messages` → 404. We append `/v1`
+ * when no version segment is present; an unset var falls through to the SDK default (already `…/v1`).
+ */
+function anthropicBaseURL(): string | undefined {
+  const raw = process.env.ANTHROPIC_BASE_URL?.trim();
+  if (!raw) return undefined;
+  const base = raw.replace(/\/+$/, "");
+  return /\/v\d+$/.test(base) ? base : `${base}/v1`;
+}
+
+const provider = createAnthropic({ baseURL: anthropicBaseURL() });
+
+/** The Sia model (opus-4-8), built on a provider whose base URL tolerates an official-SDK-style env. */
+export function siaModel() {
+  return provider(SIA_MODEL);
 }
 
 /**

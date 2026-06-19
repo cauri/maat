@@ -1,7 +1,6 @@
-import { anthropic } from "@ai-sdk/anthropic";
 import { convertToModelMessages, stepCountIs, streamText, type UIMessage } from "ai";
 
-import { getSiaSystemPrompt, SIA_MODEL } from "@/lib/sia";
+import { getSiaSystemPrompt, siaModel } from "@/lib/sia";
 import { buildSiaTools } from "@/lib/sia-tools";
 
 /**
@@ -30,7 +29,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const result = streamText({
-    model: anthropic(SIA_MODEL),
+    model: siaModel(),
     system,
     messages: await convertToModelMessages(payload.messages ?? []),
     tools: buildSiaTools(cookie),
