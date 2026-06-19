@@ -74,6 +74,7 @@ from maat.providers import seam
 from maat.serving import admin_auth
 from maat.serving import favicon
 from maat.serving import spend as spend_mod
+from maat.serving.console_api import console_router
 from maat.serving.feed import feed_router
 from maat.serving.social_api import social_router
 from maat.serving.translate import translate_text
@@ -121,6 +122,13 @@ if feed_router is not None:
 # (serving/social.py), folded read-time like the admin events. None only if FastAPI is absent.
 if social_router is not None:
     app.include_router(social_router)
+
+# Console v2 command/query API (#304) — the JSON contract the Next.js console (console/) and Sia
+# (#306) read/command through, at /console/api. Queries read projections; commands emit ADMIN_*
+# events; /console/api/events streams the live log (SSE). The admin gate protects it like any
+# console path (it requires a valid admin session when auth is enabled). None only if FastAPI absent.
+if console_router is not None:
+    app.include_router(console_router)
 
 
 # ============================ admin auth (P8, #163; D31/D32) ============================
