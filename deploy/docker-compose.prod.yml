@@ -3,7 +3,8 @@
 #   postgres + nats        — canonical store + bus
 #   kerneld                — the deterministic spine (single writer): folds events → projections,
 #                            and applies the embedded migrations on startup
-#   agents                 — extract + classify (long-running NATS subscribers; LLM judgement)
+#   extract / classify     — the two streaming stages, each its own scalable service (#298):
+#                            long-running durable NATS consumers (LLM judgement), scale per stage
 #   acquisition-clock      — scheduled tick: acquire new articles → drain → corroborate (recompute
 #                            clusters). Cadence is operator-chosen via MAAT_TICK_INTERVAL.
 #   reader                 — the FastAPI app: public /api/* (incl. /api/v2 feed + image proxy) and
@@ -61,9 +62,13 @@ services:
       nats:
         condition: service_healthy
 
-  # Extract + classify: long-running bus subscribers that call the LLM (BRIEF §5.1-5.3).
-  # Reuses the reader image (maat-app:local, built by the reader service); only the command differs.
-  agents:
+  # Per-stage streaming workers (#298): extract + classify run as SEPARATE, independently-scalable
+  # services off the shared image — `docker compose up -d --scale extract=N --scale classify=M`. Each
+  # binds its OWN durable pull consumer (#296) keyed by stage name, so N replicas of a stage share
+  # that stage's JetStream work-queue (every event processed once, no fan-out duplication). The heavy
+  # stage (extract reads full bodies) thus scales without over-provisioning the lighter one. Reuses
+  # the reader image (maat-app:local, built by the reader service); only the command differs.
+  extract: &agent-worker
     image: maat-app:local
     restart: unless-stopped
     env_file:
@@ -74,7 +79,7 @@ services:
       NATS_URL: "nats://nats:4222"
       # LLM spans (model + token usage = spend) → cat-cafe. No-op if cat-cafe is down.
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://cat-cafe:4318"
-    command: ["uv", "run", "--no-dev", "python", "-m", "maat.agents"]
+    command: ["uv", "run", "--no-dev", "python", "-m", "maat.agents.extract_agent"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,6 +87,10 @@ services:
         condition: service_healthy
       kerneld:
         condition: service_started
+
+  classify:
+    <<: *agent-worker
+    command: ["uv", "run", "--no-dev", "python", "-m", "maat.agents.classify_agent"]
 
   # Ingestion clock (#34): one tick = acquire new articles (GDELT, free) → wait for extract+classify
   # to drain → corroborate (recompute clusters). clock.py is intentionally single-pass; this service
@@ -169,7 +178,9 @@ services:
         condition: service_healthy
       kerneld:
         condition: service_started
-      agents:
+      extract:
+        condition: service_started
+      classify:
         condition: service_started
     volumes:
       - hfcache:/data/hf   # NLI model cache (#229) — persists across deploys

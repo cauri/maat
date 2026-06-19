@@ -89,3 +89,62 @@ def test_durable_consumer_processes_and_redelivers():
     processed, failed_once = asyncio.run(asyncio.wait_for(_scenario(), 30))
     assert {"a", "b", "needs-retry"} <= set(processed), f"all events processed; got {processed}"
     assert failed_once, "the transient-failure path (NAK → redeliver) was exercised"
+
+
+# --- #298: two replicas of a stage share its work-queue (no duplicate processing) ---------------
+_DURABLE_DIST = "itest_298"
+_SUBJECT_DIST = "maat.events.test.itest298"
+
+
+async def _distribution_scenario():
+    nc = await nats.connect("nats://localhost:4222")
+    js = nc.jetstream()
+    try:
+        await js.stream_info(bus.EVENTS_STREAM)
+    except Exception:
+        await js.add_stream(StreamConfig(name=bus.EVENTS_STREAM, subjects=["maat.events.>"]))
+    try:
+        await js.delete_consumer(bus.EVENTS_STREAM, _DURABLE_DIST)
+    except Exception:
+        pass
+
+    seen: list[str] = []  # every stream_id processed, pooled across BOTH replicas
+
+    async def handler(_nc, event):
+        await asyncio.sleep(0.02)  # a little work so neither replica drains the whole batch instantly
+        seen.append(event["stream_id"])
+
+    # Two replicas of the SAME stage: identical durable name → they SHARE the work-queue (#298),
+    # exactly what `--scale extract=N` produces.
+    tasks = [asyncio.create_task(bus.run_agent(_DURABLE_DIST, _SUBJECT_DIST, handler)) for _ in range(2)]
+    await asyncio.sleep(1.5)  # let both bind
+
+    n = 12
+    for i in range(n):
+        await js.publish(_SUBJECT_DIST, json.dumps({"stream_id": f"m{i}", "type": "test", "data": {}}).encode())
+    for _ in range(60):  # poll up to ~12s for all of them
+        if len(seen) >= n:
+            break
+        await asyncio.sleep(0.2)
+
+    for t in tasks:
+        t.cancel()
+        try:
+            await t
+        except BaseException:
+            pass
+    try:
+        await js.delete_consumer(bus.EVENTS_STREAM, _DURABLE_DIST)
+    except Exception:
+        pass
+    await nc.close()
+    return seen, n
+
+
+def test_two_replicas_share_the_queue_without_duplicates():
+    seen, n = asyncio.run(asyncio.wait_for(_distribution_scenario(), 40))
+    # The defining property of horizontal scaling (#298): each event is processed EXACTLY once across
+    # the two replicas — a shared durable is a work-queue, not fan-out. (Which replica gets which is
+    # timing-dependent, so the split ratio is deliberately not asserted.)
+    assert sorted(seen) == sorted(f"m{i}" for i in range(n)), f"every event processed once; got {seen}"
+    assert len(set(seen)) == len(seen), "no event processed by both replicas (no duplication)"
