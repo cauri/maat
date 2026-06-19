@@ -1,8 +1,9 @@
 # Maat operator console (v2)
 
-> **Status:** vertical slice landed — app shell (#303), command/query API (#304), the data-table
-> primitive (#305), and the **Stories** room with its workspace + inline correction (#308). The
-> remaining rooms are placeholders pending their issues. **Epic:** [#302](https://github.com/cauri/maat/issues/302) (P13). **Decision:** `DECISIONS.md` D33.
+> **Status:** complete — all rooms shipped (Overview, Stories, Sources, Claims, Pipeline, Tuning,
+> Feedback, Business, Graph) over the command/query API (#304) + data-table (#305) + Sia (#306), and
+> the **#292 cutover** fronts this app at `admin.maat.press` (Caddy serves the UI; `/admin/*`,
+> `/api/*`, `/console/api/*` stay on FastAPI). **Epic:** [#302](https://github.com/cauri/maat/issues/302) (P13). **Decision:** `DECISIONS.md` D33.
 >
 > This is the **authoritative stack + architecture** for the console rebuild. Any agent picking up a P13
 > issue starts here. Keep it current as the app lands.
@@ -172,13 +173,22 @@ The console does **not** stand up a second identity system. The FastAPI app
 Set the same `MAAT_ADMIN_*` env on both processes. See `.env.example`. ⚠️ `src/lib/admin-token.ts` mirrors
 the Python `verify_cookie`; coordinate with **#282** (admin-auth hardening) before changing either side.
 
-### Deploy + cutover
+### Deploy + cutover (#292, done)
 
-`Dockerfile` builds the standalone server (loopback `:3100`). The console is **not** yet fronted at
-`admin.maat.press` — that's the **#292 cutover** (last in the lane), which points Caddy at this app, routes
-`/admin/*` + the command/query API to FastAPI, and retires the inline-HTML console in
-`python/maat/web/app.py`. Until then the box keeps serving the legacy console so the operator's working
-tools (e.g. Prompts) stay live. CI lints + type-checks + builds the console on every PR (`.github/workflows/ci.yml`).
+`Dockerfile` builds the standalone server (loopback `:3100`); the prod compose runs it as the
+`console` service and Caddy fronts it at `admin.maat.press` (WG-gated). The split:
+
+- **Caddy** routes `/admin/*`, `/api/*`, `/console/api/*`, `/healthz`, `/static/*` → FastAPI
+  (`127.0.0.1:8000`); everything else → the console (`127.0.0.1:3100`). Both verify the same
+  `maat_admin` cookie, so it rides along same-origin.
+- **Server-side** calls (Sia's tools, the persona fetch, SSR) reach the API in-cluster at
+  `CONSOLE_API_INTERNAL=http://reader:8000`; the **browser** uses same-origin `/console/api/*`.
+- `MAAT_ADMIN_SESSION_SECRET`, `ANTHROPIC_API_KEY`, and any `ANTHROPIC_BASE_URL` come from the box
+  `.env` via `env_file`. CI rsyncs `console/` and `docker compose up -d --build` builds it.
+
+`python/maat/web/app.py` keeps the API + admin-auth routes; its inline-HTML pages are now shadowed
+by Caddy (unreachable) and can be deleted in a follow-up. CI lints + type-checks + builds the console
+on every PR (`.github/workflows/ci.yml`).
 
 ## References
 

@@ -30,11 +30,22 @@
 	encode zstd gzip
 
 	# Defence-in-depth layer 1 (network): serve the console only to the WireGuard subnet.
-	# (Layer 2 is the Google-OIDC + allowlist gate inside the app.) A real LE cert is still
-	# presented to everyone; non-WG callers get a 403 instead of the login screen.
+	# (Layer 2 is the Google-OIDC + allowlist gate, shared by both upstreams.) A real LE cert is
+	# still presented to everyone; non-WG callers get a 403 instead of the login screen.
 	@wg remote_ip {$MAAT_WG_SUBNET:10.8.0.0/24}
 	handle @wg {
-		reverse_proxy 127.0.0.1:8000
+		# Console v2 cutover (D33/#292): the Next.js console (127.0.0.1:3100) serves the UI; the
+		# FastAPI app (127.0.0.1:8000) keeps the OIDC login dance, the command/query API the
+		# console + Sia call, the public read API, health, and static assets. Both verify the same
+		# `maat_admin` cookie, so routing splits cleanly by path and the cookie rides along.
+		@fastapi path /admin/* /admin /api/* /console/api/* /healthz /favicon.ico /static/*
+		handle @fastapi {
+			reverse_proxy 127.0.0.1:8000
+		}
+		# Everything else is the Next.js operator console.
+		handle {
+			reverse_proxy 127.0.0.1:3100
+		}
 	}
 	handle {
 		respond "Maat operator console — reachable only over the private network." 403

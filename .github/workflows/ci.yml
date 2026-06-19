@@ -118,6 +118,12 @@ jobs:
           rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
             --exclude 'target' \
             rust/ "root@$DEPLOY_HOST:/root/rust/"
+          # console/ too: the prod compose builds the Next.js console from ./console (build: ./console)
+          # for the admin.maat.press cutover (#292). Exclude build artefacts + deps; the box's Docker
+          # build runs `npm ci` + `next build` from the rsynced source.
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            --exclude 'node_modules' --exclude '.next' --exclude '.env*' \
+            console/ "root@$DEPLOY_HOST:/root/console/"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             deploy/docker-compose.prod.yml "root@$DEPLOY_HOST:/root/docker-compose.yml"
           # Caddyfile too: the admin-console vhost (D32) + the www.maat.press marketing vhost live

@@ -236,6 +236,27 @@ services:
       nats:
         condition: service_healthy
 
+  # Operator console v2 (D33/#292): the Next.js UI served at admin.maat.press. Caddy routes the UI
+  # here and keeps /admin/*, /api/*, /console/api/* on the reader (FastAPI) — both verify the same
+  # `maat_admin` cookie. Server-side calls (Sia's tools, the persona fetch, SSR) reach the
+  # command/query API in-cluster at http://reader:8000; the browser uses same-origin /console/api/*.
+  # env_file carries MAAT_ADMIN_SESSION_SECRET (cookie verify), ANTHROPIC_API_KEY (Sia), and any
+  # ANTHROPIC_BASE_URL (normalised to /v1 in lib/sia.ts) from the box .env.
+  console:
+    build: ./console
+    image: maat-console:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CONSOLE_API_INTERNAL: "http://reader:8000"
+    # Loopback only: host-network Caddy reaches it at 127.0.0.1:3100 (WG-gated at the edge).
+    ports:
+      - "127.0.0.1:3100:3100"
+    depends_on:
+      - reader
+
   # Public marketing site (www.maat.press): the landing page + the acquisition funnel. A SEPARATE
   # app from the behind-the-box reader/console — they share only the bus + DB. It publishes
   # acquisition.* events (tenant_id=public) that maat-kerneld folds for the console's /acquisition
@@ -289,6 +310,7 @@ services:
     depends_on:
       - reader
       - marketing
+      - console
 
 volumes:
   pgdata:
