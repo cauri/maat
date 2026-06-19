@@ -74,6 +74,27 @@ export interface Overview {
   last_ingest: string | null;
 }
 
+/** A source as the Sources room lists it — the ONE canonical reliability number + trajectory. */
+export interface Source {
+  source: string;
+  articles: number;
+  first_seen: string | null;
+  last_seen: string | null;
+  /** Canonical reliability in [0,1], or null when not yet rated (cold start). */
+  reliability: number | null;
+  /** Reliability sparkline over expanding history (oldest→newest), each in [0,1]. */
+  trajectory: number[];
+  /** Lifecycle: unregistered | registered | backfilling | scored | active. */
+  state: string;
+  /** Operator gate: allow (default) | deny. */
+  status: "allow" | "deny";
+}
+
+export interface SourcesResponse {
+  total: number;
+  sources: Source[];
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;

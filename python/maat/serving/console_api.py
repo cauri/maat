@@ -24,7 +24,11 @@ from typing import Any, Callable
 from maat import config, events
 from maat import prompts as prompts_mod
 from maat.clocks import is_paused
-from maat.learning.reputation import fold_reputation, reputation_score
+from maat.learning.reputation import (
+    fold_reputation,
+    reputation_score,
+    reputation_trajectories,
+)
 from maat.learning import source_registry as sreg
 from maat.obs_metrics import pipeline_health
 from maat.serving import feedback as feedback_mod
@@ -338,15 +342,14 @@ def _make_console_router() -> Any:
             "select source, count(*) n, max(ingested_at) last, min(ingested_at) first "
             "from articles where source is not null group by source order by n desc"
         )
-        rep_by = {
-            r.source: r
-            for r in fold_reputation(
-                _jload(x["data"])
-                for x in await pool.fetch(
-                    "select data from events where type = 'cluster.corroborated' order by id"
-                )
+        corr_events = [
+            _jload(x["data"])
+            for x in await pool.fetch(
+                "select data from events where type = 'cluster.corroborated' order by id"
             )
-        }
+        ]
+        rep_by = {r.source: r for r in fold_reputation(corr_events)}
+        traj_by = reputation_trajectories(corr_events)  # {source: [score, …]} sparkline
         registry = sreg.fold_sources(
             _jload(x["data"])
             for x in await pool.fetch(
@@ -373,6 +376,7 @@ def _make_console_router() -> Any:
                 "first_seen": r["first"],
                 "last_seen": r["last"],
                 "reliability": round(reputation_score(rep), 4) if rep else None,
+                "trajectory": [round(p, 4) for p in traj_by.get(name, [])],
                 "state": reg.state if reg else "unregistered",
                 "status": flags.get(name, "allow"),
             })
