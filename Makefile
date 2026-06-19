@@ -54,13 +54,13 @@ backfill-source:   # per-outlet reputation backfill (#241): make backfill-source
 	cd python && uv run python scripts/backfill_source.py "$(SOURCE)" $(DEPTH) --wait=900
 
 acquire-rss:
-	cd python && uv run python scripts/acquire_rss.py
+	cd python && uv run python scripts/acquire.py --source rss
 
 acquire-locales:
-	cd python && uv run python scripts/acquire_locales.py
+	cd python && uv run python scripts/acquire.py --source locales
 
 acquire-newsdata:
-	cd python && uv run python scripts/acquire_newsdata.py
+	cd python && uv run python scripts/acquire.py --source newsdata
 
 triage:
 	cd python && uv run python -m maat.agents.triage
@@ -75,7 +75,7 @@ eval-prompt:
 	cd python && uv run python scripts/eval_prompt.py
 
 acquire:
-	cd python && uv run python scripts/acquire.py "$(QUERY)" $(N)
+	cd python && uv run python scripts/acquire.py --source gdelt --query "$(QUERY)" --max $(or $(N),12)
 
 tick:
 	cd python && uv run python scripts/clock.py
