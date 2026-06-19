@@ -124,14 +124,21 @@ def _agglomerate(sim, threshold: float) -> list[list[int]]:
     return [m for m in members if m is not None]
 
 
-def group_by_similarity(texts: list[str], threshold: float) -> list[list[int]]:
-    """Cluster same-fact claims by embedding cosine, average-linkage (§5.4, fixes #20)."""
+def group_by_similarity(
+    texts: list[str], threshold: float, *, embeddings: np.ndarray | None = None
+) -> list[list[int]]:
+    """Cluster same-fact claims by embedding cosine, average-linkage (§5.4, fixes #20).
+
+    ``embeddings`` (rows aligned with ``texts``) lets a caller pass vectors it already holds — the
+    corroborate agent's chunked, cached reuse path (#286) — so Mistral is not re-queried. Omitted →
+    embed the texts here (the small / direct-call path)."""
     if len(texts) <= 1:
         return [[0]] if texts else []
-    x = np.asarray(mistral_embed(texts), dtype=np.float64)
+    x = embeddings if embeddings is not None else np.asarray(mistral_embed(texts), dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     norms[norms == 0.0] = 1.0  # a missing embedding (zero vector) must not divide by zero
-    x /= norms
+    x = x / norms  # NOT in-place: never mutate a caller-supplied array (the reuse cache, #286)
     sim = x @ x.T  # the full cosine matrix in one BLAS call (was an O(n^2·d) Python loop)
     return _agglomerate(sim, threshold)
 
@@ -404,13 +411,20 @@ def corroborate(
     decay: dict[str, float] | None = None,
     primary_lift: float | None = None,
     cap: float | None = None,
+    embeddings: np.ndarray | None = None,
 ) -> list[Corroboration]:
-    """Cluster same-fact claims; count independent originators per cluster (§5.5)."""
+    """Cluster same-fact claims; count independent originators per cluster (§5.5).
+
+    ``embeddings`` (rows aligned with ``claims``, same order) are reused for the same-fact clustering
+    instead of re-embedding — the corroborate agent supplies them from the persistent cache (#286).
+    """
     if not claims:
         return []
     art_source = {c.article_id: c.source for c in claims}
     # Cluster on the English pivot when present (#240, cross-lingual), else the original text.
-    clusters = group_by_similarity([(c.embed_text or c.text) for c in claims], same_fact_threshold)
+    clusters = group_by_similarity(
+        [(c.embed_text or c.text) for c in claims], same_fact_threshold, embeddings=embeddings
+    )
     results: list[Corroboration] = []
     for comp in clusters:
         members = [claims[i] for i in comp]
