@@ -13,12 +13,32 @@ jobs:
     defaults:
       run:
         working-directory: rust
+    # Postgres (pgvector) so the kerneld snapshot/rebuild integration test (#287) runs the real fold
+    # against a real DB on the gate, not just locally. Same rationale as the python job: a DB is
+    # deterministic, so it belongs on the merge gate (D16 is about live LLMs, not infra). CI sets
+    # `CI=true`, so a missing DB is a hard failure here rather than a silent skip.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: maat
+          POSTGRES_PASSWORD: maat
+          POSTGRES_DB: maat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U maat"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - run: cargo test --all
+        env:
+          DATABASE_URL: postgres://maat:maat@localhost:5432/maat
       - run: cargo clippy --all-targets -- -D warnings
 
   python:
