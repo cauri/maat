@@ -13,7 +13,6 @@ Env:  MAAT_RSS_PER_FEED (default 12)  — max items pulled per feed per run.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 from collections import Counter
@@ -21,6 +20,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from maat import ids
 from maat.db import get_pool
 from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _aid(url: str) -> str:
-    return "rss-" + hashlib.sha1(url.encode()).hexdigest()[:18]
+    return ids.article_id(url, "rss")
 
 
 async def main() -> None:

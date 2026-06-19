@@ -8,7 +8,6 @@ uv run python -m maat.agents.corroborate_agent
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 from functools import partial
@@ -26,10 +25,7 @@ from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
 from maat.pipeline.ownership import fold_ownership
 from maat.serving.translate import translate_text
-
-
-def _cluster_id(claim_ids: list[str]) -> str:
-    return hashlib.sha1("|".join(sorted(claim_ids)).encode()).hexdigest()[:24]
+from maat.ids import cluster_id
 
 
 async def main() -> None:
@@ -130,7 +126,7 @@ async def main() -> None:
     nc = await connect()
     keep: set[str] = set()
     for r in results:
-        cid = _cluster_id(r.claim_ids)
+        cid = cluster_id(r.claim_ids)
         keep.add(cid)
         await publish(
             nc,

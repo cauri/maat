@@ -15,13 +15,13 @@ the run (maat.serving.spend.backfill_run_cost)."""
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 
 from maat.acquire.history import fetch_source_history
 from maat.acquire.source_gate import accept_source
 from maat.events import SOURCE_STATE_CHANGED, publish
+from maat import ids
 
 # Apify is the only history channel that costs per result (GDELT is free; NewsData is plan-flat).
 # Rough per-result event price for the rag-web-browser actor — the actual figure is on /spend.
@@ -29,7 +29,7 @@ _APIFY_PER_RESULT_USD = 0.005
 
 
 def _aid(url: str) -> str:
-    return "bf-" + hashlib.sha1(url.encode()).hexdigest()[:18]
+    return ids.article_id(url, "bf")
 
 
 @dataclass
@@ -48,7 +48,7 @@ class BackfillResult:
 def run_id_for(source: str, stamp: str) -> str:
     """Stable run id from the source + a caller-supplied timestamp (callers pass the time so this
     stays pure / testable)."""
-    return "bf-" + hashlib.sha1(f"{source}|{stamp}".encode()).hexdigest()[:16]
+    return ids.backfill_run_id(source, stamp)
 
 
 async def run_backfill(

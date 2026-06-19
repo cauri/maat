@@ -10,13 +10,13 @@ treats the second publish as a no-op (same stream_id, event already in log).
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime
 from typing import Any
 
 # Registered event type; maat-kerneld folds cluster.snapshot into the cluster_snapshots
 # projection, idempotent per (cluster_id, calendar-day) (#39).
 from maat.events import CLUSTER_SNAPSHOT
+from maat import ids
 
 
 def _snapshot_id(cluster_id: str, harvest_date: str) -> str:
@@ -26,8 +26,7 @@ def _snapshot_id(cluster_id: str, harvest_date: str) -> str:
     full timestamp) means a second run on the same day produces the same stream_id, so the
     event log does not accumulate duplicates.
     """
-    key = f"{cluster_id}:{harvest_date}"
-    return "snap-" + hashlib.sha1(key.encode()).hexdigest()[:18]
+    return ids.snapshot_id(cluster_id, harvest_date)
 
 
 def harvest(

@@ -15,13 +15,13 @@ identity resolution, §6.7), and primary-source detection are first cuts.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from maat import ids
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
 from maat.providers.seam import mistral_embed
@@ -444,8 +444,8 @@ def corroborate(
 
 
 def cluster_id(claim_ids: list[str]) -> str:
-    """Stable id for a cluster = hash of its member claim ids (matches the corroborate agent)."""
-    return hashlib.sha1("|".join(sorted(claim_ids)).encode()).hexdigest()[:24]
+    """Stable id for a cluster = hash of its member claim ids. Canonical impl in maat.ids (#289)."""
+    return ids.cluster_id(claim_ids)
 
 
 def corroborate_fixed(

@@ -10,12 +10,12 @@ e.g. uv run python scripts/acquire.py "central bank interest rate sourcelang:Eng
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+from maat import ids
 from maat.acquire import apify
 from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _aid(url: str) -> str:
-    return "gd-" + hashlib.sha1(url.encode()).hexdigest()[:18]
+    return ids.article_id(url, "gd")
 
 
 async def main() -> None:
