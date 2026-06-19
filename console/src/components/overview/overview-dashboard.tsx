@@ -92,10 +92,10 @@ export function OverviewDashboard() {
 
       <section className="grid gap-4 lg:grid-cols-2">
         <PipelineCard overview={overview.data} loading={overview.isLoading} error={overview.isError} />
-        <StoriesSnapshotCard stories={stories.data?.stories} total={stories.data?.total} loading={stories.isLoading} />
+        <StoriesSnapshotCard stories={stories.rows} total={stories.total} loading={stories.isLoading} />
       </section>
 
-      <NeedsAttentionCard stories={stories.data?.stories} loading={stories.isLoading} />
+      <NeedsAttentionCard stories={stories.rows} loading={stories.isLoading} />
     </div>
   );
 }

@@ -1,30 +1,31 @@
 "use client";
 
-import { type KeyboardEvent, useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  type Column,
   type ColumnDef,
+  type ColumnFiltersState,
+  type FilterFn,
   type RowSelectionState,
   type SortingState,
   type Updater,
   type VisibilityState,
   flexRender,
   getCoreRowModel,
+  getFacetedRowModel,
+  getFacetedUniqueValues,
   getFilteredRowModel,
-  getPaginationRowModel,
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { Search, SlidersHorizontal, X } from "lucide-react";
+import { Filter, Loader2, Search, SlidersHorizontal, X } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -42,6 +43,13 @@ interface PersistedView {
   columnVisibility: VisibilityState;
 }
 
+/** A column the operator can filter by — rendered as a faceted multi-select in the toolbar. */
+export interface Facet {
+  /** The column's accessorKey / id. */
+  columnId: string;
+  label: string;
+}
+
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
@@ -54,13 +62,25 @@ interface DataTableProps<TData, TValue> {
   onRowClick?: (row: TData) => void;
   /** Highlights the open row (e.g. while its workspace drawer is shown). */
   activeRowId?: string;
-  /** Extra controls on the right of the toolbar (filters, bulk actions). */
+  /** Extra controls on the right of the toolbar (bulk actions). */
   toolbar?: React.ReactNode;
   emptyMessage?: string;
-  pageSize?: number;
   /** Prepend a selection checkbox column for bulk actions. */
   enableSelection?: boolean;
+  /** Faceted filters to offer in the toolbar. */
+  facets?: Facet[];
+  /** Infinite scroll: called when the sentinel scrolls into view and `hasMore` is true. */
+  onLoadMore?: () => void;
+  hasMore?: boolean;
+  isFetchingMore?: boolean;
 }
+
+/** Multi-select facet filter: a row passes if its value is one of the selected. */
+const facetFilterFn: FilterFn<unknown> = (row, columnId, value) => {
+  const selected = value as string[] | undefined;
+  if (!selected?.length) return true;
+  return selected.includes(String(row.getValue(columnId)));
+};
 
 function selectionColumn<TData, TValue>(): ColumnDef<TData, TValue> {
   return {
@@ -71,9 +91,9 @@ function selectionColumn<TData, TValue>(): ColumnDef<TData, TValue> {
     header: ({ table }) => (
       <Checkbox
         checked={
-          table.getIsAllPageRowsSelected() || (table.getIsSomePageRowsSelected() && "indeterminate")
+          table.getIsAllRowsSelected() || (table.getIsSomeRowsSelected() && "indeterminate")
         }
-        onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
+        onCheckedChange={(value) => table.toggleAllRowsSelected(!!value)}
         aria-label="Select all"
         onClick={(e) => e.stopPropagation()}
       />
@@ -90,9 +110,9 @@ function selectionColumn<TData, TValue>(): ColumnDef<TData, TValue> {
 }
 
 /**
- * The shared live data-grid (#305): instant sort, search, column show/hide with a persisted
- * "saved view", row selection, keyboard navigation, and client pagination. Consumed by every
- * list room (Stories, Sources, Claims, Feedback, Business).
+ * The shared live data-grid (#305): instant sort, search, faceted filters, column show/hide
+ * with a persisted "saved view", row selection, keyboard nav, and **infinite scroll** (lazy
+ * loading via `onLoadMore`/`hasMore`). Consumed by every list room.
  */
 export function DataTable<TData, TValue>({
   columns,
@@ -106,30 +126,37 @@ export function DataTable<TData, TValue>({
   activeRowId,
   toolbar,
   emptyMessage = "Nothing here yet.",
-  pageSize = 25,
   enableSelection = false,
+  facets = [],
+  onLoadMore,
+  hasMore = false,
+  isFetchingMore = false,
 }: DataTableProps<TData, TValue>) {
-  const finalColumns = useMemo(
-    () => (enableSelection ? [selectionColumn<TData, TValue>(), ...columns] : columns),
-    [columns, enableSelection],
-  );
+  const facetIds = useMemo(() => new Set(facets.map((f) => f.columnId)), [facets]);
+  const finalColumns = useMemo(() => {
+    const base = enableSelection ? [selectionColumn<TData, TValue>(), ...columns] : columns;
+    // Inject the multi-select filter fn onto facet columns so rooms only declare which columns to facet.
+    return base.map((c) => {
+      const id = (c as { id?: string; accessorKey?: string }).id ??
+        (c as { accessorKey?: string }).accessorKey;
+      return id && facetIds.has(id) ? { ...c, filterFn: facetFilterFn as FilterFn<TData> } : c;
+    });
+  }, [columns, enableSelection, facetIds]);
+
   const [view, setView] = usePersistentState<PersistedView>(`maat.table.${tableId}`, {
     sorting: [],
     columnVisibility: {},
   });
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [globalFilter, setGlobalFilter] = useState("");
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
 
   const onSortingChange = (updater: Updater<SortingState>) =>
-    setView({
-      ...view,
-      sorting: typeof updater === "function" ? updater(view.sorting) : updater,
-    });
+    setView({ ...view, sorting: typeof updater === "function" ? updater(view.sorting) : updater });
   const onColumnVisibilityChange = (updater: Updater<VisibilityState>) =>
     setView({
       ...view,
-      columnVisibility:
-        typeof updater === "function" ? updater(view.columnVisibility) : updater,
+      columnVisibility: typeof updater === "function" ? updater(view.columnVisibility) : updater,
     });
 
   // TanStack Table manages its own memoization; its instance is intentionally not React-memoizable.
@@ -142,6 +169,7 @@ export function DataTable<TData, TValue>({
       columnVisibility: view.columnVisibility,
       rowSelection,
       globalFilter,
+      columnFilters,
     },
     getRowId,
     enableRowSelection: true,
@@ -149,16 +177,34 @@ export function DataTable<TData, TValue>({
     onColumnVisibilityChange,
     onRowSelectionChange: setRowSelection,
     onGlobalFilterChange: setGlobalFilter,
+    onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    initialState: { pagination: { pageSize } },
+    getFacetedRowModel: getFacetedRowModel(),
+    getFacetedUniqueValues: getFacetedUniqueValues(),
   });
 
   const hideable = table.getAllColumns().filter((c) => c.getCanHide());
   const rows = table.getRowModel().rows;
   const selectedCount = table.getSelectedRowModel().rows.length;
+  const filtersActive = columnFilters.length > 0 || globalFilter.length > 0;
+
+  // Infinite scroll: observe a sentinel at the bottom of the scroll area.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !onLoadMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasMore && !isFetchingMore) onLoadMore();
+      },
+      { root: scrollRef.current, rootMargin: "300px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [onLoadMore, hasMore, isFetchingMore]);
 
   const onRowKeyDown = (event: KeyboardEvent<HTMLTableRowElement>, row: TData) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -171,6 +217,8 @@ export function DataTable<TData, TValue>({
       if (sib instanceof HTMLElement) sib.focus();
     }
   };
+
+  const colCount = table.getVisibleLeafColumns().length;
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -196,6 +244,23 @@ export function DataTable<TData, TValue>({
             </button>
           )}
         </div>
+
+        {facets.map((facet) => {
+          const column = table.getColumn(facet.columnId);
+          return column ? <FacetFilter key={facet.columnId} column={column} label={facet.label} /> : null;
+        })}
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setColumnFilters([]);
+              setGlobalFilter("");
+            }}
+          >
+            <X /> Reset
+          </Button>
+        )}
 
         <div className="ml-auto flex items-center gap-2">
           {selectedCount > 0 && (
@@ -229,8 +294,8 @@ export function DataTable<TData, TValue>({
         </div>
       </div>
 
-      {/* table */}
-      <div className="min-h-0 flex-1 overflow-auto rounded-lg border">
+      {/* table (scroll container owns infinite scroll) */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto rounded-lg border">
         <Table>
           <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur">
             {table.getHeaderGroups().map((hg) => (
@@ -258,20 +323,14 @@ export function DataTable<TData, TValue>({
               ))
             ) : error ? (
               <TableRow className="hover:bg-transparent">
-                <TableCell
-                  colSpan={table.getVisibleLeafColumns().length}
-                  className="h-40 text-center text-sm text-destructive"
-                >
+                <TableCell colSpan={colCount} className="h-40 text-center text-sm text-destructive">
                   {error}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow className="hover:bg-transparent">
-                <TableCell
-                  colSpan={table.getVisibleLeafColumns().length}
-                  className="h-40 text-center text-sm text-muted-foreground"
-                >
-                  {globalFilter ? "No matches." : emptyMessage}
+                <TableCell colSpan={colCount} className="h-40 text-center text-sm text-muted-foreground">
+                  {filtersActive ? "No matches." : emptyMessage}
                 </TableCell>
               </TableRow>
             ) : (
@@ -300,36 +359,92 @@ export function DataTable<TData, TValue>({
             )}
           </TableBody>
         </Table>
+        {/* infinite-scroll sentinel + loading indicator */}
+        {!isLoading && !error && rows.length > 0 && (
+          <div ref={sentinelRef} className="flex items-center justify-center py-3 text-xs text-muted-foreground">
+            {isFetchingMore ? (
+              <span className="flex items-center gap-1.5">
+                <Loader2 className="size-3.5 animate-spin" /> Loading more…
+              </span>
+            ) : hasMore ? (
+              <span>Scroll for more</span>
+            ) : null}
+          </div>
+        )}
       </div>
 
-      {/* footer / pagination */}
+      {/* footer */}
       <div className="flex shrink-0 items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>
-          {rows.length} of {table.getFilteredRowModel().rows.length} row
-          {table.getFilteredRowModel().rows.length === 1 ? "" : "s"}
+          {rows.length} row{rows.length === 1 ? "" : "s"}
+          {filtersActive ? " (filtered)" : ""}
         </span>
-        <div className="flex items-center gap-2">
-          <span>
-            Page {table.getState().pagination.pageIndex + 1} of {Math.max(1, table.getPageCount())}
-          </span>
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={() => table.previousPage()}
-            disabled={!table.getCanPreviousPage()}
-          >
-            Prev
-          </Button>
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={() => table.nextPage()}
-            disabled={!table.getCanNextPage()}
-          >
-            Next
-          </Button>
-        </div>
+        {selectedCount > 0 && <span>{selectedCount} selected</span>}
       </div>
     </div>
+  );
+}
+
+function FacetFilter<TData>({ column, label }: { column: Column<TData, unknown>; label: string }) {
+  const selected = new Set((column.getFilterValue() as string[]) ?? []);
+  const options = [...column.getFacetedUniqueValues().entries()]
+    .filter(([value]) => value != null && value !== "")
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+
+  const toggle = (value: string) => {
+    const next = new Set(selected);
+    if (next.has(value)) next.delete(value);
+    else next.add(value);
+    column.setFilterValue(next.size ? [...next] : undefined);
+  };
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="gap-1.5 border-dashed capitalize">
+          <Filter className="size-3.5" /> {label}
+          {selected.size > 0 && (
+            <Badge variant="secondary" className="ml-1 rounded px-1 font-normal">
+              {selected.size}
+            </Badge>
+          )}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-56 p-1.5">
+        <div className="flex max-h-72 flex-col overflow-auto">
+          {options.length === 0 ? (
+            <p className="px-2 py-1.5 text-xs text-muted-foreground">No values</p>
+          ) : (
+            options.map(([value, count]) => {
+              const v = String(value);
+              return (
+                <label
+                  key={v}
+                  className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm capitalize hover:bg-muted"
+                >
+                  <input
+                    type="checkbox"
+                    className="accent-primary"
+                    checked={selected.has(v)}
+                    onChange={() => toggle(v)}
+                  />
+                  <span className="flex-1 truncate">{v}</span>
+                  <span className="text-xs text-muted-foreground">{count}</span>
+                </label>
+              );
+            })
+          )}
+          {selected.size > 0 && (
+            <button
+              type="button"
+              onClick={() => column.setFilterValue(undefined)}
+              className="mt-1 border-t px-2 py-1.5 text-left text-xs text-muted-foreground hover:text-foreground"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
