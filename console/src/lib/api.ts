@@ -13,6 +13,7 @@ import type {
   ClaimsResponse,
   CommandResult,
   ConfigResponse,
+  FeedbackResponse,
   Overview,
   PipelineHealth,
   PromptDetail,
@@ -136,4 +137,22 @@ export function getAcquisition(signal?: AbortSignal): Promise<Acquisition> {
 
 export function getAudit(limit = 100, signal?: AbortSignal): Promise<AuditResponse> {
   return apiGet<AuditResponse>(`/audit?limit=${limit}`, signal);
+}
+
+export function getFeedback(signal?: AbortSignal): Promise<FeedbackResponse> {
+  return apiGet<FeedbackResponse>("/feedback", signal);
+}
+
+export async function triageFeedback(
+  itemId: string,
+  body: { category: string; route: string; reason?: string },
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/feedback/${encodeURIComponent(itemId)}/triage`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new ApiError(res.status, await detail(res));
+  return (await res.json()) as { ok: boolean };
 }
