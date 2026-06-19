@@ -128,6 +128,11 @@ services:
       HF_HOME: /data/hf                                  # cache the NLI model on a volume so it isn't re-downloaded each deploy (#229)
       MAAT_OWNERSHIP_LOOKUP: ${MAAT_OWNERSHIP_LOOKUP:-1}  # auto-resolve source ownership from Wikidata (#254); resolved owners are surfaced + overridable on /sources
       MAAT_TRANSLATE_TITLES: ${MAAT_TRANSLATE_TITLES:-1}  # English gloss for non-English feed titles (#54), display-only
+      # Intake pause (cauri, 2026-06): PAUSED by default while the console v2 is iterated — the
+      # acquire steps below are skipped, but processing (corroborate, story-graph, grounding,
+      # harvest…) keeps running so existing data matures. Resume with MAAT_INTAKE_PAUSED=0 in the
+      # box .env (or flip this default) + redeploy.
+      MAAT_INTAKE_PAUSED: ${MAAT_INTAKE_PAUSED:-1}
     # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
     # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
     # by compose against the host env (unset → blank), breaking `sleep ""`.
@@ -136,14 +141,18 @@ services:
       - -c
       - |
         while true; do
-          echo "[clock] tick: acquire (topics: $${MAAT_TOPICS})";
-          uv run --no-dev python scripts/clock.py || echo "[clock] acquire error";
-          echo "[clock] acquire-rss (balanced multipolar outlet feeds, #238)";
-          uv run --no-dev python scripts/acquire_rss.py || echo "[clock] rss error";
-          echo "[clock] acquire-locales (per-language/region GDELT floor, #239)";
-          uv run --no-dev python scripts/acquire_locales.py || echo "[clock] locale error";
-          echo "[clock] acquire-newsdata (paid multipolar channel; no-op unless MAAT_NEWSDATA_KEY set)";
-          uv run --no-dev python scripts/acquire_newsdata.py || echo "[clock] newsdata error";
+          if [ "$${MAAT_INTAKE_PAUSED}" = "1" ]; then
+            echo "[clock] intake PAUSED (MAAT_INTAKE_PAUSED=1) — skipping acquire; processing still runs";
+          else
+            echo "[clock] tick: acquire (topics: $${MAAT_TOPICS})";
+            uv run --no-dev python scripts/clock.py || echo "[clock] acquire error";
+            echo "[clock] acquire-rss (balanced multipolar outlet feeds, #238)";
+            uv run --no-dev python scripts/acquire_rss.py || echo "[clock] rss error";
+            echo "[clock] acquire-locales (per-language/region GDELT floor, #239)";
+            uv run --no-dev python scripts/acquire_locales.py || echo "[clock] locale error";
+            echo "[clock] acquire-newsdata (paid multipolar channel; no-op unless MAAT_NEWSDATA_KEY set)";
+            uv run --no-dev python scripts/acquire_newsdata.py || echo "[clock] newsdata error";
+          fi
           echo "[clock] ownership (resolve new sources' controlling owners via Wikidata, #254)";
           uv run --no-dev python -m maat.agents.ownership_agent || echo "[clock] ownership error";
           echo "[clock] translate-titles (English gloss for non-English feed titles, #54)";
