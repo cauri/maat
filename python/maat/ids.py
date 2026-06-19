@@ -21,6 +21,15 @@ def _addr(payload: str, length: int) -> str:
     return hashlib.sha1(payload.encode(), usedforsecurity=False).hexdigest()[:length]
 
 
+def text_fingerprint(text: str) -> str:
+    """Full sha256 hex of ``text`` — a collision-safe content key for the embedding cache (#286).
+
+    Untruncated (unlike the short ids above): a collision here would reuse the WRONG vector and
+    silently corrupt clustering, so trade the extra bytes for sha256's full collision resistance.
+    """
+    return hashlib.sha256(text.encode(), usedforsecurity=False).hexdigest()
+
+
 def article_id(url: str, prefix: str) -> str:
     """``<prefix>-<sha1(url)[:18]>`` — one id per acquisition channel (rss/gd/cc/nd/loc/bf...)."""
     return f"{prefix}-" + _addr(url, 18)

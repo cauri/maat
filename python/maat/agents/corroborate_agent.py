@@ -21,6 +21,7 @@ from maat.bus import connect
 from maat.config import active_config, pipeline_overrides
 from maat.events import ADMIN_SOURCE_GROUPED, SOURCE_OWNERSHIP_RESOLVED, publish
 from maat.pipeline.corroborate import ClaimRow, corroborate
+from maat.pipeline.embed_cache import embeddings_for
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
 from maat.pipeline.ownership import fold_ownership
@@ -113,9 +114,11 @@ async def main() -> None:
         )
         for r in rows
     ]
+    # Reuse persisted embeddings; embed (chunked) only the claims whose text we haven't seen (#286).
+    embeddings = await embeddings_for([(c.embed_text or c.text) for c in claims])
     results = corroborate(
         claims, bodies, extremity_of=partial(rate_extremity, prompt=extremity_prompt),
-        ownership=ownership, **overrides,
+        ownership=ownership, embeddings=embeddings, **overrides,
     )
 
     # Upsert the new clusters, then retire the superseded ones — both through the kernel's own
