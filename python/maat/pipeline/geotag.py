@@ -45,7 +45,8 @@ def llm_country(text: str) -> str:
     try:
         # Sonnet (cauri): one call per UNPLACED cluster per tick — the agent only reaches here for
         # clusters the heuristic already failed to place, so the volume stays bounded.
-        reply = claude_complete(_GEOTAG_PROMPT.format(text=text[:2000]), model=GEOTAG_MODEL)
+        reply = claude_complete(_GEOTAG_PROMPT.format(text=text[:2000]), model=GEOTAG_MODEL,
+                                stage="geotag")
         raw = reply.text
         data = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
         code = str(data.get("country", "")).strip().upper()

@@ -36,7 +36,8 @@ def llm_entity_spine(text: str, *, max_entities: int = 8) -> list[str]:
         # Sonnet (cauri): the entity spine decides which clusters thread together, so accuracy
         # matters more than the per-call cost. Heuristic fallback still covers any error below.
         reply = claude_complete(
-            _NER_PROMPT.format(max_entities=max_entities, text=text[:2000]), model=NER_MODEL
+            _NER_PROMPT.format(max_entities=max_entities, text=text[:2000]), model=NER_MODEL,
+            stage="ner",
         )
         raw = reply.text
         arr = json.loads(raw[raw.find("[") : raw.rfind("]") + 1])

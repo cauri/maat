@@ -89,7 +89,8 @@ def _llm_triage(text: str) -> tuple[str, str] | None:
         # Sonnet (cauri): routing user feedback to auto-fix vs review is a judgement call, so it
         # runs on Sonnet, not the cheap tier. Low volume (one call per feedback item). Rules below
         # stay the fallback on any error.
-        reply = claude_complete(TRIAGE_LLM_PROMPT.format(text=text[:2000]), model="claude-sonnet-4-6")
+        reply = claude_complete(TRIAGE_LLM_PROMPT.format(text=text[:2000]),
+                                model="claude-sonnet-4-6", stage="triage")
         raw = reply.text
         data = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
         cat = str(data.get("category", "")).strip().lower()
