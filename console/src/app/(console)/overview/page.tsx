@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
-import { RoomPlaceholder } from "@/components/shell/room-placeholder";
+import { OverviewDashboard } from "@/components/overview/overview-dashboard";
 
 export const metadata: Metadata = { title: "Overview" };
 
 export default function OverviewPage() {
-  return <RoomPlaceholder id="overview" />;
+  return <OverviewDashboard />;
 }
