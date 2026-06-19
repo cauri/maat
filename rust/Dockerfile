@@ -14,6 +14,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/maat-kerneld /usr/local/bin/maat-kerneld
+# Drop root: the daemon needs no filesystem writes (migrations live in the DB) and binds no
+# port (it's a NATS subscriber), so it runs as a non-privileged user (semgrep missing-user, #281).
+RUN useradd --create-home --uid 10001 app
+USER app
 # DATABASE_URL + NATS_URL come from the environment (compose env_file). The daemon runs the
 # embedded migrations on startup, then subscribes to maat.events.> as the single writer.
 ENTRYPOINT ["maat-kerneld"]
