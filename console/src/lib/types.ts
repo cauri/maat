@@ -205,6 +205,30 @@ export interface PromptDetail {
   default: string;
 }
 
+// ── Business: spend + acquisition (#314) ─────────────────────────────────────────────────
+export interface SpendStage {
+  stage: string;
+  model: string;
+  calls: number;
+  usd: number;
+}
+
+export interface SpendProvider {
+  provider: string;
+  articles: number;
+  usd: number;
+}
+
+export interface Spend {
+  llm: { stages: SpendStage[]; total_usd: number };
+  providers: SpendProvider[];
+}
+
+export interface Acquisition {
+  funnel: { views: number; clicks: number; notifies: number; signups: number; beta: number };
+  by_platform: { platform: string; clicks: number }[];
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;

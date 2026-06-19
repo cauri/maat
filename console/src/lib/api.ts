@@ -7,6 +7,7 @@
  */
 
 import type {
+  Acquisition,
   ClaimDetail,
   ClaimsResponse,
   CommandResult,
@@ -16,6 +17,7 @@ import type {
   PromptDetail,
   PromptsResponse,
   SourcesResponse,
+  Spend,
   StoriesPage,
   StoryDetail,
 } from "./types";
@@ -121,4 +123,12 @@ export function getPrompts(signal?: AbortSignal): Promise<PromptsResponse> {
 
 export function getPrompt(key: string, signal?: AbortSignal): Promise<PromptDetail> {
   return apiGet<PromptDetail>(`/prompts/${encodeURIComponent(key)}`, signal);
+}
+
+export function getSpend(signal?: AbortSignal): Promise<Spend> {
+  return apiGet<Spend>("/spend", signal);
+}
+
+export function getAcquisition(signal?: AbortSignal): Promise<Acquisition> {
+  return apiGet<Acquisition>("/acquisition", signal);
 }

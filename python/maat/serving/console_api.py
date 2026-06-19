@@ -570,6 +570,30 @@ def _make_console_router() -> Any:
         )
         return {"llm": {"stages": rows, "total_usd": llm_total}, "providers": providers}
 
+    # ---- acquisition (business · the marketing funnel, event-sourced) -------------------
+    @router.get("/acquisition")
+    async def acquisition(request: Request) -> dict[str, Any]:
+        pool = _pool(request)
+        counts = {
+            r["kind"]: r["n"]
+            for r in await pool.fetch("select kind, count(*) n from acquisition_signals group by kind")
+        }
+        funnel = {
+            "views": counts.get("view", 0),
+            "clicks": counts.get("click", 0),
+            "notifies": counts.get("notify", 0),
+            "signups": await pool.fetchval("select count(*) from acquisition_signups") or 0,
+            "beta": await pool.fetchval("select count(*) from acquisition_signups where beta") or 0,
+        }
+        by_platform = [
+            {"platform": r["platform"], "clicks": r["clicks"]}
+            for r in await pool.fetch(
+                "select platform, count(*) clicks from acquisition_signals "
+                "where kind = 'click' group by platform order by clicks desc"
+            )
+        ]
+        return {"funnel": funnel, "by_platform": by_platform}
+
     # ---- audit (cross-cutting · the global change log) ---------------------------------
     @router.get("/audit")
     async def audit(request: Request, limit: int = 50) -> dict[str, Any]:

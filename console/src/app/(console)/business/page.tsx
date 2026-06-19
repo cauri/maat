@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
-import { RoomPlaceholder } from "@/components/shell/room-placeholder";
+import { BusinessDashboard } from "@/components/business/business-dashboard";
 
 export const metadata: Metadata = { title: "Business" };
 
 export default function BusinessPage() {
-  return <RoomPlaceholder id="business" />;
+  return <BusinessDashboard />;
 }
