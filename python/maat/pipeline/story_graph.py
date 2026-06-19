@@ -118,6 +118,29 @@ class StoryGraph:
     node_clusters: dict[str, list[str]] = field(default_factory=dict)
     claim_node_links: list[ClaimNodeLink] = field(default_factory=list)
 
+    # Inverted index: canonical entity id → node ids whose spine contains it. The attachment gate
+    # (passes_gate) requires ≥1 shared entity, so a cluster's candidates are EXACTLY the nodes the
+    # index lists for its entities — found sub-linearly instead of scanning every node (#285).
+    # entity_spine is fixed at node creation, so the index only ever grows as nodes are added.
+    _entity_index: dict[str, set[str]] = field(default_factory=dict, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        for node in self.nodes.values():  # build the index from any seeded nodes (fold_incremental)
+            self._index_node(node)
+
+    def _index_node(self, node: EventNode) -> None:
+        """Register ``node`` in the entity inverted index. Called once, when the node is created."""
+        for ent in node.entity_spine:
+            self._entity_index.setdefault(ent, set()).add(node.id)
+
+    def candidate_nodes(self, cluster: ClusterRow) -> list[EventNode]:
+        """Nodes that could pass the attachment gate for ``cluster`` — those sharing ≥1 entity with
+        it (the gate's hard requirement, line in ``passes_gate``). Sub-linear in node count (#285)."""
+        ids_seen: set[str] = set()
+        for ent in cluster.entity_spine:
+            ids_seen.update(self._entity_index.get(ent, ()))
+        return [self.nodes[nid] for nid in ids_seen]
+
 
 # ---------------------------------------------------------------------------
 # Thresholds (from spike §2 / §3; surfaced as Config entries in P8)
@@ -205,7 +228,7 @@ def passes_gate(
 def _infer_edges(
     cluster: ClusterRow,
     target_node: EventNode,
-    all_nodes: list[EventNode],
+    candidates: list[EventNode],
     *,
     entity_tau: float = _DEFAULT_ENTITY_TAU,
     window_s: float = _DEFAULT_WINDOW_S,
@@ -226,7 +249,7 @@ def _infer_edges(
                 to_id=cluster.cluster_id,
             ))
 
-    for other in all_nodes:
+    for other in candidates:
         if other.id == target_node.id:
             continue
 
@@ -274,8 +297,12 @@ def attach_cluster(
     Returns an ``AttachmentResult``; does NOT mutate ``graph`` — the caller applies the
     result (or use ``fold_clusters`` to drive the whole pipeline).
     """
-    existing = list(graph.nodes.values())
-    candidates = [n for n in existing if passes_gate(cluster, n, entity_tau=entity_tau, window_s=window_s)]
+    # Only nodes sharing ≥1 entity with the cluster can pass the gate, so fetch them from the entity
+    # index instead of scanning every node (#285) — identical result, sub-linear cost.
+    candidate_nodes = graph.candidate_nodes(cluster)
+    candidates = [
+        n for n in candidate_nodes if passes_gate(cluster, n, entity_tau=entity_tau, window_s=window_s)
+    ]
 
     if not candidates:
         # no match -> seed a new node
@@ -299,7 +326,7 @@ def attach_cluster(
 
     # tiebreaker: highest cosine to the node's running centroid
     target = max(candidates, key=lambda n: _cosine(cluster.topic_embedding, n.topic_embedding))
-    edges = _infer_edges(cluster, target, existing, entity_tau=entity_tau, window_s=window_s)
+    edges = _infer_edges(cluster, target, candidate_nodes, entity_tau=entity_tau, window_s=window_s)
     return AttachmentResult(
         cluster_id=cluster.cluster_id,
         node_id=target.id,
@@ -321,6 +348,7 @@ def _apply(graph: StoryGraph, cluster: ClusterRow, result: AttachmentResult) -> 
         assert result.new_node is not None
         node = result.new_node
         graph.nodes[node_id] = node
+        graph._index_node(node)  # keep the entity index in sync (#285)
     else:
         node = graph.nodes[node_id]
 
