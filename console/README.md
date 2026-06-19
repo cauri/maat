@@ -1,6 +1,7 @@
 # Maat operator console (v2)
 
-> **Status:** planned — scaffolding starts at #303. **Epic:** [#302](https://github.com/cauri/maat/issues/302) (P13). **Decision:** `DECISIONS.md` D33.
+> **Status:** foundation landed (#303) — app shell, rooms, ⌘K, theming, live-stream client, and the
+> reused admin gate are in place; rooms are placeholders pending their issues. **Epic:** [#302](https://github.com/cauri/maat/issues/302) (P13). **Decision:** `DECISIONS.md` D33.
 >
 > This is the **authoritative stack + architecture** for the console rebuild. Any agent picking up a P13
 > issue starts here. Keep it current as the app lands.
@@ -127,8 +128,56 @@ on it).
 
 ## Getting started
 
-The app isn't scaffolded yet — **#303** lands the Next.js + shadcn skeleton and fills this section with
-the dev loop (install / dev / build / test) and the local `admin.maat.press` proxy setup.
+```bash
+cd console
+npm install            # one-time
+npm run dev            # dev server on http://localhost:3000 (use localhost, not 127.0.0.1 — see below)
+npm run lint           # eslint
+npm run typecheck      # tsc --noEmit
+npm run build          # production build (Turbopack, standalone output)
+```
+
+Open **http://localhost:3000** — `/` redirects to `/overview`. Every room is reachable from the rail or
+the ⌘K palette. With no `MAAT_ADMIN_SESSION_SECRET` set the admin gate **falls open** (you're a "Local
+operator"), exactly like the Python side in dev.
+
+> Use `localhost`, not `127.0.0.1`, in dev: Next 16 blocks cross-origin `_next` dev resources from a bare
+> IP, which silently breaks HMR/hydration. (Production is unaffected.)
+
+### What's here (#303)
+
+- **App shell** — rail nav grouped by the two altitudes (Product mirror · Engine room · Inputs), a topbar
+  with live status, and the cross-cutting surfaces: **⌘K** palette (cmdk), **Audit** drawer, and the
+  **Sia** dock (a placeholder until #306 — no persona is authored here; that's co-designed with cauri).
+- **Data layer** — TanStack Query provider; an **SSE** client (`hooks/use-event-stream.ts`) that
+  auto-reconnects with backoff and drives the live indicator + Audit drawer. It targets the #304 endpoint
+  (`NEXT_PUBLIC_CONSOLE_SSE_PATH`, default `/console/api/events`) and reports "offline" until that lands.
+- **Theming** — `next-themes`, dark by default; rail-collapse persisted via a cookie so the server renders
+  the right width (no flash).
+- **Rooms** — all nine are placeholders that link to their tracking issue; each is replaced by its own
+  P13 issue.
+
+### Auth — reusing the existing gate (D31/D32)
+
+The console does **not** stand up a second identity system. The FastAPI app
+(`python/maat/serving/admin_auth.py`) owns the Google-OIDC dance and issues a stateless, HMAC-signed
+`maat_admin` cookie. This app:
+
+- verifies that **same** cookie in Edge middleware (`src/proxy.ts`) using the **same**
+  `MAAT_ADMIN_SESSION_SECRET` (a faithful port in `src/lib/admin-token.ts`), redirecting to the
+  FastAPI-owned `/admin/login` when absent;
+- reads it again server-side (`src/lib/admin-session.ts`) to show the signed-in operator.
+
+Set the same `MAAT_ADMIN_*` env on both processes. See `.env.example`. ⚠️ `src/lib/admin-token.ts` mirrors
+the Python `verify_cookie`; coordinate with **#282** (admin-auth hardening) before changing either side.
+
+### Deploy + cutover
+
+`Dockerfile` builds the standalone server (loopback `:3100`). The console is **not** yet fronted at
+`admin.maat.press` — that's the **#292 cutover** (last in the lane), which points Caddy at this app, routes
+`/admin/*` + the command/query API to FastAPI, and retires the inline-HTML console in
+`python/maat/web/app.py`. Until then the box keeps serving the legacy console so the operator's working
+tools (e.g. Prompts) stay live. CI lints + type-checks + builds the console on every PR (`.github/workflows/ci.yml`).
 
 ## References
 
