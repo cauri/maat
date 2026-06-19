@@ -10,7 +10,19 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import maat.bus as bus
+
+
+@pytest.fixture(autouse=True)
+def _no_db_dead_letter(monkeypatch):
+    """_process_msg persists dead-letters (#299); keep these ack-policy unit tests DB-free."""
+
+    async def _noop(*_a, **_k):
+        pass
+
+    monkeypatch.setattr(bus, "_persist_dead_letter", _noop)
 
 
 class _Msg:
