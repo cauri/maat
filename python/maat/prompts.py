@@ -22,12 +22,12 @@ check, and surfacing; it never authors prompt text.
 
 from __future__ import annotations
 
-from maat.agents.curation import _DRAFT_GEOTAG_PROMPT as CURATION_GEOTAG_PROMPT
-from maat.agents.triage import TRIAGE_LLM_PROMPT
 from maat.pipeline.classify import PROMPT as CLASSIFY_PROMPT
+from maat.pipeline.curation import _DRAFT_GEOTAG_PROMPT as CURATION_GEOTAG_PROMPT
 from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
 from maat.pipeline.grounding import GROUNDING_PROMPT
+from maat.pipeline.triage import TRIAGE_LLM_PROMPT
 from maat.acquire.source_gate import PROMPT as SOURCE_GATE_PROMPT
 from maat.serving.topics import _LLM_PROMPT_TEMPLATE as TOPICS_LLM_PROMPT
 from maat.serving.topics import NEWS_QUERIES_PROMPT
@@ -204,7 +204,7 @@ PROMPTS: list[dict] = [
      "runs today.",
      "placeholders": []},
     {"key": "curation_geotag", "label": "Curation geo-tagger", "default": CURATION_GEOTAG_PROMPT,
-     "status": "draft", "source": "maat/agents/curation.py",
+     "status": "draft", "source": "maat/pipeline/curation.py",
      "description": "Would tag a story's primary country/region so curation can balance the feed's "
      "geography and push back on Anglo-American slant. An optional LLM path — pure heuristics run "
      "today.",
@@ -216,7 +216,7 @@ PROMPTS: list[dict] = [
      "MAAT_GROUNDING_LLM; the verdict refines the primary lift and a contradiction feeds REFUTED.",
      "placeholders": ["{fact}", "{source_name}", "{primary_body}"]},
     {"key": "triage_llm", "label": "Feedback-triage refinement", "default": TRIAGE_LLM_PROMPT,
-     "status": "draft", "source": "maat/agents/triage.py",
+     "status": "draft", "source": "maat/pipeline/triage.py",
      "description": "Would refine how a piece of user feedback is categorised (veracity-dispute / "
      "source-quality / bug / …) to route it to the review queue or an auto-fix. An optional LLM "
      "path — the rule-based classifier runs today.",

@@ -38,7 +38,6 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from maat.acquire.clean import clean_article, is_index_page
-from maat.agents.curation import Story as CurationStory, curate
 from maat.events import STORY_GEO_INFERRED
 from maat.geo import infer_country
 from maat.learning.accuracy import lifecycle_by_fact
@@ -46,6 +45,7 @@ from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.source_learning import learn_preferences
 from maat.learning.source_registry import fold_sources, pending_sources
 from maat.pipeline.corroborate import confidence_label, is_primary_source
+from maat.pipeline.curation import Story as CurationStory, curate
 from maat.serving.source_flags import denied_sources
 from maat.serving.favicon import icon_bytes
 from maat.serving.stories import load_story_detail, load_story_views

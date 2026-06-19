@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from maat.agents.curation import (
+from maat.pipeline.curation import (
     Story,
     anglosphere_share,
     curate,

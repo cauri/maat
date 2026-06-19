@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from maat import config, events, prompts
-from maat.agents.triage import classify as triage_classify
+from maat.pipeline.triage import classify as triage_classify
 from maat.bus import connect as nats_connect
 from maat.clocks import is_paused, read_topics
 from maat.db import get_pool
