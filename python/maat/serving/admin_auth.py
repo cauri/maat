@@ -108,6 +108,19 @@ def load_config(env: Mapping[str, str]) -> AdminConfig:
     )
 
 
+def fail_closed_in_prod(enabled: bool, env: Mapping[str, str]) -> None:
+    """Refuse to run an UNAUTHENTICATED console in production (#282). Dev/test (any ``MAAT_ENV`` other
+    than ``prod``) falls open as before — auth stays inert until the secrets land. In prod, missing
+    ``MAAT_ADMIN_*`` secrets must fail CLOSED: raise so the app won't boot rather than expose the
+    console behind WireGuard alone."""
+    if not enabled and env.get("MAAT_ENV", "").strip().lower() == "prod":
+        raise RuntimeError(
+            "MAAT_ENV=prod but admin auth is DISABLED (no MAAT_ADMIN_* secrets) — refusing to start an "
+            "unauthenticated console. Set GOOGLE_CLIENT_ID/_SECRET + MAAT_ADMIN_EMAILS + "
+            "MAAT_ADMIN_SESSION_SECRET, or unset MAAT_ENV for dev/test."
+        )
+
+
 # ── allowlist ────────────────────────────────────────────────────────────────────
 
 
@@ -232,7 +245,7 @@ def check_identity(
         return None, "bad audience"
     if int(claims.get("exp", 0)) <= now:
         return None, "id_token expired"
-    if nonce and claims.get("nonce") != nonce:
+    if claims.get("nonce") != nonce:  # #282: mandatory — an empty/absent nonce must never skip the check
         return None, "nonce mismatch"
     if cfg.hd and (claims.get("hd") or "").lower() != cfg.hd:
         return None, "wrong hosted domain"

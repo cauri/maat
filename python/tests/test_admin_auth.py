@@ -165,6 +165,34 @@ def test_check_identity_rejects(mutate, expected):
     assert email is None and reason == expected
 
 
+def test_check_identity_nonce_is_mandatory_when_expected_is_empty():
+    # #282: a falsy expected nonce must NOT skip the check (it used to `if nonce and ...` fall through).
+    cfg = _cfg()
+    email, reason = aa.check_identity(_good_claims(cfg, "real-nonce"), cfg, nonce="")
+    assert email is None and reason == "nonce mismatch"
+
+
+def test_check_identity_rejects_token_missing_the_nonce_claim():
+    # #282: a token with no nonce claim is a mismatch, not a skip.
+    cfg = _cfg()
+    claims = _good_claims(cfg, "NON")
+    del claims["nonce"]
+    email, reason = aa.check_identity(claims, cfg, nonce="NON")
+    assert email is None and reason == "nonce mismatch"
+
+
+def test_fail_closed_in_prod_raises_when_console_unauthenticated():
+    # #282: MAAT_ENV=prod + admin auth disabled (no secrets) → refuse to boot.
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        aa.fail_closed_in_prod(False, {"MAAT_ENV": "prod"})
+
+
+def test_fail_closed_in_prod_is_noop_when_enabled_or_not_prod():
+    aa.fail_closed_in_prod(True, {"MAAT_ENV": "prod"})  # secrets present → fine
+    aa.fail_closed_in_prod(False, {"MAAT_ENV": "dev"})  # not prod → dev/test falls open as before
+    aa.fail_closed_in_prod(False, {})                   # MAAT_ENV unset → dev/test behaviour
+
+
 # ── config loading / enabled toggle ─────────────────────────────────────────────────
 
 

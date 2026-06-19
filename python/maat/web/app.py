@@ -143,6 +143,7 @@ if not _ADMIN.enabled:
         "[console] admin auth DISABLED (no MAAT_ADMIN_* secrets) — console is UNAUTHENTICATED",
         flush=True,
     )
+admin_auth.fail_closed_in_prod(_ADMIN.enabled, os.environ)  # #282: refuse to boot unauth'd in prod
 
 
 @app.middleware("http")
