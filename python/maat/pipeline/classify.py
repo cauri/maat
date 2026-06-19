@@ -82,7 +82,7 @@ def classify_claims(
     filled = prompt.replace("{article_text}", article_text or "(none)").replace(
         "{claims_json}", claims_json
     )
-    reply = claude_complete(filled, model=model, max_tokens=2000)
+    reply = claude_complete(filled, model=model, max_tokens=2000, stage="classify")
     raw = reply.text
     start, end = raw.find("["), raw.rfind("]")
     if start == -1 or end == -1:

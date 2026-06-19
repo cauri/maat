@@ -144,5 +144,5 @@ def extract_claims(
     )
     # A long, claim-dense article needs headroom — at 3000 the array was being truncated and the
     # whole extraction lost. Most articles use far less; we only pay for what is generated.
-    reply = claude_complete(filled, model=model, max_tokens=8000)
+    reply = claude_complete(filled, model=model, max_tokens=8000, stage="extract")
     return [Claim.model_validate(c) for c in _claim_objects(reply.text)]

@@ -12,6 +12,7 @@ grows from here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -101,6 +102,17 @@ class _TokenBucket:
                 wait = (n - self._tokens) / self._rate
             self._sleep(wait)  # outside the lock so other threads can refill-check meanwhile
 
+    def available(self) -> float:
+        """Tokens available right now, after a lazy refill (∞ when disabled). Does not consume —
+        it is the peek that least-loaded routing ranks endpoints by."""
+        if self._rate <= 0:
+            return float("inf")
+        with self._lock:
+            now = self._now()
+            self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            return self._tokens
+
 
 class _RateLimiter:
     """Per-provider request (RPM) + token (TPM) throttle. Either budget at 0 disables that arm."""
@@ -117,6 +129,10 @@ class _RateLimiter:
         if self._tok is not None and est_tokens > 0:
             self._tok.acquire(est_tokens)
 
+    def available(self) -> float:
+        """Spare REQUEST budget now (∞ if the request arm is disabled) — the least-loaded signal."""
+        return self._req.available() if self._req is not None else float("inf")
+
 
 # Anthropic: no throttle by default (operator sets RPM/TPM to the account tier — cost is not a
 # constraint, so provision the tier for headroom; #300). Mistral: default ~50 RPM, matching the old
@@ -127,6 +143,217 @@ _CLAUDE_LIMIT = _RateLimiter(
 _MISTRAL_LIMIT = _RateLimiter(
     float(os.environ.get("MAAT_MISTRAL_RPM", "50")), float(os.environ.get("MAAT_MISTRAL_TPM", "0"))
 )
+
+
+# ── Per-stage, multi-endpoint Claude routing (#300, DECISIONS D7) ────────────────────────────────
+# A single Anthropic tier's RPM/TPM is the throughput ceiling: the bounded worker pool (#296) +
+# throttle above keep us *under* one tier, they don't raise it. To raise it, the seam can hold
+# SEVERAL Anthropic(-compatible) endpoints — in practice multiple API keys (separate
+# workspaces/accounts, each its own tier), all on api.anthropic.com — each with its OWN _RateLimiter.
+# A call picks one (round-robin, or least-loaded for unequal tiers), so the AGGREGATE budget is the
+# SUM of the tiers: add an endpoint or raise a tier and sustained throughput rises proportionally.
+# Routing is per-stage — the high-volume Sonnet stages (extract/classify/…) spread across every
+# endpoint, while low-volume judge calls can stay pinned to one. All env-driven; with nothing
+# configured there is ONE endpoint = today's single ANTHROPIC_API_KEY, so behaviour is unchanged.
+#
+# D7 left CLAUDE_ROUTE=anthropic|bedrock-eu|vertex-eu as a TBD EU-region preference. Maat runs on
+# neither AWS nor GCP, so there is no SigV4/OAuth here: an endpoint is just a URL + key + an auth
+# header style — "x-api-key" (Anthropic native) or "bearer" (an Anthropic-compatible regional
+# gateway/proxy). "bedrock-eu"/"vertex-eu" are merely names an operator could give such an endpoint.
+
+_DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+_VALID_AUTH = ("x-api-key", "bearer")
+_VALID_POLICY = ("round-robin", "least-loaded")
+
+
+class _Endpoint:
+    """One Anthropic(-compatible) Messages endpoint with its own rate budget.
+
+    The API key is read from ``key_env`` at call time, so a missing key raises KeyError exactly as
+    the single-endpoint path always did and import never needs every key present.
+    """
+
+    def __init__(self, name: str, *, url: str = ANTHROPIC_URL, auth: str = "x-api-key",
+                 key_env: str = "ANTHROPIC_API_KEY", version: str = _DEFAULT_ANTHROPIC_VERSION,
+                 extra_headers: tuple[tuple[str, str], ...] = (),
+                 limiter: _RateLimiter | None = None) -> None:
+        if auth not in _VALID_AUTH:
+            raise ValueError(f"endpoint {name!r}: auth must be one of {_VALID_AUTH}, got {auth!r}")
+        self.name = name
+        self.url = url
+        self.auth = auth
+        self.key_env = key_env
+        self.version = version
+        self.extra_headers = tuple(extra_headers)
+        self.limiter = limiter if limiter is not None else _RateLimiter(0, 0)
+
+    def headers(self) -> dict[str, str]:
+        key = os.environ[self.key_env]
+        h = {"anthropic-version": self.version, "content-type": "application/json"}
+        if self.auth == "bearer":
+            h["Authorization"] = f"Bearer {key}"
+        else:
+            h["x-api-key"] = key
+        h.update(self.extra_headers)
+        return h
+
+    def acquire(self, est_tokens: float = 0.0) -> None:
+        self.limiter.acquire(est_tokens)
+
+    def available(self) -> float:
+        """Spare request budget now (∞ if unthrottled) — the least-loaded ranking key."""
+        return self.limiter.available()
+
+
+class _Route:
+    """An ordered set of endpoints + a selection policy, serving one stage (or the default)."""
+
+    def __init__(self, endpoints: list[_Endpoint], policy: str = "round-robin") -> None:
+        if not endpoints:
+            raise ValueError("a route needs at least one endpoint")
+        if policy not in _VALID_POLICY:
+            raise ValueError(f"policy must be one of {_VALID_POLICY}, got {policy!r}")
+        self.endpoints = endpoints
+        self.policy = policy
+        self._rr = 0
+        self._lock = threading.Lock()
+
+    def pick(self) -> _Endpoint:
+        if len(self.endpoints) == 1:
+            return self.endpoints[0]
+        if self.policy == "least-loaded":
+            # Most spare request budget = least likely to block. Send a raised tier proportionally
+            # more traffic automatically (#300 acceptance). Ties — including all-∞ unthrottled
+            # endpoints — fall through to the round-robin rotation so load still spreads evenly.
+            avail = [ep.available() for ep in self.endpoints]
+            hi = max(avail)
+            candidates = [i for i, a in enumerate(avail) if a >= hi - 1e-9]
+        else:
+            candidates = list(range(len(self.endpoints)))
+        with self._lock:
+            ep = self.endpoints[candidates[self._rr % len(candidates)]]
+            self._rr += 1
+            return ep
+
+
+class _Router:
+    """Resolves a pipeline stage to its _Route; an unknown stage uses the default route."""
+
+    def __init__(self, routes: dict[str, _Route], default: _Route) -> None:
+        self.routes = routes
+        self.default = default
+
+    def route(self, stage: str) -> _Route:
+        return self.routes.get(stage, self.default)
+
+    def pick(self, stage: str) -> _Endpoint:
+        return self.route(stage).pick()
+
+    def with_zero_limits(self) -> _Router:
+        """A copy whose endpoints never throttle — used by the test fixture so the suite, which
+        exercises the real seam over a faked transport, never real-sleeps on a drained bucket."""
+        zero = _RateLimiter(0, 0)
+        clones: dict[str, _Endpoint] = {}
+
+        def clone(ep: _Endpoint) -> _Endpoint:
+            if ep.name not in clones:
+                clones[ep.name] = _Endpoint(
+                    ep.name, url=ep.url, auth=ep.auth, key_env=ep.key_env,
+                    version=ep.version, extra_headers=ep.extra_headers, limiter=zero,
+                )
+            return clones[ep.name]
+
+        routes = {s: _Route([clone(e) for e in r.endpoints], r.policy)
+                  for s, r in self.routes.items()}
+        default = _Route([clone(e) for e in self.default.endpoints], self.default.policy)
+        return _Router(routes, default)
+
+
+def _parse_endpoints(raw: str) -> list[_Endpoint]:
+    """Endpoints from MAAT_CLAUDE_ENDPOINTS (JSON array of objects). Unset → ONE endpoint = today's
+    single ANTHROPIC_API_KEY throttled by MAAT_CLAUDE_RPM/TPM (_CLAUDE_LIMIT)."""
+    raw = raw.strip()
+    if not raw:
+        return [_Endpoint("anthropic", limiter=_CLAUDE_LIMIT)]
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"MAAT_CLAUDE_ENDPOINTS is not valid JSON: {e}") from e
+    if not isinstance(spec, list) or not spec:
+        raise ValueError("MAAT_CLAUDE_ENDPOINTS must be a non-empty JSON array of endpoint objects")
+    endpoints: list[_Endpoint] = []
+    seen: set[str] = set()
+    for i, item in enumerate(spec):
+        if not isinstance(item, dict) or "name" not in item:
+            raise ValueError(f"MAAT_CLAUDE_ENDPOINTS[{i}] must be an object with a 'name'")
+        name = str(item["name"])
+        if name in seen:
+            raise ValueError(f"MAAT_CLAUDE_ENDPOINTS: duplicate endpoint name {name!r}")
+        seen.add(name)
+        # Per-endpoint rpm/tpm; absent → the shared MAAT_CLAUDE_RPM/TPM defaults (0 = no throttle).
+        rpm = float(item.get("rpm", os.environ.get("MAAT_CLAUDE_RPM", "0")))
+        tpm = float(item.get("tpm", os.environ.get("MAAT_CLAUDE_TPM", "0")))
+        headers = item.get("headers") or {}
+        endpoints.append(_Endpoint(
+            name,
+            url=str(item.get("url", ANTHROPIC_URL)),
+            auth=str(item.get("auth", "x-api-key")),
+            key_env=str(item.get("key_env", "ANTHROPIC_API_KEY")),
+            version=str(item.get("version", _DEFAULT_ANTHROPIC_VERSION)),
+            extra_headers=tuple((str(k), str(v)) for k, v in headers.items()),
+            limiter=_RateLimiter(rpm, tpm),
+        ))
+    return endpoints
+
+
+def _route_from_cfg(stage: str, cfg: object, by_name: dict[str, _Endpoint]) -> _Route:
+    """One stage's route from its config — a bare list of endpoint names, or an object
+    {"endpoints": [...], "policy": "round-robin"|"least-loaded"}."""
+    if isinstance(cfg, list):
+        names: object = cfg
+        policy = "round-robin"
+    elif isinstance(cfg, dict):
+        names = cfg.get("endpoints")
+        policy = str(cfg.get("policy", "round-robin"))
+    else:
+        raise ValueError(f"stage {stage!r}: route must be a list of names or an object")
+    if not isinstance(names, list) or not names:
+        raise ValueError(f"stage {stage!r}: 'endpoints' must be a non-empty list of endpoint names")
+    try:
+        eps = [by_name[str(n)] for n in names]
+    except KeyError as e:
+        raise ValueError(
+            f"stage {stage!r} references unknown endpoint {e.args[0]!r}; known: {sorted(by_name)}"
+        ) from e
+    return _Route(eps, policy)
+
+
+def _build_claude_router() -> _Router:
+    """Assemble the Claude router from env (MAAT_CLAUDE_ENDPOINTS + MAAT_CLAUDE_STAGE_ROUTES).
+
+    With no stage routing configured, every stage spreads across ALL endpoints (round-robin); with
+    the single default endpoint that is a no-op, so the out-of-the-box path is unchanged. Pin a
+    stage (e.g. judge) to one endpoint — or choose "least-loaded" — via MAAT_CLAUDE_STAGE_ROUTES; a
+    "default" key there overrides the catch-all for unlisted stages.
+    """
+    endpoints = _parse_endpoints(os.environ.get("MAAT_CLAUDE_ENDPOINTS", ""))
+    by_name = {ep.name: ep for ep in endpoints}
+    spread_all = _Route(endpoints, "round-robin")
+    raw = os.environ.get("MAAT_CLAUDE_STAGE_ROUTES", "").strip()
+    if not raw:
+        return _Router({}, spread_all)
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"MAAT_CLAUDE_STAGE_ROUTES is not valid JSON: {e}") from e
+    if not isinstance(spec, dict):
+        raise ValueError("MAAT_CLAUDE_STAGE_ROUTES must be a JSON object {stage: route}")
+    routes = {stage: _route_from_cfg(stage, cfg, by_name) for stage, cfg in spec.items()}
+    default = routes.pop("default", spread_all)
+    return _Router(routes, default)
+
+
+_CLAUDE_ROUTER = _build_claude_router()
 
 
 # Defaults; callers override per call (the whole point of the seam).
@@ -148,18 +375,22 @@ class Reply:
     model: str
 
 
-def claude_complete(prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 256) -> Reply:
-    """Claude (Anthropic) — reserved for the hardest judgement stages."""
-    key = os.environ["ANTHROPIC_API_KEY"]
-    _CLAUDE_LIMIT.acquire(max_tokens)  # proactive RPM/TPM throttle so parallel workers don't 429-storm (#300)
+def claude_complete(prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 256,
+                    stage: str = "default") -> Reply:
+    """Claude (Anthropic) — reserved for the hardest judgement stages.
+
+    ``stage`` selects the routing group (#300): the high-volume Sonnet stages (extract/classify/…)
+    spread across every configured endpoint for aggregate RPM/TPM, while the default group serves
+    low-volume judge calls. Unconfigured, every stage maps to the one default endpoint.
+    """
+    ep = _CLAUDE_ROUTER.pick(stage)
+    ep.acquire(max_tokens)  # this endpoint's RPM/TPM throttle so parallel workers don't 429-storm (#300)
     with llm_span("judge", model, prompt) as span:
+        if span is not None:
+            span.set_attribute("maat.llm.endpoint", ep.name)
         data = _post_json(
-            ANTHROPIC_URL,
-            headers={
-                "x-api-key": key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+            ep.url,
+            headers=ep.headers(),
             payload={
                 "model": model,
                 "max_tokens": max_tokens,
@@ -175,28 +406,27 @@ def claude_complete(prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int =
 
 
 async def claude_stream(
-    prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 1024
+    prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 1024, stage: str = "default"
 ) -> AsyncIterator[str]:
     """Streaming Claude: yields text deltas as they arrive (Anthropic SSE, ``stream: true``).
 
     The async counterpart to ``claude_complete`` for interactive surfaces (the console chat) — same
-    request shape, same telemetry (one span, completion recorded with the assembled text + usage),
-    just incremental. Raises like ``claude_complete`` (KeyError without the key, HTTP/transport
-    errors on a bad response); callers wrap it for graceful degradation.
+    request shape, routing (``stage``), telemetry (one span, completion recorded with the assembled
+    text + usage) and throttle, just incremental. Raises like ``claude_complete`` (KeyError without
+    the key, HTTP/transport errors on a bad response); callers wrap it for graceful degradation.
     """
-    key = os.environ["ANTHROPIC_API_KEY"]
+    ep = _CLAUDE_ROUTER.pick(stage)
+    await asyncio.to_thread(ep.acquire, float(max_tokens))  # throttle, but off the event loop (#300)
     parts: list[str] = []
     in_tok = out_tok = 0
     with llm_span("judge", model, prompt) as span:
+        if span is not None:
+            span.set_attribute("maat.llm.endpoint", ep.name)
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             async with client.stream(
                 "POST",
-                ANTHROPIC_URL,
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
+                ep.url,
+                headers=ep.headers(),
                 json={
                     "model": model,
                     "max_tokens": max_tokens,

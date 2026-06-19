@@ -86,6 +86,7 @@ def judge_grounding(
                 primary_body=primary_body[:8000],
             ),
             model=GROUNDING_MODEL,
+            stage="grounding",
         )
         raw = reply.text
         data = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])

@@ -84,5 +84,6 @@ def rate_extremity(fact: str, *, model: str = EXTREMITY_MODEL, prompt: str = PRO
 
     `prompt` defaults to the in-code template; the console may pass an active override (P8).
     """
-    reply = claude_complete(prompt.replace("{claim}", fact), model=model, max_tokens=200)
+    reply = claude_complete(prompt.replace("{claim}", fact), model=model, max_tokens=200,
+                            stage="extremity")
     return _parse_extremity(reply.text)
