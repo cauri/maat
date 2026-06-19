@@ -246,7 +246,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     assert set(prompts.PROMPTS_BY_KEY) == {
         "extract", "classify", "extremity", "acquire_queries", "source_gate",  # active backend
         "topics_enrich", "curation_geotag", "triage_llm", "grounding",  # draft backend (gated)
-        "prompt_chat_agent", "console_assistant",    # draft: console chat helper + page assistant
+        "prompt_chat_agent", "console_assistant", "sia",  # draft: chat helper, page assistant, Sia (#306)
         "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
     }
     # Every entry carries a non-empty status, source, and prompt text.
@@ -261,7 +261,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     assert by_status["active"] == {"extract", "classify", "extremity", "acquire_queries", "source_gate"}
     assert by_status["draft"] == {
         "topics_enrich", "curation_geotag", "triage_llm", "grounding",
-        "prompt_chat_agent", "console_assistant"
+        "prompt_chat_agent", "console_assistant", "sia"
     }
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
     # #189: every backend prompt is editable — drafts are live like any other, just tagged for
@@ -269,7 +269,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     assert prompts.EDITABLE_KEYS == frozenset(
         {"extract", "classify", "extremity", "acquire_queries", "source_gate",
          "topics_enrich", "curation_geotag", "triage_llm", "grounding",
-         "prompt_chat_agent", "console_assistant"}
+         "prompt_chat_agent", "console_assistant", "sia"}
     )
     assert "summarizer_ondevice" not in prompts.EDITABLE_KEYS
     assert "reranker_ondevice" not in prompts.EDITABLE_KEYS

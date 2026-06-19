@@ -17,6 +17,13 @@ interface RailState {
   toggle: () => void;
 }
 
+/** What the operator currently has open — published by rooms so Sia is page-aware (#306). */
+export interface PageSelection {
+  kind: string;
+  id: string;
+  label?: string;
+}
+
 export interface ShellState {
   /** The signed-in operator, or null when the gate is disabled (dev). */
   user: AdminClaims | null;
@@ -28,6 +35,9 @@ export interface ShellState {
   sia: Toggle;
   rail: RailState;
   stream: { status: StreamStatus; events: ConsoleEvent[]; clear: () => void };
+  /** The current room's selection (set by rooms, read by Sia). */
+  selection: PageSelection | null;
+  setSelection: (selection: PageSelection | null) => void;
 }
 
 export const ShellContext = createContext<ShellState | null>(null);
