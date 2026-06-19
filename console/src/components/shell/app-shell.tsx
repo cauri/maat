@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useEventStream } from "@/hooks/use-event-stream";
 import type { AdminClaims } from "@/lib/admin-token";
 import { consoleSseUrl } from "@/lib/sse";
-import { RAIL_COOKIE } from "@/lib/ui-prefs";
+import { RAIL_COOKIE, SIA_COOKIE } from "@/lib/ui-prefs";
 
 import { AuditDrawer } from "./audit-drawer";
 import { CommandPalette } from "./command-palette";
@@ -27,17 +27,19 @@ export function AppShell({
   authEnabled,
   logoutPath,
   initialRailCollapsed,
+  initialSiaOpen,
   children,
 }: {
   user: AdminClaims | null;
   authEnabled: boolean;
   logoutPath: string;
   initialRailCollapsed: boolean;
+  initialSiaOpen: boolean;
   children: React.ReactNode;
 }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
-  const [siaOpen, setSiaOpen] = useState(false);
+  const [siaOpen, setSiaOpen] = useState(initialSiaOpen);
   const [collapsed, setCollapsed] = useState(initialRailCollapsed);
   const [selection, setSelection] = useState<PageSelection | null>(null);
 
@@ -45,6 +47,15 @@ export function AppShell({
     setCollapsed(value);
     try {
       document.cookie = `${RAIL_COOKIE}=${value ? "1" : "0"}; path=/; max-age=31536000; samesite=lax`;
+    } catch {
+      // ignore — cookies disabled
+    }
+  }, []);
+
+  const setSia = useCallback((value: boolean) => {
+    setSiaOpen(value);
+    try {
+      document.cookie = `${SIA_COOKIE}=${value ? "1" : "0"}; path=/; max-age=31536000; samesite=lax`;
     } catch {
       // ignore — cookies disabled
     }
@@ -75,13 +86,13 @@ export function AppShell({
         toggle: () => setPaletteOpen((open) => !open),
       },
       audit: { open: auditOpen, set: setAuditOpen, toggle: () => setAuditOpen((open) => !open) },
-      sia: { open: siaOpen, set: setSiaOpen, toggle: () => setSiaOpen((open) => !open) },
+      sia: { open: siaOpen, set: setSia, toggle: () => setSia(!siaOpen) },
       rail: { collapsed, set: setRail, toggle: () => setRail(!collapsed) },
       stream,
       selection,
       setSelection,
     }),
-    [user, authEnabled, logoutPath, paletteOpen, auditOpen, siaOpen, collapsed, setRail, stream, selection],
+    [user, authEnabled, logoutPath, paletteOpen, auditOpen, siaOpen, setSia, collapsed, setRail, stream, selection],
   );
 
   return (
@@ -92,10 +103,11 @@ export function AppShell({
           <Topbar />
           <main className="min-h-0 flex-1 overflow-auto">{children}</main>
         </div>
+        {/* Sia docks here — pushes content in, never overlays (cauri). */}
+        <SiaDock />
       </div>
       <CommandPalette />
       <AuditDrawer />
-      <SiaDock />
     </ShellContext.Provider>
   );
 }
