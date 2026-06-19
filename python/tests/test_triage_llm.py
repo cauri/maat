@@ -1,6 +1,6 @@
 """#189 — DRAFT LLM triage refinement, gated by MAAT_TRIAGE_LLM (rules stay the fallback)."""
 
-import maat.agents.triage as t
+import maat.pipeline.triage as t
 import maat.providers.seam as seam
 
 

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from maat.agents.triage import (
+from maat.pipeline.triage import (
     CATEGORIES,
     ROUTES,
     TriageResult,

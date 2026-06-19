@@ -278,8 +278,8 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
 def test_draft_prompts_imported_live_from_their_modules():
     """Draft prompt text is imported from the owning module so the console can never drift."""
     from maat import prompts
-    from maat.agents.curation import _DRAFT_GEOTAG_PROMPT
-    from maat.agents.triage import TRIAGE_LLM_PROMPT
+    from maat.pipeline.curation import _DRAFT_GEOTAG_PROMPT
+    from maat.pipeline.triage import TRIAGE_LLM_PROMPT
     from maat.pipeline.grounding import GROUNDING_PROMPT
     from maat.serving.topics import _LLM_PROMPT_TEMPLATE
 
