@@ -23,7 +23,6 @@ Run (standalone; safe to schedule like triage):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -33,6 +32,7 @@ from typing import Any
 import httpx
 
 from maat.events import envelope, publish
+from maat import ids
 
 FEEDBACK_LINKED = "feedback.linked"
 
@@ -64,7 +64,7 @@ def dedup_key(category: str, text: str) -> str:
     toks = [t for t in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(t) >= 3 and t not in _STOP]
     base = " ".join(toks[:8])
     cat = (category or "feedback").strip().lower()
-    return f"{cat}::{hashlib.sha1(base.encode()).hexdigest()[:12]}"
+    return ids.issue_dedup_key(cat, base)
 
 
 def build_issue(items: list[dict[str, Any]]) -> dict[str, Any]:

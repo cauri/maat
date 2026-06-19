@@ -25,7 +25,6 @@ Env: MAAT_BACKFILL_WEEKS (default 8), MAAT_BACKFILL_PER_STRATUM (default 5),
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import sys
@@ -34,6 +33,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from maat import ids
 from maat.db import get_pool
 from maat import prompts
 from maat.acquire.clean import clean_article
@@ -50,7 +50,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _aid(url: str) -> str:
-    return "gd-" + hashlib.sha1(url.encode()).hexdigest()[:18]
+    return ids.article_id(url, "gd")
 
 
 def _topics() -> list[str]:

@@ -24,7 +24,6 @@ Env:  MAAT_LOCALE_MAXRECORDS (default 12) — records pulled per locale per engi
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import sys
@@ -33,6 +32,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from maat import ids
 from maat.db import get_pool
 from maat import prompts
 from maat.acquire import apify
@@ -50,7 +50,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _aid(url: str) -> str:
-    return "loc-" + hashlib.sha1(url.encode()).hexdigest()[:18]
+    return ids.article_id(url, "loc")
 
 
 def _topics() -> list[str]:

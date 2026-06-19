@@ -18,7 +18,6 @@ Env:  MAAT_CCNEWS_MONTHS (default 1)        — how many prior months to walk ba
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from maat import ids
 from maat.db import get_pool
 from maat import prompts
 from maat.acquire import ccnews
@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _aid(url: str) -> str:
-    return "cc-" + hashlib.sha1(url.encode()).hexdigest()[:18]
+    return ids.article_id(url, "cc")
 
 
 def _months_back(now: datetime, n: int) -> list[tuple[int, int]]:

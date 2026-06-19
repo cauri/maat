@@ -16,9 +16,10 @@ All functions are pure (rows/state in → graph out). No I/O, no migrations, no 
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from typing import NamedTuple
+
+from maat import ids
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +165,7 @@ def _update_centroid(old: list[float], new: list[float], n: int) -> list[float]:
 
 def _node_id_for(cluster: ClusterRow) -> str:
     """Stable content-addressed id: entity spine (sorted) + cluster id (spike §1)."""
-    payload = "|".join(sorted(cluster.entity_spine)) + ":" + cluster.cluster_id
-    return "node:" + hashlib.sha1(payload.encode()).hexdigest()[:16]
+    return ids.node_id(cluster.entity_spine, cluster.cluster_id)
 
 
 # ---------------------------------------------------------------------------

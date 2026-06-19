@@ -15,7 +15,6 @@ Env:  MAAT_NEWSDATA_KEY (required)      — the API key (operator-set in the box
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import sys
@@ -24,6 +23,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from maat import ids
 from maat.db import get_pool
 from maat import prompts
 from maat.acquire import newsdata
@@ -40,7 +40,7 @@ _DEFAULT_LANGS = "zh,es,ru,ar,hi,pt,fr,de,ja,ko,id,tr"
 
 
 def _aid(url: str) -> str:
-    return "nd-" + hashlib.sha1(url.encode()).hexdigest()[:18]
+    return ids.article_id(url, "nd")
 
 
 def _topics() -> list[str]:

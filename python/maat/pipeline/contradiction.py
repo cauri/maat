@@ -9,8 +9,9 @@ or None when it is too close to call (record the contradiction, refute neither).
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
+
+from maat import ids
 
 # Only act on a contradiction at least this confident; below it the relation is recorded but inert.
 CONTRADICTION_MIN_SCORE = 0.7
@@ -31,8 +32,7 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
 
 def pair_id(a: str, b: str, relation: str) -> str:
     """Stable stream_id for an unordered claim pair + relation (so re-runs dedup at the kernel)."""
-    key = "|".join([*sorted((a, b)), relation])
-    return "rel-" + hashlib.sha1(key.encode()).hexdigest()[:20]
+    return ids.relation_id(a, b, relation)
 
 
 def nearest_pairs(
