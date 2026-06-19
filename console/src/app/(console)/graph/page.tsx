@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
-import { RoomPlaceholder } from "@/components/shell/room-placeholder";
+import { GraphExplorer } from "@/components/graph/graph-explorer";
 
 export const metadata: Metadata = { title: "Graph" };
 
 export default function GraphPage() {
-  return <RoomPlaceholder id="graph" />;
+  return <GraphExplorer />;
 }

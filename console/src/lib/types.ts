@@ -255,6 +255,26 @@ export interface FeedbackResponse {
   queue: FeedbackItem[];
 }
 
+// ── Graph: the corroboration explorer (#315) ─────────────────────────────────────────────
+export interface GraphNode {
+  id: string;
+  type: "cluster" | "source";
+  label: string;
+  confidence?: number;
+  extremity?: string;
+  originators?: number;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+}
+
+export interface GraphResponse {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;

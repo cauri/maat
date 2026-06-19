@@ -14,6 +14,7 @@ import type {
   CommandResult,
   ConfigResponse,
   FeedbackResponse,
+  GraphResponse,
   Overview,
   PipelineHealth,
   PromptDetail,
@@ -141,6 +142,10 @@ export function getAudit(limit = 100, signal?: AbortSignal): Promise<AuditRespon
 
 export function getFeedback(signal?: AbortSignal): Promise<FeedbackResponse> {
   return apiGet<FeedbackResponse>("/feedback", signal);
+}
+
+export function getGraph(limit = 60, signal?: AbortSignal): Promise<GraphResponse> {
+  return apiGet<GraphResponse>(`/graph?limit=${limit}`, signal);
 }
 
 export async function triageFeedback(
