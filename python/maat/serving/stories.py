@@ -265,7 +265,16 @@ class _Common:
     node_meta: dict[str, dict]
 
 
+_COMMON_CACHE = VersionCache()
+
+
 async def _load_common(pool: Any) -> _Common:
+    # Cache the full snapshot/cluster load by data-version (#284): story-detail (and a feed cache
+    # miss) otherwise re-fold the whole trajectory + reputation history per request.
+    version = await data_version(pool)
+    cached = _COMMON_CACHE.get("common", version)
+    if cached is not None:
+        return cached
     clusters = await pool.fetch("select * from clusters")
     claims = await pool.fetch("select id, kind, text, disputed from claims")
     arts = await pool.fetch("select id, source from articles")
@@ -288,7 +297,7 @@ async def _load_common(pool: Any) -> _Common:
         if d.get("claim_id") and d.get("text_en"):
             pivots[d["claim_id"]] = d["text_en"]
 
-    return _Common(
+    common = _Common(
         clusters_by_id=clusters_by_id,
         kind_by_claim={str(c["id"]): c["kind"] for c in claims},
         text_by_claim={str(c["id"]): c["text"] for c in claims},
@@ -300,6 +309,8 @@ async def _load_common(pool: Any) -> _Common:
         node_clusters=dict(node_clusters),
         node_meta={r["id"]: dict(r) for r in meta_rows},
     )
+    _COMMON_CACHE.put("common", version, common)
+    return common
 
 
 def _assemble(c: _Common, node_id: str, cluster_ids: list[str], *,

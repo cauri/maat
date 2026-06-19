@@ -75,6 +75,7 @@ from maat.serving import admin_auth
 from maat.serving import favicon
 from maat.serving import spend as spend_mod
 from maat.serving.console_api import console_router
+from maat.serving.buildcache import VersionCache, data_version
 from maat.serving.feed import feed_router
 from maat.serving.social_api import social_router
 from maat.translate import translate_text
@@ -1709,6 +1710,9 @@ def _cluster_sources(cluster, art_source: dict, claim_art: dict) -> set[str]:
     return srcs
 
 
+_RATINGS_CACHE = VersionCache()
+
+
 async def _source_ratings(pool) -> list[dict]:
     """Per-source reputation as the REAL §6 truth-over-time fold (#192/#37), not the old proxy.
 
@@ -1720,6 +1724,10 @@ async def _source_ratings(pool) -> list[dict]:
     previous last-N-confidences proxy. Sources acquired but never corroborated are listed as
     cold-start ("not yet rated"), so the Sources view keeps full coverage.
     """
+    version = await data_version(pool)  # cache the whole-history reputation fold by data-version (#284)
+    cached = _RATINGS_CACHE.get("ratings", version)
+    if cached is not None:
+        return cached
     from collections import defaultdict
 
     history = await _corroboration_history(pool)
@@ -1780,6 +1788,7 @@ async def _source_ratings(pool) -> list[dict]:
             }
         )
     ratings.sort(key=lambda r: (r["cold_start"], -r["reputation"], r["name"]))
+    _RATINGS_CACHE.put("ratings", version, ratings)
     return ratings
 
 
