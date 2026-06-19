@@ -13,3 +13,9 @@ export function relativeTime(ts: number, now: number = Date.now()): string {
   if (weeks < 5) return `${weeks}w`;
   return new Date(ts).toLocaleDateString();
 }
+
+/** Whether `ts` (epoch ms) is older than `maxAgeMs`. The `Date.now()` default keeps the
+ *  impurity here (not in component render), so callers stay render-pure. */
+export function isStale(ts: number, maxAgeMs: number, now: number = Date.now()): boolean {
+  return now - ts > maxAgeMs;
+}

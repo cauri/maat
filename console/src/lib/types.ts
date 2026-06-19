@@ -64,6 +64,16 @@ export interface StoriesPage {
   stories: Story[];
 }
 
+/** The Overview landing snapshot (#307) — counts, clock states, and pipeline freshness. */
+export interface Overview {
+  counts: { articles: number; claims: number; clusters: number; events: number };
+  /** `true` = paused (mirrors `is_paused`); `false` = running. */
+  clocks: { ingestion: boolean; extraction: boolean; corroboration: boolean };
+  dead_letters: number;
+  /** ISO timestamp of the last `article.ingested` event, or null if none yet. */
+  last_ingest: string | null;
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;
