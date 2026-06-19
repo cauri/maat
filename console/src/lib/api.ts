@@ -10,8 +10,11 @@ import type {
   ClaimDetail,
   ClaimsResponse,
   CommandResult,
+  ConfigResponse,
   Overview,
   PipelineHealth,
+  PromptDetail,
+  PromptsResponse,
   SourcesResponse,
   StoriesPage,
   StoryDetail,
@@ -106,4 +109,16 @@ export function getClaim(claimId: string, signal?: AbortSignal): Promise<ClaimDe
 
 export function getPipeline(signal?: AbortSignal): Promise<PipelineHealth> {
   return apiGet<PipelineHealth>("/pipeline", signal);
+}
+
+export function getConfig(signal?: AbortSignal): Promise<ConfigResponse> {
+  return apiGet<ConfigResponse>("/config", signal);
+}
+
+export function getPrompts(signal?: AbortSignal): Promise<PromptsResponse> {
+  return apiGet<PromptsResponse>("/prompts", signal);
+}
+
+export function getPrompt(key: string, signal?: AbortSignal): Promise<PromptDetail> {
+  return apiGet<PromptDetail>(`/prompts/${encodeURIComponent(key)}`, signal);
 }
