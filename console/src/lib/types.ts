@@ -229,6 +229,19 @@ export interface Acquisition {
   by_platform: { platform: string; clicks: number }[];
 }
 
+// ── Audit log (#316) ─────────────────────────────────────────────────────────────────────
+export interface AuditEvent {
+  type: string;
+  stream_id: string;
+  at: string;
+  actor: string | null;
+  reason: string | null;
+}
+
+export interface AuditResponse {
+  events: AuditEvent[];
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;

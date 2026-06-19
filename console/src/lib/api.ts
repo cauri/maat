@@ -8,6 +8,7 @@
 
 import type {
   Acquisition,
+  AuditResponse,
   ClaimDetail,
   ClaimsResponse,
   CommandResult,
@@ -131,4 +132,8 @@ export function getSpend(signal?: AbortSignal): Promise<Spend> {
 
 export function getAcquisition(signal?: AbortSignal): Promise<Acquisition> {
   return apiGet<Acquisition>("/acquisition", signal);
+}
+
+export function getAudit(limit = 100, signal?: AbortSignal): Promise<AuditResponse> {
+  return apiGet<AuditResponse>(`/audit?limit=${limit}`, signal);
 }
