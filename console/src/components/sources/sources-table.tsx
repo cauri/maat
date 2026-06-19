@@ -6,7 +6,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { Ban, RefreshCw } from "lucide-react";
 
 import { ColumnHeader } from "@/components/data-table/column-header";
-import { DataTable } from "@/components/data-table/data-table";
+import { DataTable, type Facet } from "@/components/data-table/data-table";
 import { useShell } from "@/components/shell/shell-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -83,6 +83,8 @@ const columns: ColumnDef<Source>[] = [
   },
 ];
 
+const facets: Facet[] = [{ columnId: "state", label: "State" }];
+
 export function SourcesTable() {
   const { data, isLoading, error, isFetching, refetch } = useSources();
   const { setSelection } = useShell();
@@ -116,6 +118,7 @@ export function SourcesTable() {
           tableId="sources"
           columns={columns}
           data={data?.sources ?? []}
+          facets={facets}
           getRowId={(s) => s.source}
           isLoading={isLoading}
           error={error ? (error instanceof ApiError ? error.message : "Failed to load sources") : null}
