@@ -95,6 +95,44 @@ export interface SourcesResponse {
   sources: Source[];
 }
 
+/** A claim as the Claims inspector lists it (engine room — raw fields are fine here). */
+export interface Claim {
+  id: string;
+  text: string;
+  kind: string;
+  voice: string;
+  speaker: string | null;
+  in_headline: boolean;
+  created_at: string;
+  source: string;
+  title: string | null;
+  url: string | null;
+  language: string | null;
+}
+
+export interface ClaimsResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  claims: Claim[];
+}
+
+/** The cluster a claim belongs to (its corroboration context). */
+export interface ClaimCluster {
+  id: string;
+  fact: string;
+  confidence: number;
+  extremity: string;
+  independent_originators: number;
+}
+
+/** A claim with its full provenance — for the inspector workspace. */
+export interface ClaimDetail extends Claim {
+  evidence_span: string | null;
+  relay_chain: unknown[];
+  cluster: ClaimCluster | null;
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;

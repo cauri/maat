@@ -6,7 +6,15 @@
  * routes it there after the #292 cutover. So the cookie rides along and there's no CORS.
  */
 
-import type { CommandResult, Overview, SourcesResponse, StoriesPage, StoryDetail } from "./types";
+import type {
+  ClaimDetail,
+  ClaimsResponse,
+  CommandResult,
+  Overview,
+  SourcesResponse,
+  StoriesPage,
+  StoryDetail,
+} from "./types";
 
 const BASE = "/console/api";
 
@@ -78,4 +86,19 @@ export function getOverview(signal?: AbortSignal): Promise<Overview> {
 
 export function getSources(signal?: AbortSignal): Promise<SourcesResponse> {
   return apiGet<SourcesResponse>("/sources", signal);
+}
+
+export function getClaims(
+  params: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<ClaimsResponse> {
+  const q = new URLSearchParams();
+  if (params.limit != null) q.set("limit", String(params.limit));
+  if (params.offset != null) q.set("offset", String(params.offset));
+  const qs = q.toString();
+  return apiGet<ClaimsResponse>(`/claims${qs ? `?${qs}` : ""}`, signal);
+}
+
+export function getClaim(claimId: string, signal?: AbortSignal): Promise<ClaimDetail> {
+  return apiGet<ClaimDetail>(`/claims/${encodeURIComponent(claimId)}`, signal);
 }
