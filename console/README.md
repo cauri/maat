@@ -1,7 +1,8 @@
 # Maat operator console (v2)
 
-> **Status:** foundation landed (#303) — app shell, rooms, ⌘K, theming, live-stream client, and the
-> reused admin gate are in place; rooms are placeholders pending their issues. **Epic:** [#302](https://github.com/cauri/maat/issues/302) (P13). **Decision:** `DECISIONS.md` D33.
+> **Status:** vertical slice landed — app shell (#303), command/query API (#304), the data-table
+> primitive (#305), and the **Stories** room with its workspace + inline correction (#308). The
+> remaining rooms are placeholders pending their issues. **Epic:** [#302](https://github.com/cauri/maat/issues/302) (P13). **Decision:** `DECISIONS.md` D33.
 >
 > This is the **authoritative stack + architecture** for the console rebuild. Any agent picking up a P13
 > issue starts here. Keep it current as the app lands.
