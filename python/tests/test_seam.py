@@ -51,7 +51,7 @@ def test_mistral_embed_batches_large_input(monkeypatch):
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test")
     monkeypatch.setattr(seam.httpx, "post", fake_post)
-    monkeypatch.setattr(seam, "_MISTRAL_MIN_INTERVAL", 0)  # don't real-sleep in the batching test
+    monkeypatch.setattr(seam, "_MISTRAL_LIMIT", seam._RateLimiter(0, 0))  # throttle off: no real-sleep here
 
     out = seam.mistral_embed([f"claim {i}" for i in range(130)])
 
@@ -135,28 +135,53 @@ def test_post_json_honors_retry_after_header(monkeypatch):
     assert slept == [7.0]  # server-directed delay used verbatim
 
 
-def test_mistral_pace_spaces_calls_under_the_rate_limit(monkeypatch):
-    # Deterministic clock: monotonic advances only when we "sleep". Proves successive Mistral calls
-    # are forced ≥ _MISTRAL_MIN_INTERVAL apart (so a burst stays under Mistral's 60/min budget).
+def _fake_clock():
+    """An injected monotonic+sleep pair driving a deterministic clock (never touches global time,
+    which would leak across the suite and real-sleep it)."""
     clock = {"t": 100.0}
     slept: list[float] = []
-    monkeypatch.setattr(seam.time, "monotonic", lambda: clock["t"])
 
-    def fake_sleep(d):
+    def sleep(d):
         slept.append(d)
         clock["t"] += d  # time only moves forward by what we sleep
 
-    monkeypatch.setattr(seam.time, "sleep", fake_sleep)
-    monkeypatch.setattr(seam, "_MISTRAL_MIN_INTERVAL", 1.2)
-    monkeypatch.setattr(seam, "_mistral_next", [0.0])
-
-    for _ in range(4):
-        seam._mistral_pace()
-    # first call: no wait (budget free); next three each wait the full interval
-    assert slept == pytest.approx([1.2, 1.2, 1.2])
+    return (lambda: clock["t"]), sleep, slept
 
 
-def test_mistral_pace_disabled_when_interval_zero(monkeypatch):
-    monkeypatch.setattr(seam, "_MISTRAL_MIN_INTERVAL", 0)
-    monkeypatch.setattr(seam.time, "sleep", lambda *_: (_ for _ in ()).throw(AssertionError("no sleep")))
-    seam._mistral_pace()  # returns immediately, never sleeps
+def test_token_bucket_caps_sustained_rate():
+    # A full bucket bursts immediately; once drained, the refill rate caps the SUSTAINED rate (#300).
+    monotonic, sleep, slept = _fake_clock()
+    bucket = seam._TokenBucket(rate_per_sec=10.0, capacity=10.0, monotonic=monotonic, sleep=sleep)
+
+    for _ in range(10):  # full bucket → 10 immediate, no wait
+        bucket.acquire(1)
+    assert slept == []
+
+    for _ in range(5):  # drained → each token refills at 10/sec → 0.1s apart, 0.5s total
+        bucket.acquire(1)
+    assert sum(slept) == pytest.approx(0.5)
+
+
+def test_token_bucket_rate_zero_is_disabled():
+    slept: list[float] = []
+    bucket = seam._TokenBucket(rate_per_sec=0.0, capacity=0.0, sleep=lambda d: slept.append(d))
+    for _ in range(100):
+        bucket.acquire(1)  # disabled → never throttles
+    assert slept == []
+
+
+def test_rate_limiter_throttles_once_request_budget_drains():
+    monotonic, sleep, slept = _fake_clock()
+    lim = seam._RateLimiter(rpm=60.0, tpm=0.0, monotonic=monotonic, sleep=sleep)  # 60/min → burst 60
+    for _ in range(60):  # drain the full burst — no wait
+        lim.acquire()
+    assert slept == []
+    lim.acquire()  # 61st within the minute → must wait for a refill (1/sec)
+    assert sum(slept) == pytest.approx(1.0)
+
+
+def test_rate_limiter_disabled_when_zero():
+    def boom(_):
+        raise AssertionError("slept")
+
+    seam._RateLimiter(rpm=0, tpm=0, sleep=boom).acquire(est_tokens=99999)  # both arms off → no-op

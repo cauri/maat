@@ -17,7 +17,7 @@ import os
 import random
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 import httpx
@@ -60,29 +60,73 @@ def _post_json(url: str, *, headers: dict[str, str], payload: dict, timeout: htt
     raise AssertionError("unreachable")  # loop either returns or raises
 
 
-# Mistral enforces a per-minute REQUEST budget (the live response carries
-# ``x-ratelimit-limit-req-minute: 60``). A single corroborate pass bursts ~10 embedding batches
-# PLUS up to ~120 per-claim pivot translations back-to-back, which sails past 60/min and 429s
-# faster than backoff can recover — the retry above clears blips, not a sustained over-rate. So
-# pace Mistral calls PROACTIVELY, process-wide, to stay under the limit (default ~50/min). Claude
-# has its own, separate limits and is not throttled here. MAAT_MISTRAL_MIN_INTERVAL=0 disables.
-_MISTRAL_MIN_INTERVAL = float(os.environ.get("MAAT_MISTRAL_MIN_INTERVAL", "1.2"))  # s between calls
-_mistral_lock = threading.Lock()
-_mistral_next = [0.0]  # monotonic time at which the next Mistral request may proceed
+# Proactive client-side throttle (#300). The retry/backoff above (#256) clears transient 429 blips,
+# but the bounded worker pool (#296) can hold a SUSTAINED over-rate that backoff can't recover from
+# (Mistral 429s past ~60/min; Anthropic past its tier RPM/TPM). A token bucket caps the *sustained*
+# rate at the configured budget — calls block until a token refills — so parallel workers saturate
+# the tier without a 429 storm. Process-wide; with N horizontally-scaled replicas (#298) set each
+# replica's budget to tier/N. Tune to the tier via env; rate 0 = disabled (no throttle).
 
 
-def _mistral_pace() -> None:
-    """Block until the next Mistral request is allowed, keeping calls ≥ _MISTRAL_MIN_INTERVAL apart
-    across all threads in this process. Called via asyncio.to_thread, so the event loop is free."""
-    if _MISTRAL_MIN_INTERVAL <= 0:
-        return
-    with _mistral_lock:
-        now = time.monotonic()
-        wait = _mistral_next[0] - now
-        if wait > 0:
-            time.sleep(wait)
-            now = time.monotonic()
-        _mistral_next[0] = now + _MISTRAL_MIN_INTERVAL
+class _TokenBucket:
+    """Thread-safe token bucket: ``capacity`` tokens, refilled ``rate_per_sec``; ``acquire(n)``
+    blocks (time.sleep, off the event loop via the caller's to_thread) until n tokens are available.
+    The refill rate caps the SUSTAINED throughput; ``capacity`` is the one-off burst (#256 absorbs it)."""
+
+    def __init__(self, rate_per_sec: float, capacity: float, *,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], object] = time.sleep) -> None:
+        self._rate = rate_per_sec
+        self._capacity = max(capacity, 1.0)
+        self._tokens = self._capacity
+        # Injectable clock/sleep so tests drive a deterministic fake without patching the global
+        # `time` module (which leaks across tests and real-sleeps the suite).
+        self._now = monotonic
+        self._sleep = sleep
+        self._last = self._now()
+        self._lock = threading.Lock()
+
+    def acquire(self, n: float = 1.0) -> None:
+        if self._rate <= 0:
+            return  # disabled
+        n = min(n, self._capacity)  # a single request can never exceed the bucket
+        while True:
+            with self._lock:
+                now = self._now()
+                self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+                self._last = now
+                if self._tokens >= n - 1e-9:  # epsilon: a refill of `wait*rate` lands a hair under n
+                    self._tokens -= n          # in float, which would otherwise re-loop on sub-ULP waits
+                    return
+                wait = (n - self._tokens) / self._rate
+            self._sleep(wait)  # outside the lock so other threads can refill-check meanwhile
+
+
+class _RateLimiter:
+    """Per-provider request (RPM) + token (TPM) throttle. Either budget at 0 disables that arm."""
+
+    def __init__(self, rpm: float, tpm: float, *,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], object] = time.sleep) -> None:
+        self._req = _TokenBucket(rpm / 60.0, rpm, monotonic=monotonic, sleep=sleep) if rpm > 0 else None
+        self._tok = _TokenBucket(tpm / 60.0, tpm, monotonic=monotonic, sleep=sleep) if tpm > 0 else None
+
+    def acquire(self, est_tokens: float = 0.0) -> None:
+        if self._req is not None:
+            self._req.acquire(1.0)
+        if self._tok is not None and est_tokens > 0:
+            self._tok.acquire(est_tokens)
+
+
+# Anthropic: no throttle by default (operator sets RPM/TPM to the account tier — cost is not a
+# constraint, so provision the tier for headroom; #300). Mistral: default ~50 RPM, matching the old
+# 1.2s-interval pacing's average but allowing a burst, so its 60/min budget is respected by default.
+_CLAUDE_LIMIT = _RateLimiter(
+    float(os.environ.get("MAAT_CLAUDE_RPM", "0")), float(os.environ.get("MAAT_CLAUDE_TPM", "0"))
+)
+_MISTRAL_LIMIT = _RateLimiter(
+    float(os.environ.get("MAAT_MISTRAL_RPM", "50")), float(os.environ.get("MAAT_MISTRAL_TPM", "0"))
+)
 
 
 # Defaults; callers override per call (the whole point of the seam).
@@ -107,6 +151,7 @@ class Reply:
 def claude_complete(prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 256) -> Reply:
     """Claude (Anthropic) — reserved for the hardest judgement stages."""
     key = os.environ["ANTHROPIC_API_KEY"]
+    _CLAUDE_LIMIT.acquire(max_tokens)  # proactive RPM/TPM throttle so parallel workers don't 429-storm (#300)
     with llm_span("judge", model, prompt) as span:
         data = _post_json(
             ANTHROPIC_URL,
@@ -183,7 +228,7 @@ async def claude_stream(
 def mistral_complete(prompt: str, *, model: str = MISTRAL_BULK, max_tokens: int = 256) -> Reply:
     """Mistral — bulk / near-mechanical stages (and EU-sovereign)."""
     key = os.environ["MISTRAL_API_KEY"]
-    _mistral_pace()  # stay under Mistral's per-minute request budget (a pivot run bursts ~120 calls)
+    _MISTRAL_LIMIT.acquire(max_tokens)  # stay under Mistral's per-minute budget (#300; a pivot run bursts ~120 calls)
     with llm_span("bulk", model, prompt) as span:
         data = _post_json(
             MISTRAL_CHAT_URL,
@@ -216,7 +261,7 @@ def mistral_embed(texts: list[str], *, model: str = MISTRAL_EMBED) -> list[list[
     out: list[list[float]] = []
     for start in range(0, len(texts), _EMBED_BATCH):
         chunk = texts[start : start + _EMBED_BATCH]
-        _mistral_pace()  # one batch per interval — keeps the ~10-batch burst under the rate limit
+        _MISTRAL_LIMIT.acquire()  # one request per refill — keeps the ~10-batch burst under the rate limit (#300)
         with llm_span("embed", model, f"{len(chunk)} texts") as span:
             data = _post_json(
                 MISTRAL_EMBED_URL,
