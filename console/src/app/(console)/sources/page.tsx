@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
-import { RoomPlaceholder } from "@/components/shell/room-placeholder";
+import { SourcesTable } from "@/components/sources/sources-table";
 
 export const metadata: Metadata = { title: "Sources" };
 
 export default function SourcesPage() {
-  return <RoomPlaceholder id="sources" />;
+  return <SourcesTable />;
 }
