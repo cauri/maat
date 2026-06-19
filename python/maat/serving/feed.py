@@ -44,6 +44,7 @@ from maat.learning.accuracy import lifecycle_by_fact
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.source_learning import learn_preferences
 from maat.learning.source_registry import fold_sources, pending_sources
+from maat.learning.trajectory import load_trajectory
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.pipeline.curation import Story as CurationStory, curate
 from maat.serving.buildcache import VersionCache, data_version
@@ -758,21 +759,27 @@ def _make_router() -> Any:
         return cluster_node, node_meta, node_edges
 
     async def _load_corroboration_history(pool):
-        """The cluster.corroborated event stream (oldest→newest) — the trajectory accuracy folds
-        (#38). Resilient if the events table is unavailable."""
+        """The truth-over-time trajectory (oldest→newest) the accuracy (#38) + reputation (#199)
+        folds read. Reads the ``cluster_snapshots`` projection — the canonical trajectory the
+        harvester folds ``cluster.corroborated`` → snapshots into (#39), and the SAME source the
+        stories surface already uses, so feed and stories never diverge — instead of the unbounded
+        ``cluster.corroborated`` event-log scan that grew with every recompute (#283). Falls back to
+        that raw stream only on a pre-first-harvest DB (no snapshots yet). Resilient: any error
+        (table unmigrated) → empty, so the un-annotated feed still serves."""
         try:
-            rows = await pool.fetch(
-                "select data from events where type = 'cluster.corroborated' order by id"
-            )
+            return await load_trajectory(pool)
         except Exception:
             return []
-        return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
 
     async def _load_denied(pool):
-        """Currently operator-denied sources (#187), folded from admin.source.flagged. Resilient."""
+        """Currently operator-denied sources (#187), folded from admin.source.flagged. Bounded read:
+        the latest flag per source (one row per source via ``distinct on``, #283) — the same shape
+        /sources already uses (app.py). The flag is always allow|deny and the fold is last-write-wins
+        per source, so latest-per-source is byte-identical to the full event scan. Resilient."""
         try:
             rows = await pool.fetch(
-                "select data from events where type = 'admin.source.flagged' order by id"
+                "select distinct on (data->>'source') data from events "
+                "where type = 'admin.source.flagged' order by data->>'source', id desc"
             )
         except Exception:
             return set()
@@ -781,12 +788,16 @@ def _make_router() -> Any:
         )
 
     async def _load_pending_sources(pool):
-        """Sources NOT yet activated in the registry (#241), folded from source.* events. Resilient
-        + fail-open: any error → empty set → nothing hidden."""
+        """Sources NOT yet activated in the registry (#241), folded from source.* events. Bounded
+        read: the latest event per source (one row via ``distinct on``, #283). Every source.* event
+        carries the full current ``state`` and the fold is last-write-wins per source, so the latest
+        event resolves the same state — byte-identical for the pending set. Fail-open: any error →
+        empty set → nothing hidden."""
         try:
             rows = await pool.fetch(
-                "select data from events where type in ('source.registered', 'source.state_changed') "
-                "order by id"
+                "select distinct on (data->>'source') data from events "
+                "where type in ('source.registered', 'source.state_changed') "
+                "order by data->>'source', id desc"
             )
         except Exception:
             return set()
@@ -797,12 +808,15 @@ def _make_router() -> Any:
         )
 
     async def _load_geo_overrides(pool):
-        """LLM-inferred {cluster_id: country} from the geo-tagger (#189), latest per cluster.
-        A de-US ordering hint that fills the heuristic's gaps — never a veracity signal. Resilient
-        (the table is the generic events log; missing/empty → no overrides → pure heuristic)."""
+        """LLM-inferred {cluster_id: country} from the geo-tagger (#189), latest per cluster. Bounded
+        read: the latest non-empty country per stream (one row per cluster via ``distinct on``, #283)
+        — the geo-tagger only ever emits a non-empty country and the fold is 'later events win', so
+        this is byte-identical to the full event scan. A de-US ordering hint that fills the
+        heuristic's gaps — never a veracity signal. Resilient (missing/empty → pure heuristic)."""
         try:
             rows = await pool.fetch(
-                "select stream_id, data from events where type = $1 order by id",
+                "select distinct on (stream_id) stream_id, data from events "
+                "where type = $1 and data->>'country' <> '' order by stream_id, id desc",
                 STORY_GEO_INFERRED,
             )
         except Exception:
@@ -812,7 +826,7 @@ def _make_router() -> Any:
             d = json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
             code = (d or {}).get("country") or ""
             if code:
-                out[r["stream_id"]] = code  # later events win (latest per cluster)
+                out[r["stream_id"]] = code
         return out
 
     @router.get("/feed", response_class=JSONResponse)

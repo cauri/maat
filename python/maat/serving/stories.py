@@ -278,7 +278,14 @@ async def _load_common(pool: Any) -> _Common:
     clusters = await pool.fetch("select * from clusters")
     claims = await pool.fetch("select id, kind, text, disputed from claims")
     arts = await pool.fetch("select id, source from articles")
-    pivot_rows = await pool.fetch("select data from events where type = 'claim.pivot'")
+    # Bounded read (#283): the latest English pivot per claim (one row per claim via `distinct on`),
+    # not a full `claim.pivot` event-log scan. The pivot fold is last-write-wins per claim, so the
+    # latest non-empty text_en per claim is byte-identical to folding the whole stream.
+    pivot_rows = await pool.fetch(
+        "select distinct on (data->>'claim_id') data from events "
+        "where type = 'claim.pivot' and data->>'claim_id' <> '' and data->>'text_en' <> '' "
+        "order by data->>'claim_id', id desc"
+    )
     node_rows = await pool.fetch("select node_id, cluster_id from story_node_clusters")
     meta_rows = await pool.fetch(
         "select id, headline, first_seen, last_updated, cluster_count from story_nodes"
