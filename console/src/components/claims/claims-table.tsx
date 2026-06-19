@@ -8,6 +8,7 @@ import { RefreshCw } from "lucide-react";
 import { ColumnHeader } from "@/components/data-table/column-header";
 import { DataTable, type Facet } from "@/components/data-table/data-table";
 import { useShell } from "@/components/shell/shell-context";
+import { TranslatedText } from "@/components/translated-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useClaims } from "@/hooks/use-claims";
@@ -21,7 +22,14 @@ const columns: ColumnDef<Claim>[] = [
   {
     accessorKey: "text",
     header: ({ column }) => <ColumnHeader column={column} title="Claim" />,
-    cell: ({ row }) => <span className="line-clamp-2 max-w-xl">{row.original.text}</span>,
+    cell: ({ row }) => (
+      <TranslatedText
+        text={row.original.text}
+        language={row.original.language}
+        className="line-clamp-2 max-w-xl"
+        glossClassName="line-clamp-2"
+      />
+    ),
   },
   {
     accessorKey: "kind",

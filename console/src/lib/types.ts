@@ -275,6 +275,12 @@ export interface GraphResponse {
   edges: GraphEdge[];
 }
 
+/** Display-only English translation of foreign text (#54). */
+export interface TranslateResponse {
+  text: string;
+  engine: string;
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;
