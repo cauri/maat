@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { AppShell } from "@/components/shell/app-shell";
 import { getAdminSession } from "@/lib/admin-session";
 import { ADMIN_AUTH_ENABLED, ADMIN_LOGOUT_PATH } from "@/lib/config";
-import { RAIL_COOKIE } from "@/lib/ui-prefs";
+import { RAIL_COOKIE, SIA_COOKIE } from "@/lib/ui-prefs";
 
 /**
  * Server layout for every room: resolves the operator's identity from the shared admin
@@ -14,6 +14,8 @@ import { RAIL_COOKIE } from "@/lib/ui-prefs";
 export default async function ConsoleLayout({ children }: { children: React.ReactNode }) {
   const [user, jar] = await Promise.all([getAdminSession(), cookies()]);
   const initialRailCollapsed = jar.get(RAIL_COOKIE)?.value === "1";
+  // Sia is open by default (cauri) — only collapsed when the operator has explicitly closed her.
+  const initialSiaOpen = jar.get(SIA_COOKIE)?.value !== "0";
 
   return (
     <AppShell
@@ -21,6 +23,7 @@ export default async function ConsoleLayout({ children }: { children: React.Reac
       authEnabled={ADMIN_AUTH_ENABLED}
       logoutPath={ADMIN_LOGOUT_PATH}
       initialRailCollapsed={initialRailCollapsed}
+      initialSiaOpen={initialSiaOpen}
     >
       {children}
     </AppShell>

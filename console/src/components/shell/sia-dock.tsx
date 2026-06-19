@@ -6,13 +6,22 @@ import { usePathname } from "next/navigation";
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { Check, CircleSlash, Loader2, Send, ShieldAlert, Sparkles, Square, Wrench } from "lucide-react";
+import {
+  Check,
+  CircleSlash,
+  Loader2,
+  PanelRightClose,
+  Send,
+  ShieldAlert,
+  Sparkles,
+  Square,
+  Wrench,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, runCommand } from "@/lib/api";
 import { roomForPath } from "@/lib/rooms";
@@ -107,22 +116,32 @@ export function SiaDock() {
     });
 
   return (
-    <Sheet open={sia.open} onOpenChange={sia.set}>
-      <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-md">
-        <SheetHeader className="border-b">
-          <div className="flex items-center gap-2">
-            <span className="flex size-7 items-center justify-center rounded-md bg-primary/10 text-primary">
-              <Sparkles className="size-4" />
-            </span>
-            <SheetTitle>Sia</SheetTitle>
-            <Badge variant="secondary" className="ml-auto font-normal">
-              {room?.title ?? "Console"}
-            </Badge>
+    <aside
+      aria-hidden={!sia.open}
+      className={cn(
+        "flex h-full shrink-0 flex-col border-l bg-card transition-[width] duration-200 ease-in-out",
+        sia.open ? "w-96" : "w-0 overflow-hidden border-l-0",
+      )}
+    >
+      <div className="flex w-96 min-w-96 flex-1 flex-col">
+        <div className="flex h-14 shrink-0 items-center gap-2 border-b px-3">
+          <span className="flex size-7 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Sparkles className="size-4" />
+          </span>
+          <div className="flex min-w-0 flex-col leading-tight">
+            <span className="text-sm font-semibold">Sia</span>
+            <span className="truncate text-xs text-muted-foreground">{room?.title ?? "Console"}</span>
           </div>
-          <SheetDescription>
-            Your collaborator — reads the live data, proposes audited changes for your sign-off.
-          </SheetDescription>
-        </SheetHeader>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="ml-auto"
+            onClick={() => sia.set(false)}
+            aria-label="Collapse Sia"
+          >
+            <PanelRightClose />
+          </Button>
+        </div>
 
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col gap-4 px-4 py-4">
@@ -215,8 +234,8 @@ export function SiaDock() {
             )}
           </div>
         </div>
-      </SheetContent>
-    </Sheet>
+      </div>
+    </aside>
   );
 }
 
