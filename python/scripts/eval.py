@@ -7,13 +7,12 @@ golden check fails. Run: `make eval` (needs a populated store — ingest + agent
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat.evals import evaluate, load_expectations
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,9 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 async def main() -> None:
     load_dotenv(ROOT / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     clusters = [
         dict(r)
         for r in await pool.fetch(

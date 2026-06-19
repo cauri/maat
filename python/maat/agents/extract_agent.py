@@ -6,13 +6,12 @@ Run: uv run python -m maat.agents.extract_agent
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 from typing import Any
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.acquire.clean import is_index_page
 from maat.bus import run_agent
@@ -51,9 +50,7 @@ async def handle(nc: Any, event: dict[str, Any]) -> None:
 
 async def _run() -> None:
     global _pool
-    _pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    _pool = await get_pool()
     await run_agent("extract", "maat.events.article.ingested", handle)
 
 

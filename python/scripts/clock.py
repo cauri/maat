@@ -18,9 +18,9 @@ import os
 import sys
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.acquire import apify
 from maat.acquire.clean import clean_article
@@ -66,9 +66,7 @@ async def main() -> None:
     if not topics:
         print("no topics — pass args, set MAAT_TOPICS, or fill config/topics.txt")
         return
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     clk = await pool.fetch(
         "select data from events where type = 'admin.clock.set' order by id desc limit 20"
     )

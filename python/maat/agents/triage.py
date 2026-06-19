@@ -360,15 +360,13 @@ async def _run_batch(pool: Any, nc: Any) -> None:
 
 
 async def _main() -> None:
-    import asyncpg
     from dotenv import load_dotenv
 
     from maat.bus import connect
+    from maat.db import get_pool
 
     load_dotenv(Path(__file__).resolve().parents[3] / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     nc = await connect()
     await _run_batch(pool, nc)
     await nc.flush()

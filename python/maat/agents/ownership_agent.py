@@ -17,9 +17,9 @@ import asyncio
 import os
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat.acquire import wikidata
 from maat.bus import connect
 from maat.events import SOURCE_OWNERSHIP_RESOLVED, publish
@@ -58,9 +58,7 @@ async def main() -> None:
         return
     load_dotenv(ROOT / ".env")
     tenant = os.environ.get("MAAT_TENANT_ID", "cauri")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     arts = await pool.fetch(
         "select source, max(url) url from articles "
         "where source is not null and tenant_id = $1 group by source",

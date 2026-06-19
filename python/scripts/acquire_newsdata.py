@@ -22,9 +22,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.acquire import newsdata
 from maat.acquire.source_gate import accept_source
@@ -69,9 +69,7 @@ async def main() -> None:
     langs = [c.strip() for c in os.environ.get("MAAT_NEWSDATA_LANGS", _DEFAULT_LANGS).split(",") if c.strip()]
     query = _query(_topics())
 
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     seen = {r["url"] for r in await pool.fetch("select url from articles where url is not null")}
     gate_prompt = await prompts.active_text(pool, "source_gate", prompts.seed_default("source_gate"))
     known_good = frozenset(

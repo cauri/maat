@@ -32,9 +32,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.acquire.clean import clean_article
 from maat.acquire.fetch import fetch_article
@@ -75,9 +75,7 @@ async def main() -> None:
     per_stratum = int(os.environ.get("MAAT_BACKFILL_PER_STRATUM", "5"))
     maxrecords = int(os.environ.get("MAAT_BACKFILL_MAXRECORDS", "50"))
 
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     seen = {r["url"] for r in await pool.fetch("select url from articles where url is not null")}
     queries_prompt = await prompts.active_text(
         pool, "acquire_queries", prompts.seed_default("acquire_queries")

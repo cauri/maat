@@ -21,9 +21,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat.bus import connect
 from maat.events import publish
 from maat.learning.harvest import harvest
@@ -40,9 +40,7 @@ def _as_list(v: object) -> list:
 
 async def main() -> None:
     load_dotenv(ROOT / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     rows = await pool.fetch(
         "select c.id, c.tenant_id, c.fact, c.independent_originators, c.has_primary,"
         " c.extremity, c.confidence, c.sources, c.originators, c.grounding,"

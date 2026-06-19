@@ -6,20 +6,17 @@ Run: uv run python scripts/corroborate_run.py
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat.pipeline.corroborate import ClaimRow, corroborate
 
 
 async def main() -> None:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     arts = await pool.fetch("select id, source, body from articles")
     src = {r["id"]: r["source"] for r in arts}
     bodies = {r["id"]: r["body"] for r in arts}

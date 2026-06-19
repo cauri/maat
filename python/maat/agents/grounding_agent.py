@@ -21,9 +21,9 @@ import json
 import os
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.bus import connect
 from maat.events import CLUSTER_GROUNDED, publish
@@ -58,9 +58,7 @@ async def main() -> None:
         return
     load_dotenv(ROOT / ".env")
     tenant = os.environ.get("MAAT_TENANT_ID", "cauri")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     crows = await pool.fetch(
         "select id, fact, claim_ids, originators, has_primary, extremity, confidence "
         "from clusters where tenant_id = $1 and has_primary",

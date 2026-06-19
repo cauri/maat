@@ -22,9 +22,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.bus import connect
 from maat.events import SOURCE_REGISTERED, SOURCE_STATE_CHANGED, publish
@@ -42,9 +42,7 @@ def _rows_data(rows) -> list:
 
 async def main() -> None:
     load_dotenv(ROOT / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
 
     # Sources seen + their latest provider (provider lives in the article.ingested event, not the
     # articles projection). One scan over the ingest events gives both.

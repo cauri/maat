@@ -12,13 +12,12 @@ Run: uv run python scripts/calibrate.py
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import events
 from maat.bus import connect
 from maat.learning.calibration import (
@@ -102,9 +101,7 @@ async def _file_proposals(obs: list[Observation]) -> int:
 
 async def main() -> None:
     load_dotenv(ROOT / ".env")
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat")
-    )
+    pool = await get_pool()
     history = await load_trajectory(pool)
     await pool.close()
     obs = observations_from_history(history)

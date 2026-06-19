@@ -19,9 +19,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import asyncpg
 from dotenv import load_dotenv
 
+from maat.db import get_pool
 from maat import prompts
 from maat.bus import connect
 from maat.events import SOURCE_STATE_CHANGED, publish
@@ -65,8 +65,7 @@ async def main() -> None:
         if a.startswith("--wait"):
             wait_s = int(a.split("=", 1)[1]) if "=" in a else 600
 
-    pool = await asyncpg.create_pool(
-        os.environ.get("DATABASE_URL", "postgresql://maat:maat@localhost:5432/maat"))
+    pool = await get_pool()
     gate_prompt = await prompts.active_text(pool, "source_gate", prompts.seed_default("source_gate"))
     known_good = frozenset(
         (r["source"] or "").lower().removeprefix("www.")
