@@ -35,7 +35,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from maat import config, events, prompts
 from maat.pipeline.triage import classify as triage_classify
@@ -73,6 +73,7 @@ from maat.pipeline.corroborate import (
 from maat.providers import seam
 from maat.serving import admin_auth
 from maat.serving import favicon
+from maat.serving import ratelimit
 from maat.serving import spend as spend_mod
 from maat.serving.console_api import console_router
 from maat.serving.buildcache import VersionCache, data_version
@@ -108,6 +109,27 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Maat operator console")
+
+# Public-API hardening (#280). Two transport-level guards, configurable from the box env:
+#   * a global request body-size cap (oversized bodies → 413, rejected before they're buffered), so
+#     a multi-MB POST can't exhaust memory on any route; and
+#   * a per-IP token-bucket rate limit on the two open, unauthenticated, state-affecting endpoints
+#     (/api/translate, /api/feedback) → 429, so one client can't flood the events log / review queue
+#     or burn the translate provider budget. (Tight per-field caps live on the request models below.)
+# add_middleware stacks outermost-last, so the body cap wraps the rate limiter wraps the app.
+_PUBLIC_LIMITER = ratelimit.PerIpRateLimiter(
+    capacity=float(os.environ.get("MAAT_PUBLIC_RATE_BURST", ratelimit.DEFAULT_BURST)),
+    refill_per_sec=float(os.environ.get("MAAT_PUBLIC_RATE_RPS", ratelimit.DEFAULT_REFILL_PER_SEC)),
+)
+app.add_middleware(
+    ratelimit.RateLimitMiddleware,
+    limiter=_PUBLIC_LIMITER,
+    prefixes=("/api/translate", "/api/feedback"),
+)
+app.add_middleware(
+    ratelimit.MaxBodySizeMiddleware,
+    max_bytes=int(os.environ.get("MAAT_MAX_BODY_BYTES", ratelimit.DEFAULT_MAX_BODY_BYTES)),
+)
 
 # Central stylesheet (and any future assets) served from maat/web/static/. The Dockerfile's
 # `COPY maat ./maat` ships it; the admin gate leaves /static open.
@@ -1622,9 +1644,12 @@ def _story_json(cluster, claims_by_id: dict, meta: dict[str, dict]) -> dict:
 
 
 class TranslateReq(BaseModel):
-    text: str
-    target: str = "en"
-    source: str | None = None
+    # #280: bound the unauthenticated input. translate-for-display only ever gets a headline / claim
+    # / short fact (the client translates on-device first), so 2 000 chars is generous; an oversized
+    # body is a 422, not a provider call. target/source are BCP-47-ish language codes.
+    text: str = Field(..., min_length=1, max_length=2000)
+    target: str = Field("en", max_length=16)
+    source: str | None = Field(None, max_length=16)
 
 
 @app.post("/api/translate")
@@ -1643,10 +1668,12 @@ async def api_translate(req: TranslateReq) -> JSONResponse:
 
 
 class FeedbackReq(BaseModel):
-    text: str
-    category_hint: str = ""
-    source: str = "reader"
-    story_id: str | None = None
+    # #280: cap reader feedback at ~5 000 chars (a long paragraph) so a burst can't bloat the events
+    # log / review queue with arbitrarily large bodies; the short metadata fields are bounded too.
+    text: str = Field(..., max_length=5000)
+    category_hint: str = Field("", max_length=200)
+    source: str = Field("reader", max_length=64)
+    story_id: str | None = Field(None, max_length=128)
 
 
 @app.post("/api/feedback")
