@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from maat.serving.feedback import FEEDBACK_SUBMITTED, FEEDBACK_TRIAGED, record_triage, routed_queue
+
 # ---------------------------------------------------------------------------
 # Domain model
 # ---------------------------------------------------------------------------
@@ -297,15 +299,11 @@ async def review_queue(pool: Any, *, limit: int = 200, tenant_id: str = "cauri")
     then joins back to the original ``feedback.submitted`` event for context.
     This is a read-only projection: the event log is the source of truth.
     """
-    from maat.serving.feedback import routed_queue  # avoid circular at module load
-
     return await routed_queue(pool, route="review", limit=limit, tenant_id=tenant_id)
 
 
 async def auto_fix_queue(pool: Any, *, limit: int = 200, tenant_id: str = "cauri") -> list[dict]:
     """Return all feedback items flagged as auto-fixable."""
-    from maat.serving.feedback import routed_queue
-
     return await routed_queue(pool, route="auto-fix", limit=limit, tenant_id=tenant_id)
 
 
@@ -316,9 +314,6 @@ async def auto_fix_queue(pool: Any, *, limit: int = 200, tenant_id: str = "cauri
 
 async def _run_batch(pool: Any, nc: Any) -> None:
     """Process all un-triaged ``feedback.submitted`` events."""
-    from maat.serving.feedback import FEEDBACK_SUBMITTED, FEEDBACK_TRIAGED, record_triage
-    import json
-
     # Find items that have a submitted event but no triage event yet
     submitted = await pool.fetch(
         "select stream_id, data from events where type = $1 order by id asc",

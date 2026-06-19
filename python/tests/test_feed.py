@@ -22,10 +22,8 @@ import pytest
 from maat.serving.feed import (
     _hero_image_article_id,
     _host_is_public,
-    _infer_country,
     _jload,
     _primary_source,
-    _source_country,
     build_claim,
     build_feed,
     build_originator_groups,
@@ -505,62 +503,7 @@ def test_build_feed_all_stories_present():
     assert ids == {f"s{i}" for i in range(n)}
 
 
-# ---------------------------------------------------------------------------
-# _source_country
-# ---------------------------------------------------------------------------
-
-
-def test_source_country_fr_tld():
-    assert _source_country("lemonde.fr") == "FR"
-
-
-def test_source_country_co_uk():
-    assert _source_country("bbc.co.uk") == "GB"
-
-
-def test_source_country_de():
-    assert _source_country("spiegel.de") == "DE"
-
-
-def test_source_country_com_unknown():
-    assert _source_country("reuters.com") == ""
-
-
-def test_source_country_empty():
-    assert _source_country("") == ""
-
-
-def test_source_country_none():
-    assert _source_country(None) == ""  # type: ignore[arg-type]
-
-
-# ---------------------------------------------------------------------------
-# _infer_country
-# ---------------------------------------------------------------------------
-
-
-def test_infer_country_from_tld():
-    art_meta = {"a1": _article("a1", source="lemonde.fr")}
-    country = _infer_country([], art_meta, [["a1"]])
-    assert country == "FR"
-
-
-def test_infer_country_from_language():
-    country = _infer_country(
-        [{"language": "de"}], {}, [["unknown"]]
-    )
-    assert country == "DE"
-
-
-def test_infer_country_english_skipped():
-    """English doesn't narrow to a country."""
-    country = _infer_country([{"language": "en"}], {}, [])
-    assert country == ""
-
-
-def test_infer_country_unknown():
-    country = _infer_country([], {}, [])
-    assert country == ""
+# Geography inference (_source_country / _infer_country) moved to maat/geo.py — see tests/test_geo.py (#291).
 
 
 # ---------------------------------------------------------------------------

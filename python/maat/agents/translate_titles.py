@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from maat.db import get_pool
 from maat.bus import connect
 from maat.events import ARTICLE_TITLE_EN, publish
-from maat.serving.translate import translate_text
+from maat.translate import translate_text
 
 ROOT = Path(__file__).resolve().parents[3]
 

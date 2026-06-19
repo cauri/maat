@@ -1,6 +1,6 @@
 """#54 — cloud translate-for-display via the provider seam, with an identity fallback."""
 
-import maat.serving.translate as tr
+import maat.translate as tr
 
 
 class _Reply:
