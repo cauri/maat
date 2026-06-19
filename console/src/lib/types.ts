@@ -166,6 +166,45 @@ export interface PipelineHealth {
   alerts: string[];
 }
 
+// ── Tuning: config knobs + prompts (#312) ────────────────────────────────────────────────
+export interface ConfigKnob {
+  key: string;
+  group: string;
+  default: string | number;
+  /** Whether the running pipeline hot-reads this knob (can be promoted to live). */
+  enactable: boolean;
+  /** Promoted (live) value, or null = using the default. */
+  active: string | number | null;
+  /** A staged-but-not-promoted value awaiting sign-off, or null. */
+  proposed: string | number | null;
+}
+
+export interface ConfigResponse {
+  groups: string[];
+  knobs: ConfigKnob[];
+}
+
+export interface PromptSummary {
+  key: string;
+  label: string;
+  status: string; // active | draft | on-device
+  editable: boolean;
+  golden: boolean;
+  needs_review: boolean;
+}
+
+export interface PromptsResponse {
+  prompts: PromptSummary[];
+}
+
+export interface PromptDetail {
+  key: string;
+  editable: boolean;
+  status: string;
+  text: string;
+  default: string;
+}
+
 export interface CommandManifestEntry {
   name: string;
   event_type: string;
