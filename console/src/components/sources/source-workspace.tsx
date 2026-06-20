@@ -4,16 +4,10 @@ import { useState } from "react";
 
 import { Ban, Link2, ShieldCheck } from "lucide-react";
 
+import { WorkspacePanel } from "@/components/workspace-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { useRunCommand } from "@/hooks/use-command";
 import { relativeTime } from "@/lib/time";
 import type { Source } from "@/lib/types";
@@ -43,14 +37,9 @@ export function SourceWorkspace({
 }) {
   const run = useRunCommand([["sources"]]);
   const [group, setGroup] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
 
-  if (!source) {
-    return (
-      <Sheet open={false} onOpenChange={(open) => !open && onClose()}>
-        <SheetContent side="right" />
-      </Sheet>
-    );
-  }
+  if (!source) return null;
 
   const denied = source.status === "deny";
   const toggleFlag = () =>
@@ -72,24 +61,29 @@ export function SourceWorkspace({
   };
 
   return (
-    <Sheet open onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="w-full gap-0 overflow-y-auto p-0 sm:max-w-lg">
-        <SheetHeader className="border-b">
-          <SheetTitle className="pr-6 font-mono text-base">{source.source}</SheetTitle>
-          <SheetDescription className="flex flex-wrap items-center gap-2">
-            <ReliabilityTier reliability={source.reliability} />
-            <Sparkline points={source.trajectory} width={72} />
-            <Badge variant="secondary" className="font-normal capitalize">
-              {source.state}
+    <WorkspacePanel
+      open
+      collapsed={collapsed}
+      onCollapsedChange={setCollapsed}
+      onClose={onClose}
+      collapsedLabel={source.source}
+      title={<span className="font-mono">{source.source}</span>}
+      subtitle={
+        <>
+          <ReliabilityTier reliability={source.reliability} />
+          <Sparkline points={source.trajectory} width={72} />
+          <Badge variant="secondary" className="font-normal capitalize">
+            {source.state}
+          </Badge>
+          {denied && (
+            <Badge variant="destructive" className="gap-1">
+              <Ban className="size-3" /> Denied
             </Badge>
-            {denied && (
-              <Badge variant="destructive" className="gap-1">
-                <Ban className="size-3" /> Denied
-              </Badge>
-            )}
-          </SheetDescription>
-        </SheetHeader>
-
+          )}
+        </>
+      }
+    >
+      <div className="min-h-0 flex-1 overflow-auto">
         <div className="flex flex-col gap-6 p-4">
           <section className="grid grid-cols-2 gap-4">
             <Stat label="Articles" value={source.articles.toLocaleString()} />
@@ -137,7 +131,7 @@ export function SourceWorkspace({
             </div>
           </section>
         </div>
-      </SheetContent>
-    </Sheet>
+      </div>
+    </WorkspacePanel>
   );
 }

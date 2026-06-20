@@ -113,23 +113,25 @@ export function SourcesTable() {
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1">
-        <DataTable
-          tableId="sources"
-          columns={columns}
-          data={data?.sources ?? []}
-          facets={facets}
-          getRowId={(s) => s.source}
-          isLoading={isLoading}
-          error={error ? (error instanceof ApiError ? error.message : "Failed to load sources") : null}
-          searchPlaceholder="Search sources…"
-          onRowClick={openSource}
-          activeRowId={activeId ?? undefined}
-          emptyMessage="No sources yet — they appear as articles are ingested."
-        />
-      </div>
+      <div className="flex min-h-0 flex-1 gap-3">
+        <div className="min-w-0 flex-1">
+          <DataTable
+            tableId="sources"
+            columns={columns}
+            data={data?.sources ?? []}
+            facets={facets}
+            getRowId={(s) => s.source}
+            isLoading={isLoading}
+            error={error ? (error instanceof ApiError ? error.message : "Failed to load sources") : null}
+            searchPlaceholder="Search sources…"
+            onRowClick={openSource}
+            activeRowId={activeId ?? undefined}
+            emptyMessage="No sources yet — they appear as articles are ingested."
+          />
+        </div>
 
-      <SourceWorkspace key={active?.source ?? "none"} source={active} onClose={closeSource} />
+        <SourceWorkspace key={active?.source ?? "none"} source={active} onClose={closeSource} />
+      </div>
     </div>
   );
 }

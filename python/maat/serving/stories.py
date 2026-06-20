@@ -96,6 +96,8 @@ class StoryView:
     # Language of the DISPLAYED headline: "en" when an English gloss is shown, else the original
     # language (so the console can gloss a foreign headline for the operator). None if unknown.
     headline_lang: str | None = None
+    # URL of the headline fact's source article, so the console can open the original story. None if unknown.
+    url: str | None = None
     trajectory: list[TrajectoryPoint] = field(default_factory=list)
 
 
@@ -179,9 +181,19 @@ def _dominant_lang(claim_ids: list, lang_by_claim: dict[str, str]) -> str | None
     return max(counts, key=lambda k: counts[k]) if counts else None
 
 
+def _first_url(claim_ids: list, url_by_claim: dict[str, str]) -> str | None:
+    """First non-empty source-article URL among a fact's claims, or None."""
+    for cid in claim_ids:
+        u = (url_by_claim.get(str(cid)) or "").strip()
+        if u:
+            return u
+    return None
+
+
 def assemble_story(node_id: str, headline_hint: str | None, clusters: list[Any], *,
                    kind_by_claim, text_by_claim, pivots, id_to_source, reputation,
                    disputed_claims, lang_by_claim: dict[str, str] | None = None,
+                   url_by_claim: dict[str, str] | None = None,
                    first_seen: float = 0.0, last_updated: float = 0.0,
                    trajectory: list[TrajectoryPoint] | None = None) -> StoryView:
     """Roll a node's clusters into one StoryView. The score anchors on the best-corroborated FACT
@@ -209,24 +221,28 @@ def assemble_story(node_id: str, headline_hint: str | None, clusters: list[Any],
         story_facts = [story_facts[head]] + [f for i, f in enumerate(story_facts) if i != head]
         hf = story_facts[0]
         headline, headline_orig = (hf.fact_en or hf.fact), (hf.fact if hf.fact_en else None)
+        head_cl = next((cl for cl in clusters if cl["id"] == hf.cluster_id), None)
+        head_claim_ids = _jload(head_cl["claim_ids"]) if head_cl else []
         if hf.fact_en:
             headline_lang = "en"  # showing the English gloss already
         elif lang_by_claim:
-            head_cl = next((cl for cl in clusters if cl["id"] == hf.cluster_id), None)
-            headline_lang = _dominant_lang(_jload(head_cl["claim_ids"]), lang_by_claim) if head_cl else None
+            headline_lang = _dominant_lang(head_claim_ids, lang_by_claim)
         else:
             headline_lang = None
+        url = _first_url(head_claim_ids, url_by_claim) if url_by_claim else None
     else:
         headline = headline_hint or (forecasts[0].fact if forecasts else "")
         headline_orig = None
         headline_lang = None
+        fc0 = next((cl for cl in clusters if forecasts and cl["id"] == forecasts[0].cluster_id), None)
+        url = _first_url(_jload(fc0["claim_ids"]), url_by_claim) if (fc0 and url_by_claim) else None
 
     source_count = len({x for cl in clusters for x in _jload(cl["sources"])})
     return StoryView(
         node_id=node_id, headline=headline, headline_orig=headline_orig, score=score,
         facts=story_facts, forecasts=forecasts, source_count=source_count,
         cluster_count=len(clusters), first_seen=first_seen, last_updated=last_updated,
-        headline_lang=headline_lang, trajectory=trajectory or [],
+        headline_lang=headline_lang, url=url, trajectory=trajectory or [],
     )
 
 
@@ -281,6 +297,7 @@ class _Common:
     text_by_claim: dict[str, str]
     pivots: dict[str, str]
     lang_by_claim: dict[str, str]
+    url_by_claim: dict[str, str]
     id_to_source: dict[str, str]
     reputation: dict[str, float]
     disputed_claims: set[str]
@@ -300,7 +317,7 @@ async def _load_common(pool: Any) -> _Common:
         return cached
     clusters = await pool.fetch("select * from clusters")
     claims = await pool.fetch("select id, kind, text, disputed, article_id from claims")
-    arts = await pool.fetch("select id, source, language from articles")
+    arts = await pool.fetch("select id, source, language, url from articles")
     # Bounded read (#283): the latest English pivot per claim (one row per claim via `distinct on`),
     # not a full `claim.pivot` event-log scan. The pivot fold is last-write-wins per claim, so the
     # latest non-empty text_en per claim is byte-identical to folding the whole stream.
@@ -328,6 +345,7 @@ async def _load_common(pool: Any) -> _Common:
             pivots[d["claim_id"]] = d["text_en"]
 
     lang_by_art = {a["id"]: a["language"] for a in arts if a["language"]}
+    url_by_art = {a["id"]: a["url"] for a in arts if a["url"]}
     common = _Common(
         clusters_by_id=clusters_by_id,
         kind_by_claim={str(c["id"]): c["kind"] for c in claims},
@@ -337,6 +355,11 @@ async def _load_common(pool: Any) -> _Common:
             str(c["id"]): lang_by_art[c["article_id"]]
             for c in claims
             if c["article_id"] in lang_by_art
+        },
+        url_by_claim={
+            str(c["id"]): url_by_art[c["article_id"]]
+            for c in claims
+            if c["article_id"] in url_by_art
         },
         id_to_source={a["id"]: a["source"] for a in arts},
         # Reputation of RATED sources only (a resolved track record); cold-start = absent = neutral.
@@ -356,7 +379,7 @@ def _assemble(c: _Common, node_id: str, cluster_ids: list[str], *,
         node_id, meta.get("headline"), [c.clusters_by_id[cid] for cid in cluster_ids],
         kind_by_claim=c.kind_by_claim, text_by_claim=c.text_by_claim, pivots=c.pivots,
         id_to_source=c.id_to_source, reputation=c.reputation, disputed_claims=c.disputed_claims,
-        lang_by_claim=c.lang_by_claim,
+        lang_by_claim=c.lang_by_claim, url_by_claim=c.url_by_claim,
         first_seen=float(meta.get("first_seen") or 0.0), last_updated=float(meta.get("last_updated") or 0.0),
         trajectory=trajectory,
     )

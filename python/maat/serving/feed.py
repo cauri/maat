@@ -692,6 +692,7 @@ def story_to_json(v: Any, *, full: bool = False) -> dict:
         "headline": v.headline,
         "headline_orig": v.headline_orig,
         "headline_lang": v.headline_lang,
+        "url": v.url,
         "score": v.score.score,
         "band": v.score.band,
         "label": v.score.label,
