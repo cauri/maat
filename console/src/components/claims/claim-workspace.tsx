@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { ExternalLink, Flag, Wand2 } from "lucide-react";
 
+import { TranslatedText } from "@/components/translated-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,7 +57,7 @@ function ClaimBody({ detail }: { detail: ClaimDetail }) {
 
   return (
     <div className="flex flex-col gap-6 p-4">
-      <p className="text-sm leading-relaxed">{detail.text}</p>
+      <TranslatedText text={detail.text} language={detail.language} className="text-sm leading-relaxed" />
 
       <section className="grid grid-cols-2 gap-4 border-t pt-4">
         <Field label="Source">

@@ -23,6 +23,7 @@ import type {
   Spend,
   StoriesPage,
   StoryDetail,
+  TranslateResponse,
 } from "./types";
 
 const BASE = "/console/api";
@@ -146,6 +147,17 @@ export function getFeedback(signal?: AbortSignal): Promise<FeedbackResponse> {
 
 export function getGraph(limit = 60, signal?: AbortSignal): Promise<GraphResponse> {
   return apiGet<GraphResponse>(`/graph?limit=${limit}`, signal);
+}
+
+export async function translate(text: string, source?: string): Promise<TranslateResponse> {
+  const res = await fetch(`${BASE}/translate`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text, source }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await detail(res));
+  return (await res.json()) as TranslateResponse;
 }
 
 export async function triageFeedback(

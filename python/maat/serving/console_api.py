@@ -34,6 +34,7 @@ from maat.obs import emit_consumer_health
 from maat.obs_metrics import pipeline_health
 from maat.serving import feedback as feedback_mod
 from maat.serving import spend as spend_mod
+from maat.translate import translate_text
 from maat.serving.consumer_health import consumer_health, dead_letters_by_stage, health_as_dicts
 from maat.serving.feed import story_to_json
 from maat.serving.stories import load_story_detail, load_story_views
@@ -427,6 +428,26 @@ def _make_console_router() -> Any:
             if cluster else None
         )
         return out
+
+    # ---- translate (display-only English gloss for foreign text) ------------------------
+    @router.post("/translate")
+    async def translate(request: Request) -> dict[str, Any]:
+        """Translate text to English for DISPLAY (never scored, §4) — the operator reading
+        foreign claims/feedback. Reuses maat.translate (Mistral); degrades to the original
+        text if the provider is unavailable. Run off-thread so the blocking call doesn't
+        stall the event loop."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = str((body or {}).get("text", "")).strip()
+        if not text:
+            return {"text": "", "engine": "identity"}
+        source = (body or {}).get("source")
+        out, engine = await asyncio.to_thread(
+            translate_text, text, "en", source if isinstance(source, str) else None
+        )
+        return {"text": out, "engine": engine}
 
     # ---- pipeline (engine · health & ops) ----------------------------------------------
     @router.get("/pipeline")
