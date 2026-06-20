@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { AlertTriangle, GitMerge, Layers, ShieldCheck } from "lucide-react";
 
+import { TranslatedText } from "@/components/translated-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -74,7 +75,13 @@ export function StoryWorkspace({
       <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-xl">
         <SheetHeader className="border-b">
           <SheetTitle className="pr-6 text-base leading-snug">
-            {story ? story.headline : isLoading ? "Loading story…" : "Story"}
+            {story ? (
+              <TranslatedText text={story.headline} language={story.headline_lang} />
+            ) : isLoading ? (
+              "Loading story…"
+            ) : (
+              "Story"
+            )}
           </SheetTitle>
           {story && (
             <SheetDescription className="flex flex-wrap items-center gap-2">
@@ -189,9 +196,8 @@ export function StoryWorkspace({
           <DialogHeader>
             <DialogTitle>Merge {selected.size} facts</DialogTitle>
             <DialogDescription>
-              They&apos;ll be treated as one fact. This is recorded as an audited{" "}
-              <code className="font-mono text-xs">admin.cluster.merged</code> event and folded by the
-              kernel — reversible by replay.
+              They&apos;ll be treated as one fact. The change is recorded, takes effect on the next
+              run, and can be undone.
             </DialogDescription>
           </DialogHeader>
           <Textarea

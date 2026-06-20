@@ -8,6 +8,7 @@ import { RefreshCw } from "lucide-react";
 import { ColumnHeader } from "@/components/data-table/column-header";
 import { DataTable, type Facet } from "@/components/data-table/data-table";
 import { useShell } from "@/components/shell/shell-context";
+import { TranslatedText } from "@/components/translated-text";
 import { Button } from "@/components/ui/button";
 import { useStories } from "@/hooks/use-stories";
 import { ApiError } from "@/lib/api";
@@ -22,7 +23,12 @@ const columns: ColumnDef<Story>[] = [
     accessorKey: "headline",
     header: ({ column }) => <ColumnHeader column={column} title="Story" />,
     cell: ({ row }) => (
-      <span className="line-clamp-2 max-w-xl font-medium">{row.original.headline}</span>
+      <TranslatedText
+        text={row.original.headline}
+        language={row.original.headline_lang}
+        className="line-clamp-2 max-w-xl font-medium"
+        glossClassName="line-clamp-2"
+      />
     ),
   },
   {

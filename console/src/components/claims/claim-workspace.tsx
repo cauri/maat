@@ -100,8 +100,8 @@ function ClaimBody({ detail }: { detail: ClaimDetail }) {
       <section className="flex flex-col gap-3 border-t pt-4">
         <h3 className="text-sm font-medium">Correct classification</h3>
         <p className="text-xs text-muted-foreground">
-          An audited <code>admin.classification.corrected</code> event — the kernel marks the claim
-          corrected so a re-run won&apos;t clobber it (F3/D5).
+          Fix how this claim was classified. Your change is recorded and sticks — the next pipeline
+          run won&apos;t overwrite it.
         </p>
         <div className="grid grid-cols-3 gap-2">
           <LabeledInput id="kind" label="Kind" value={kind} onChange={setKind} />
@@ -116,7 +116,8 @@ function ClaimBody({ detail }: { detail: ClaimDetail }) {
       <section className="flex flex-col gap-2 border-t pt-4">
         <h3 className="text-sm font-medium">Flag laundering</h3>
         <p className="text-xs text-muted-foreground">
-          Mark §5.2 abuse the classifier missed (an extraordinary claim relayed as fact).
+          Flag a far-fetched claim that&apos;s being passed off as established fact — abuse the
+          classifier missed.
         </p>
         <div className="flex items-center gap-2">
           <Input

@@ -36,6 +36,8 @@ export interface Story {
   id: string;
   headline: string;
   headline_orig: string | null;
+  /** Language of the displayed headline ("en" when glossed, else the original) — for translation. */
+  headline_lang: string | null;
   score: number;
   band: string;
   label: string;

@@ -65,11 +65,12 @@ function PromptBody({ detail, summary }: { detail: PromptDetail; summary?: Promp
             description={
               <>
                 <p>
-                  Publish a new active version of <code className="font-mono">{detail.key}</code>. This is
-                  the live prompt the agent runs.
+                  Make this the live prompt the <code className="font-mono">{detail.key}</code> agent
+                  runs. It takes effect immediately.
                 </p>
                 <p className="text-muted-foreground">
-                  Audited as <code className="font-mono">admin.prompt.updated</code> (sign-off-gated, D29).
+                  Needs your sign-off because it changes how the engine reads and judges. The change
+                  is recorded.
                 </p>
               </>
             }

@@ -16,6 +16,7 @@ import {
 
 import { ScoreBadge } from "@/components/stories/score-badge";
 import { useShell } from "@/components/shell/shell-context";
+import { TranslatedText } from "@/components/translated-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -86,7 +87,7 @@ export function OverviewDashboard() {
           value={overview.data?.counts.events}
           loading={overview.isLoading}
           onClick={audit.toggle}
-          digest="Events on the append-only log. Open the audit log →"
+          digest="Everything the engine has recorded. Open the audit log →"
         />
       </section>
 
@@ -332,11 +333,13 @@ function NeedsAttentionCard({ stories, loading }: { stories: Story[] | undefined
             {flagged.map(({ story, reason }) => (
               <li key={story.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                 <div className="flex min-w-0 flex-col gap-1">
-                  <Link
-                    href="/stories"
-                    className="line-clamp-1 text-sm font-medium underline-offset-4 hover:underline"
-                  >
-                    {story.headline}
+                  <Link href="/stories" className="text-sm font-medium underline-offset-4 hover:underline">
+                    <TranslatedText
+                      text={story.headline}
+                      language={story.headline_lang}
+                      className="line-clamp-1"
+                      glossClassName="line-clamp-1"
+                    />
                   </Link>
                   <div className="flex items-center gap-2">
                     <ScoreBadge
