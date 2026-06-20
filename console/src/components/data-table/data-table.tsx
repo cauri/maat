@@ -296,7 +296,8 @@ export function DataTable<TData, TValue>({
 
       {/* table (scroll container owns infinite scroll) */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto rounded-lg border">
-        <Table>
+        {/* container overflow-visible so the only scroll context is this div — keeps the sticky header pinned */}
+        <Table containerClassName="overflow-visible">
           <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur">
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id} className="hover:bg-transparent">
