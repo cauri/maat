@@ -24,12 +24,12 @@ _TABLES = {
         _cl("c4", "Local festival drew crowds.", ["k4"], 1, [["a6"]], conf=0.5),  # un-threaded
     ],
     "claims": [
-        {"id": "k1", "kind": "fact", "text": "Quake hits the region.", "disputed": False},
-        {"id": "k2", "kind": "fact", "text": "Aid convoys arrive.", "disputed": False},
-        {"id": "k3", "kind": "projection", "text": "Markets may fall next week.", "disputed": False},
-        {"id": "k4", "kind": "fact", "text": "Local festival drew crowds.", "disputed": False},
+        {"id": "k1", "kind": "fact", "text": "Quake hits the region.", "disputed": False, "article_id": "a1"},
+        {"id": "k2", "kind": "fact", "text": "Aid convoys arrive.", "disputed": False, "article_id": "a2"},
+        {"id": "k3", "kind": "projection", "text": "Markets may fall next week.", "disputed": False, "article_id": "a3"},
+        {"id": "k4", "kind": "fact", "text": "Local festival drew crowds.", "disputed": False, "article_id": "a4"},
     ],
-    "articles": [{"id": f"a{i}", "source": s} for i, s in enumerate(
+    "articles": [{"id": f"a{i}", "source": s, "language": "English"} for i, s in enumerate(
         ["", "reuters.com", "apnews.com", "bbc.com", "local.test", "blog.test", "festival.test"])],
     "node_clusters": [
         {"node_id": "node:1", "cluster_id": "c1"},

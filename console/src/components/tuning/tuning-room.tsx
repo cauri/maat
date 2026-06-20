@@ -15,13 +15,15 @@ export function TuningRoom() {
         </TabsList>
         <TabsContent value="config" className="mt-4">
           <p className="mb-3 text-sm text-muted-foreground">
-            Veracity-core knobs. Propose stages a value; Promote enacts it (sign-off-gated, D28).
+            Scoring settings. Propose stages a value to review; Promote makes it live — which needs
+            your sign-off.
           </p>
           <ConfigKnobs />
         </TabsContent>
         <TabsContent value="prompts" className="mt-4">
           <p className="mb-3 text-sm text-muted-foreground">
-            The live agent prompts. Editing publishes a new active version (sign-off-gated, D29).
+            The live instructions each agent runs. Saving an edit makes it live and needs your
+            sign-off.
           </p>
           <PromptsEditor />
         </TabsContent>

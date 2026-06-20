@@ -104,7 +104,7 @@ export function SourceWorkspace({
           <section className="flex flex-col gap-3 border-t pt-4">
             <h3 className="text-sm font-medium">Operator actions</h3>
             <p className="text-xs text-muted-foreground">
-              Every change is an audited <code>admin.source.*</code> event (D5/D28).
+              Every change here is recorded and takes effect on the next run.
             </p>
             <Button
               variant={denied ? "outline" : "destructive"}

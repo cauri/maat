@@ -76,8 +76,7 @@ function KnobRow({ knob }: { knob: ConfigKnob }) {
                 (live is {display(live)}).
               </p>
               <p className="text-muted-foreground">
-                This enacts a veracity-core change immediately, audited as{" "}
-                <code className="font-mono">admin.config.promoted</code>.
+                This changes a live scoring setting right away, and the change is recorded.
               </p>
             </>
           }

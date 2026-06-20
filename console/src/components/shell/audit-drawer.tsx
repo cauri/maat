@@ -73,8 +73,7 @@ export function AuditDrawer() {
             <LiveStatus />
           </div>
           <SheetDescription>
-            Every operator action — yours and Sia&apos;s — from the event log (D5). History +
-            live.
+            Every operator action — yours and Sia&apos;s — as it happens, plus the full history.
           </SheetDescription>
         </SheetHeader>
 
@@ -85,8 +84,8 @@ export function AuditDrawer() {
               {backfill.isLoading ? "Loading…" : "No activity yet"}
             </p>
             <p className="max-w-xs text-xs text-muted-foreground">
-              Operator actions — corrections, source flags, config promotions, prompt edits — appear
-              here as they happen. Every change is a typed, audited event.
+              Operator actions — corrections, source flags, setting changes, prompt edits — appear
+              here as they happen, each recorded and tracked.
             </p>
           </div>
         ) : (
