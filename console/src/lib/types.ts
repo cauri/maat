@@ -38,6 +38,8 @@ export interface Story {
   headline_orig: string | null;
   /** Language of the displayed headline ("en" when glossed, else the original) — for translation. */
   headline_lang: string | null;
+  /** URL of the headline fact's source article — opens the original story. Null if unknown. */
+  url: string | null;
   score: number;
   band: string;
   label: string;

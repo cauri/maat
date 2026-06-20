@@ -92,26 +92,28 @@ export function ClaimsTable() {
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1">
-        <DataTable
-          tableId="claims"
-          columns={columns}
-          data={rows}
-          facets={facets}
-          getRowId={(c) => c.id}
-          isLoading={isLoading}
-          error={error ? (error instanceof ApiError ? error.message : "Failed to load claims") : null}
-          searchPlaceholder="Search claims…"
-          onRowClick={openClaim}
-          activeRowId={activeId ?? undefined}
-          onLoadMore={fetchNextPage}
-          hasMore={hasNextPage}
-          isFetchingMore={isFetchingNextPage}
-          emptyMessage="No claims yet — they appear as articles are extracted."
-        />
-      </div>
+      <div className="flex min-h-0 flex-1 gap-3">
+        <div className="min-w-0 flex-1">
+          <DataTable
+            tableId="claims"
+            columns={columns}
+            data={rows}
+            facets={facets}
+            getRowId={(c) => c.id}
+            isLoading={isLoading}
+            error={error ? (error instanceof ApiError ? error.message : "Failed to load claims") : null}
+            searchPlaceholder="Search claims…"
+            onRowClick={openClaim}
+            activeRowId={activeId ?? undefined}
+            onLoadMore={fetchNextPage}
+            hasMore={hasNextPage}
+            isFetchingMore={isFetchingNextPage}
+            emptyMessage="No claims yet — they appear as articles are extracted."
+          />
+        </div>
 
-      <ClaimWorkspace claimId={activeId} onClose={closeClaim} />
+        <ClaimWorkspace key={activeId ?? "none"} claimId={activeId} onClose={closeClaim} />
+      </div>
     </div>
   );
 }

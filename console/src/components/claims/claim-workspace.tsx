@@ -5,17 +5,11 @@ import { useState } from "react";
 import { ExternalLink, Flag, Wand2 } from "lucide-react";
 
 import { TranslatedText } from "@/components/translated-text";
+import { WorkspacePanel } from "@/components/workspace-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { useClaim } from "@/hooks/use-claims";
 import { useRunCommand } from "@/hooks/use-command";
 import { ApiError } from "@/lib/api";
@@ -159,14 +153,19 @@ function LabeledInput({
 
 export function ClaimWorkspace({ claimId, onClose }: { claimId: string | null; onClose: () => void }) {
   const { data, isLoading, error } = useClaim(claimId);
+  const [collapsed, setCollapsed] = useState(false);
 
   return (
-    <Sheet open={claimId != null} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="w-full gap-0 overflow-y-auto p-0 sm:max-w-lg">
-        <SheetHeader className="border-b">
-          <SheetTitle className="text-base">Claim</SheetTitle>
-          <SheetDescription>Full provenance — inspect and correct (operator-only).</SheetDescription>
-        </SheetHeader>
+    <WorkspacePanel
+      open={claimId != null}
+      collapsed={collapsed}
+      onCollapsedChange={setCollapsed}
+      onClose={onClose}
+      collapsedLabel="Claim"
+      title="Claim"
+      subtitle="Full provenance — inspect and correct (operator-only)."
+    >
+      <div className="min-h-0 flex-1 overflow-auto">
         {isLoading ? (
           <div className="flex flex-col gap-3 p-4">
             <Skeleton className="h-16 w-full" />
@@ -179,7 +178,7 @@ export function ClaimWorkspace({ claimId, onClose }: { claimId: string | null; o
         ) : data ? (
           <ClaimBody key={data.id} detail={data} />
         ) : null}
-      </SheetContent>
-    </Sheet>
+      </div>
+    </WorkspacePanel>
   );
 }

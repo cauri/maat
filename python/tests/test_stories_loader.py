@@ -29,7 +29,8 @@ _TABLES = {
         {"id": "k3", "kind": "projection", "text": "Markets may fall next week.", "disputed": False, "article_id": "a3"},
         {"id": "k4", "kind": "fact", "text": "Local festival drew crowds.", "disputed": False, "article_id": "a4"},
     ],
-    "articles": [{"id": f"a{i}", "source": s, "language": "English"} for i, s in enumerate(
+    "articles": [{"id": f"a{i}", "source": s, "language": "English", "url": (f"https://{s}/{i}" if s else "")}
+                 for i, s in enumerate(
         ["", "reuters.com", "apnews.com", "bbc.com", "local.test", "blog.test", "festival.test"])],
     "node_clusters": [
         {"node_id": "node:1", "cluster_id": "c1"},
@@ -90,6 +91,7 @@ def test_detail_assembles_facts_forecast_split_and_trajectory():
     v = asyncio.run(load_story_detail(_FakePool(), "node:1"))
     assert v is not None
     assert [f.cluster_id for f in v.facts][0] == "c1" and v.facts[0].is_headline
+    assert v.url == "https://reuters.com/1"   # headline fact's source article, for "open original"
     assert {f.cluster_id for f in v.facts} == {"c1", "c2"} and not v.forecasts
     assert [p.day for p in v.trajectory] == ["2026-06-15", "2026-06-16"]
     assert v.trajectory[1].score > v.trajectory[0].score   # credibility grew as corroboration arrived

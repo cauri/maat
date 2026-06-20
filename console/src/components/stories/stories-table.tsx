@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 import type { ColumnDef } from "@tanstack/react-table";
-import { RefreshCw } from "lucide-react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 
 import { ColumnHeader } from "@/components/data-table/column-header";
 import { DataTable, type Facet } from "@/components/data-table/data-table";
@@ -67,6 +67,28 @@ const columns: ColumnDef<Story>[] = [
       </span>
     ),
   },
+  {
+    id: "open",
+    header: () => null,
+    enableSorting: false,
+    enableColumnFilter: false,
+    enableHiding: false,
+    cell: ({ row }) =>
+      row.original.url ? (
+        <Button
+          asChild
+          variant="ghost"
+          size="icon-sm"
+          onClick={(e) => e.stopPropagation()}
+          aria-label="Open the original story"
+          title="Open the original story"
+        >
+          <a href={row.original.url} target="_blank" rel="noreferrer">
+            <ExternalLink />
+          </a>
+        </Button>
+      ) : null,
+  },
 ];
 
 const facets: Facet[] = [{ columnId: "band", label: "Band" }];
@@ -98,26 +120,28 @@ export function StoriesTable() {
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1">
-        <DataTable
-          tableId="stories"
-          columns={columns}
-          data={rows}
-          facets={facets}
-          getRowId={(s) => s.id}
-          isLoading={isLoading}
-          error={error ? (error instanceof ApiError ? error.message : "Failed to load stories") : null}
-          searchPlaceholder="Search stories…"
-          onRowClick={openStory}
-          activeRowId={activeId ?? undefined}
-          onLoadMore={fetchNextPage}
-          hasMore={hasNextPage}
-          isFetchingMore={isFetchingNextPage}
-          emptyMessage="No stories yet — once the pipeline corroborates clusters, they appear here."
-        />
-      </div>
+      <div className="flex min-h-0 flex-1 gap-3">
+        <div className="min-w-0 flex-1">
+          <DataTable
+            tableId="stories"
+            columns={columns}
+            data={rows}
+            facets={facets}
+            getRowId={(s) => s.id}
+            isLoading={isLoading}
+            error={error ? (error instanceof ApiError ? error.message : "Failed to load stories") : null}
+            searchPlaceholder="Search stories…"
+            onRowClick={openStory}
+            activeRowId={activeId ?? undefined}
+            onLoadMore={fetchNextPage}
+            hasMore={hasNextPage}
+            isFetchingMore={isFetchingNextPage}
+            emptyMessage="No stories yet — once the pipeline corroborates clusters, they appear here."
+          />
+        </div>
 
-      <StoryWorkspace nodeId={activeId} onClose={closeStory} />
+        <StoryWorkspace key={activeId ?? "none"} nodeId={activeId} onClose={closeStory} />
+      </div>
     </div>
   );
 }

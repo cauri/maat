@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 
-import { AlertTriangle, GitMerge, Layers, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ExternalLink, GitMerge, Layers, ShieldCheck } from "lucide-react";
 
 import { TranslatedText } from "@/components/translated-text";
+import { WorkspacePanel } from "@/components/workspace-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -18,13 +19,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -45,6 +39,7 @@ export function StoryWorkspace({
   onClose: () => void;
 }) {
   const { data: story, isLoading, error } = useStory(nodeId);
+  const [collapsed, setCollapsed] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -71,20 +66,25 @@ export function StoryWorkspace({
     );
 
   return (
-    <Sheet open={nodeId != null} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-xl">
-        <SheetHeader className="border-b">
-          <SheetTitle className="pr-6 text-base leading-snug">
-            {story ? (
-              <TranslatedText text={story.headline} language={story.headline_lang} />
-            ) : isLoading ? (
-              "Loading story…"
-            ) : (
-              "Story"
-            )}
-          </SheetTitle>
-          {story && (
-            <SheetDescription className="flex flex-wrap items-center gap-2">
+    <>
+      <WorkspacePanel
+        open={nodeId != null}
+        collapsed={collapsed}
+        onCollapsedChange={setCollapsed}
+        onClose={onClose}
+        collapsedLabel={story?.headline ?? "Story"}
+        title={
+          story ? (
+            <TranslatedText text={story.headline} language={story.headline_lang} />
+          ) : isLoading ? (
+            "Loading story…"
+          ) : (
+            "Story"
+          )
+        }
+        subtitle={
+          story && (
+            <>
               <ScoreBadge
                 label={story.label}
                 score={story.score}
@@ -96,10 +96,20 @@ export function StoryWorkspace({
                 {story.source_count} source{story.source_count === 1 ? "" : "s"} ·{" "}
                 {story.cluster_count} cluster{story.cluster_count === 1 ? "" : "s"}
               </span>
-            </SheetDescription>
-          )}
-        </SheetHeader>
-
+              {story.url && (
+                <a
+                  href={story.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 font-medium text-foreground underline-offset-4 hover:underline"
+                >
+                  Open original <ExternalLink className="size-3" />
+                </a>
+              )}
+            </>
+          )
+        }
+      >
         {error ? (
           <div className="p-6 text-sm text-destructive">Couldn&apos;t load this story.</div>
         ) : isLoading || !story ? (
@@ -118,6 +128,16 @@ export function StoryWorkspace({
             {/* Reader — what users see, in plain language */}
             <TabsContent value="reader" className="min-h-0 flex-1 overflow-auto px-4 py-4">
               <div className="flex flex-col gap-5">
+                {story.url && (
+                  <a
+                    href={story.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-2 self-start rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted"
+                  >
+                    <ExternalLink className="size-4" /> Read the original story
+                  </a>
+                )}
                 {story.headline_orig && story.headline_orig !== story.headline && (
                   <p className="text-sm text-muted-foreground">
                     Original headline: <span className="italic">{story.headline_orig}</span>
@@ -188,7 +208,7 @@ export function StoryWorkspace({
             </TabsContent>
           </Tabs>
         )}
-      </SheetContent>
+      </WorkspacePanel>
 
       {/* confirm — every correction is an audited command */}
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
@@ -218,7 +238,7 @@ export function StoryWorkspace({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Sheet>
+    </>
   );
 }
 
