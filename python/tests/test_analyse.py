@@ -1,9 +1,10 @@
-"""Tests for the Analyse orchestrator (P14 #366) — corpus-inherit flow, offline seams.
+"""Tests for the Analyse orchestrator (P14 #366) — corpus-inherit + live corroboration, offline.
 
 Covers: matched claims fold the pasted article into the cluster (independent report counts,
-wire reprint collapses), novel claims stand alone with honest wording, extremity is public,
-"corroborated" is reserved for outside confirmation, projections split out, the disqualifying
-central-claim rule reaches the overall score, and publisher reputation lookup.
+wire reprint collapses), novel claims corroborate LIVE against searched candidates (primary
+pickup, self-source exclusion, candidate filters, caps reported), honest lone-source wording,
+extremity public, "corroborated" reserved for outside confirmation, projections split out,
+the disqualifying central-claim rule, publisher reputation, and progress events.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from maat.acquire.fetch import FetchedPage
 from maat.pipeline.analyse import (
     ClaimReading,
     CorpusFact,
+    LiveCandidate,
     analyse_article,
     claim_verdict,
     match_claims,
@@ -24,12 +26,16 @@ from maat.pipeline.corroborate import ClaimRow
 _PARIS = "The finance minister visited Paris on Tuesday"
 _PARIS_CORPUS = "The minister visited Paris on Tuesday"
 _GOLD = "The central bank secretly sold half its gold"
+_GOLD_BBC = "The central bank has sold about half of its gold reserves"
+_GOLD_CB = "The bank confirms the sale of half its gold reserves"
 _FORECAST = "Analysts expect further meetings next month"
 
 _VEC = {
     _PARIS: [1.0, 0.0, 0.0],
     _PARIS_CORPUS: [1.0, 0.0, 0.0],  # same fact → cosine 1.0
     _GOLD: [0.0, 1.0, 0.0],
+    _GOLD_BBC: [0.0, 1.0, 0.0],
+    _GOLD_CB: [0.0, 1.0, 0.0],
 }
 
 
@@ -41,10 +47,23 @@ def fake_extremity(text):
     return {_GOLD: "extraordinary"}[text]  # KeyError = extremity wrongly re-rated for a match
 
 
+# NOTE: bodies deliberately avoid citation-cascade markers ("according to", "citing", …) plus
+# other outlets' name tokens — the §5.5 cascade heuristic matches source tokens as SUBSTRINGS
+# ("gov" ⊂ "government's"), which would chain-collapse independent candidates. That conservatism
+# under-counts, never inflates; sharpening it is tracked separately.
 _BODY = (
-    "On Tuesday the finance minister travelled to Paris for talks, according to the "
-    "government's published schedule. The central bank secretly sold half its gold, an "
-    "insider claimed. Analysts expect further meetings next month."
+    "On Tuesday the finance minister travelled to Paris for talks, an insider said. "
+    "The central bank secretly sold half its gold, the insider added. "
+    "Analysts expect further meetings next month."
+)
+
+_BBC_BODY = (
+    "The central bank has sold about half of its gold reserves over recent months, "
+    "the governor said in a statement to parliament on Wednesday."
+)
+_CB_BODY = (
+    "In its quarterly filing the bank confirms the sale of half its gold reserves "
+    "as part of a planned rebalancing of reserves."
 )
 
 
@@ -63,7 +82,15 @@ def _claims():
 
 
 def fake_extract(body, **kw):
-    return _claims()
+    if body == _BODY:
+        return _claims()
+    if body == _BBC_BODY:
+        return [Claim(text=_GOLD_BBC, voice="own", evidence_span=_GOLD_BBC)]
+    if body == _CB_BODY:
+        return [Claim(text=_GOLD_CB, voice="own", evidence_span=_GOLD_CB)]
+    if body == corpus()[0].bodies["a1"]:  # the reprint scenario re-pastes a1's body
+        return [_claims()[0]]
+    return []
 
 
 def fake_classify(claims, **kw):
@@ -86,11 +113,34 @@ def corpus():
                        originator_sources=[["reuters.com"], ["apnews.com"]])]
 
 
+def corpus_lookup(texts):
+    facts = corpus()
+    hits = match_claims(texts, facts, embed=fake_embed)
+    return [facts[i] if i is not None else None for i in hits]
+
+
+def live_candidates(query):
+    # One independent outlet, one primary source, one reprint of the pasted article, one junk
+    # domain, and the pasted outlet itself (must be excluded before any cost is spent on it).
+    return [
+        LiveCandidate(url="https://bbc.co.uk/gold", domain="bbc.co.uk",
+                      title="Central bank sold half its gold", body=_BBC_BODY),
+        LiveCandidate(url="https://centralbank.gov/report", domain="centralbank.gov",
+                      title="Quarterly filing", body=_CB_BODY),
+        LiveCandidate(url="https://mirror.example/copy", domain="mirror.example",
+                      title="Copy", body=_BODY),  # near-verbatim of the pasted article
+        LiveCandidate(url="https://reddit.com/r/gold", domain="reddit.com",
+                      title="thread", body=_BBC_BODY),
+        LiveCandidate(url="https://chronicle.example/gold-two", domain="chronicle.example",
+                      title="Our own follow-up", body=_BBC_BODY),
+    ]
+
+
 def analyse(url="https://www.chronicle.example/paris-story", reputation=None, **kw):
     return analyse_article(
         url,
-        corpus=kw.pop("corpus", corpus()),
         reputation=reputation or {},
+        corpus_lookup=kw.pop("corpus_lookup", corpus_lookup),
         fetch=kw.pop("fetch", fake_fetch),
         extract=fake_extract,
         classify=fake_classify,
@@ -101,7 +151,7 @@ def analyse(url="https://www.chronicle.example/paris-story", reputation=None, **
     )
 
 
-# --- full flow ------------------------------------------------------------------------------
+# --- corpus-inherit flow ----------------------------------------------------------------------
 
 
 def test_matched_claim_folds_pasted_article_into_cluster():
@@ -125,15 +175,14 @@ def test_wire_reprint_collapses_not_double_counts():
     assert paris.independent_originators == 2  # collapsed into a1's originator group
 
 
-def test_novel_extraordinary_headline_claim_disqualifies_article():
-    res = analyse()
+def test_novel_extraordinary_headline_claim_disqualifies_article_without_live():
+    res = analyse()  # no search seam → the gold claim stands alone
     gold = next(r for r in res.facts if r.claim.text == _GOLD)
     assert gold.matched_cluster_id is None
     assert gold.extremity == "extraordinary"
     assert gold.independent_originators == 1
     assert gold.verdict == "Only this source — below the bar for a extraordinary claim"
     assert gold.tier == "floor"
-    # ... and the central-claim rule reaches the overall score.
     assert res.score.band == "disqualified"
     assert res.score.label == "Fails verification"
     assert res.score.score <= 20
@@ -159,6 +208,55 @@ def test_unfetchable_url_raises_clearly():
         assert "could not extract" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+# --- live corroboration -------------------------------------------------------------------------
+
+
+def _accept(c):
+    return c.domain != "reddit.com"
+
+
+def test_live_corroboration_rescues_a_true_extraordinary_claim():
+    res = analyse(search=live_candidates, accept_candidate=_accept)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    # own article + bbc + central bank; the mirror reprint collapses into the pasted article's
+    # originator group and the own-domain follow-up never even gets fetched.
+    assert gold.independent_originators == 3
+    assert gold.has_primary is True  # centralbank.gov picked up as the primary source
+    assert gold.verdict in ("Corroborated", "Well corroborated")
+    # …and the article is no longer disqualified: the extraordinary claim cleared its bar.
+    assert res.score.band != "disqualified"
+    assert res.live is not None
+    assert res.live.searched_claims == 1
+    assert res.live.candidates_used == 3  # bbc + centralbank + mirror (junk + own filtered)
+
+
+def test_live_excludes_own_outlet_and_filtered_domains():
+    res = analyse(search=live_candidates, accept_candidate=_accept)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 3  # not 4/5 — self + junk never corroborate
+
+
+def test_live_search_cap_is_honest_not_silent():
+    res = analyse(search=live_candidates, accept_candidate=_accept, live_max_searches=0)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 1  # resolved lone — over the cap
+    assert res.live is not None
+    assert res.live.skipped_claims == 1
+    assert res.score.band == "disqualified"  # unrescued, the central claim still fails
+
+
+def test_progress_events_stream_in_order():
+    kinds: list[str] = []
+    analyse(search=live_candidates, accept_candidate=_accept,
+            progress=lambda k, _d: kinds.append(k))
+    assert kinds[0] == "fetched"
+    assert kinds[1] == "extracted"
+    assert kinds[2] == "matched"
+    assert kinds.count("claim") == 2  # paris + gold
+    assert "searching" in kinds
+    assert kinds[-1] == "scored"
 
 
 # --- verdict wording (the reserved word) ----------------------------------------------------
