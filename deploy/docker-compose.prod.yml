@@ -127,6 +127,10 @@ services:
       MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/nli-deberta-v3-small}  # DeBERTa-v3 NLI cross-encoder in ONNX (#229)
       HF_HOME: /data/hf                                  # cache the NLI model on a volume so it isn't re-downloaded each deploy (#229)
       MAAT_OWNERSHIP_LOOKUP: ${MAAT_OWNERSHIP_LOOKUP:-1}  # auto-resolve source ownership from Wikidata (#254); resolved owners are surfaced + overridable on /sources
+      # Analyse surface (P14 #365): a publisher pasted into maat.press/analyse with no track
+      # record is REGISTERED; this bounds how many registered sources the registry pass
+      # auto-backfills per tick (the existing #241 review: pull its history → score it).
+      MAAT_BACKFILL_ON_REGISTER: ${MAAT_BACKFILL_ON_REGISTER:-2}
       MAAT_TRANSLATE_TITLES: ${MAAT_TRANSLATE_TITLES:-1}  # English gloss for non-English feed titles (#54), display-only
       # Intake pause (cauri, 2026-06): PAUSED by default while the console v2 is iterated — the
       # acquire steps below are skipped, but processing (corroborate, story-graph, grounding,

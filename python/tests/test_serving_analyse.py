@@ -72,7 +72,8 @@ def test_public_claim_never_leaks_mechanism():
 def test_public_payload_shape_and_publisher():
     score = StoryScore(70, "corroborated", "Corroborated", ["x"], False, False)
     payload = sa.public_payload(_analysis([_reading()], score, publisher_score=0.82), "an-1")
-    assert payload["publisher"] == {"domain": "example.com", "rated": True, "score": 82}
+    assert payload["publisher"] == {"domain": "example.com", "rated": True, "score": 82,
+                                    "review_started": False}
     assert payload["overall"]["band"] == "corroborated"
     assert payload["scope"] == sa.SCOPE_LINE
     unrated = sa.public_payload(_analysis([_reading()], score), "an-2")
@@ -121,6 +122,75 @@ def test_make_accept_filters_junk_and_denied():
     assert accept(ok) is True
     assert accept(junk) is False
     assert accept(denied) is False
+
+
+def test_gate_hard_rejects_non_news_domains_without_llm():
+    gate = sa.make_gate()
+    msg = gate("reddit.com", "a thread about news")
+    assert msg is not None and "isn't a news publisher" in msg
+
+
+def test_registry_review_kickoff_for_unrated_publisher(monkeypatch):
+    """An unrated publisher enters the existing #241 review pipeline: source.registered is
+    published once, and the payload says the review is under way."""
+    import asyncio
+
+    monkeypatch.setattr(sa, "_LIMITER", PerIpRateLimiter(capacity=100, refill_per_sec=100))
+    sa._RESULTS.clear()
+
+    async def host_ok(_h, _p):
+        return True
+
+    monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    reading = _reading(central=True, matched_cluster_id=None)
+    analysis = _analysis([reading], StoryScore(58, "developing", "Developing", [], False, False))
+    monkeypatch.setattr(sa, "analyse_article", lambda url, **kw: analysis)
+
+    published: list[str] = []
+
+    class FakeNats:
+        async def publish(self, subject, payload):
+            published.append(subject)
+
+    class State:
+        pool = FakePool()
+        nats = FakeNats()
+
+    payload = asyncio.run(sa.run_analysis(State(), "https://example.com/story", refresh=True))
+    assert payload["publisher"]["rated"] is False
+    assert payload["publisher"]["review_started"] is True
+    assert "maat.events.source.registered" in published
+    assert "maat.events.analysis.completed" in published
+
+
+def test_no_registry_kickoff_when_publisher_already_rated(monkeypatch):
+    import asyncio
+
+    sa._RESULTS.clear()
+
+    async def host_ok(_h, _p):
+        return True
+
+    monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    reading = _reading(central=True, matched_cluster_id=None)
+    analysis = _analysis([reading], StoryScore(70, "corroborated", "Corroborated", [], False, False),
+                         publisher_score=0.8)
+    monkeypatch.setattr(sa, "analyse_article", lambda url, **kw: analysis)
+
+    published: list[str] = []
+
+    class FakeNats:
+        async def publish(self, subject, payload):
+            published.append(subject)
+
+    class State:
+        pool = FakePool()
+        nats = FakeNats()
+
+    payload = asyncio.run(sa.run_analysis(State(), "https://example.com/story2", refresh=True))
+    assert payload["publisher"]["rated"] is True
+    assert payload["publisher"]["review_started"] is False
+    assert "maat.events.source.registered" not in published
 
 
 def test_check_url_rejects_bad_schemes_and_ports():

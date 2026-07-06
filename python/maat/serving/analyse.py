@@ -43,7 +43,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import numpy as np
 
 from maat import events as events_mod
-from maat.acquire import apify, gdelt
+from maat.acquire import apify, gdelt, source_gate
 from maat.acquire.fetch import fetch_article
 from maat.acquire.source_gate import prefiltered_reject
 from maat.learning.reputation import fold_reputation, reputation_score
@@ -80,8 +80,10 @@ SCOPE_LINE = (
 _TTL_S = int(os.environ.get("MAAT_ANALYSE_TTL", "21600"))          # re-analyse after 6h
 _CONCURRENCY = int(os.environ.get("MAAT_ANALYSE_CONCURRENCY", "2"))  # LLM analyses in flight
 _LIVE = os.environ.get("MAAT_ANALYSE_LIVE", "1") not in ("0", "false", "no")
+_GATED = os.environ.get("MAAT_ANALYSE_GATE", "1") not in ("0", "false", "no")
 _MAX_SEARCHES = int(os.environ.get("MAAT_ANALYSE_MAX_SEARCHES", "10"))
 _MAX_CANDIDATES = int(os.environ.get("MAAT_ANALYSE_MAX_CANDIDATES", "18"))
+_BODY_CHARS = int(os.environ.get("MAAT_ANALYSE_BODY_CHARS", "60000"))
 # An analysis costs real LLM + search work, so the per-IP budget is strict: a small burst, then
 # one every five minutes. GETs of finished analyses are NOT limited (bounded, cached reads).
 _LIMITER = PerIpRateLimiter(
@@ -242,13 +244,24 @@ async def _load_assets(pool: Any) -> _Assets:
         except Exception:  # noqa: BLE001 - no embeddings → corpus leg off; live leg still runs
             embeds = None
 
+    # Reputation keyed by the raw source string AND its canonical id (§6.7): the pasted
+    # bbc.co.uk must find a track record stored under bbc.com / "BBC News". On a canonical
+    # collision, the record with the most resolved outcomes speaks for the outlet.
+    recs = [r for r in fold_reputation(history) if r.outcome_n > 0]
+    reputation: dict[str, float] = {r.source: reputation_score(r) for r in recs}
+    best: dict[str, tuple[int, float]] = {}
+    for r in recs:
+        canon = canonical_source(r.source)
+        if canon not in best or r.outcome_n > best[canon][0]:
+            best[canon] = (r.outcome_n, reputation_score(r))
+    for canon, (_n, score) in best.items():
+        reputation.setdefault(canon, score)
+
     assets = _Assets(
         facts=facts,
         claim_ids=claim_ids,
         embeds=embeds,
-        reputation={
-            r.source: reputation_score(r) for r in fold_reputation(history) if r.outcome_n > 0
-        },
+        reputation=reputation,
         denied=denied_sources([r["data"] for r in flag_rows]),
     )
     _ASSETS_CACHE.put("assets", version, assets)
@@ -355,6 +368,29 @@ def make_accept(denied: set[str]):
     return accept
 
 
+def make_gate():
+    """Reject pages that are not news articles, with a plain answer for the reader.
+
+    Hard non-news list first (free — wikis, social, forums); then the acquisition source-gate's
+    own classifier (the SAME judgement that admits sources to the feed, prompt reused verbatim).
+    Fails OPEN on classifier errors — a gate hiccup must never take the product down."""
+
+    def gate(domain: str, title: str) -> str | None:
+        if prefiltered_reject(domain):
+            return (f"Maat weighs news articles — {domain} isn't a news publisher. "
+                    "Paste a link to a news story.")
+        try:
+            verdict = source_gate.classify(domain, title, channel="analyse")
+        except Exception:  # noqa: BLE001 - fail open: gate trouble must not block analyses
+            return None
+        if verdict is not None and not verdict.accept:
+            return ("Maat weighs news articles — this page doesn't look like one. "
+                    "Paste a link to a news story.")
+        return None
+
+    return gate
+
+
 # ── public payload ("what, not how") ─────────────────────────────────────────────────────────────
 
 
@@ -415,6 +451,9 @@ def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
             "domain": analysis.source,
             "rated": pub is not None,
             "score": round(pub * 100) if pub is not None else None,
+            # Flipped true by run_analysis when this analysis put the publisher into the
+            # source-registry review pipeline (backfill its history → score its track record).
+            "review_started": False,
         },
         "overall": {
             "score": analysis.score.score,
@@ -506,13 +545,29 @@ async def run_analysis(
             corpus_lookup=lookup,
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),
+            gate=make_gate() if _GATED else None,
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
+            body_max_chars=_BODY_CHARS,
             progress=progress,
         )
     payload = public_payload(analysis, aid)
-    _cache_put(aid, payload)
     nats = getattr(state, "nats", None)
+    # An unrated publisher enters the EXISTING reliability-review pipeline (#241): registering
+    # it queues the source-registry agent's backfill of its past reporting → a scored track
+    # record next time. Idempotent — already-registered sources are left alone.
+    if nats is not None and payload["publisher"]["rated"] is False and analysis.source:
+        try:
+            if not await _registry_seen(pool, analysis.source):
+                await events_mod.publish(
+                    nats, events_mod.SOURCE_REGISTERED, analysis.source,
+                    {"source": analysis.source, "state": "registered", "provider": "analyse",
+                     "at": payload["analysed_at"]},
+                )
+            payload["publisher"]["review_started"] = True
+        except Exception:  # noqa: BLE001 - review kickoff is best-effort
+            pass
+    _cache_put(aid, payload)
     if nats is not None:
         try:  # durable cache + audit trail; best-effort, never blocks the response
             await events_mod.publish(
@@ -525,6 +580,19 @@ async def run_analysis(
     return payload
 
 
+async def _registry_seen(pool: Any, source: str) -> bool:
+    """Is this source already in the registry lifecycle (#241)? Unknown → True (don't spam)."""
+    try:
+        row = await pool.fetchrow(
+            "select 1 from events where type in ('source.registered','source.state_changed') "
+            "and data->>'source' = $1 limit 1",
+            source,
+        )
+        return row is not None
+    except Exception:  # noqa: BLE001
+        return True
+
+
 # ── the router ───────────────────────────────────────────────────────────────────────────────────
 
 
@@ -533,13 +601,16 @@ def _sse(event: str, data: dict) -> str:
 
 
 def _public_progress(kind: str, data: dict) -> dict:
-    """Progress events cross the public wire — map internal readings to the public claim shape."""
+    """Progress events cross the public wire — map internal readings to the public claim shape.
+    Counts and indices only, never source names (what, not how)."""
     if kind == "claim":
         return {
             "index": data.get("index"),
             "total": data.get("total"),
             "claim": public_claim(data["reading"]),
         }
+    if kind == "checking":
+        return {"index": data.get("index")}
     return data
 
 

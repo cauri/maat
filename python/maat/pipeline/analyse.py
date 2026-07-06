@@ -1,28 +1,37 @@
 """Analyse — Maat's veracity core pointed at ONE pasted article, on demand (P14: #365, #366).
 
-The feed reads a corpus; this reads one URL a person pastes. Fetch → extract claims → classify
-(facts vs projections) → read each fact:
+The feed reads a corpus; this reads one URL a person pastes. Fetch → gate (news, not junk) →
+sanitise → extract claims → verify each claim quotes the page → classify (facts vs projections)
+→ read each fact:
 
   * CORPUS-INHERIT — a claim Maat has already corroborated inherits that cluster's standing,
     FOLDED via ``corroborate_fixed`` so the pasted article itself counts as an originator — and a
     wire reprint collapses rather than double-counting (§5.5).
-  * LIVE CORROBORATION — a novel claim goes out to the open web (the ``search`` seam): candidate
-    articles are fetched, their claims extracted with the SAME extractor, same-fact matched at the
-    SAME §5.4 bar, and folded with the SAME collapse — so on-demand evidence is weighed exactly
-    like the feed's. A claim nobody else asserts stands as a single originator, weighted by its
-    own attribution quality (§5.2).
+  * LIVE CORROBORATION — a novel claim goes out to the open web (the ``search`` seam), each claim
+    independently and in parallel so its chip resolves the moment ITS evidence is in: candidates
+    fetched, their claims extracted with the SAME extractor, same-fact matched at the SAME §5.4
+    bar, folded with the SAME collapse. A claim nobody else asserts stands as a single
+    originator, weighted by its own attribution quality (§5.2).
 
 Extremity is FIRST-CLASS in the result: the page exposes that Maat holds a routine claim and an
 extraordinary claim to different bars (cauri, 2026-07-06). "Corroborated" wording is RESERVED for
 claims with actual outside confirmation — a lone-source claim says so plainly, whatever its score.
 
-Pure orchestration over injected seams (fetch, extract, classify, extremity, embed, corpus lookup,
-live search, reputation) — fully testable offline. The serving layer (serving/analyse.py) wires
-the real corpus, search, cache and endpoints. Analysed articles never enter the canonical store.
+Adversarial input is part of the threat model (a pasted page is attacker-controlled):
+``sanitise_body`` strips invisible/bidi characters that hide instructions and caps length; the
+EVIDENCE-SPAN CHECK drops any "claim" that does not quote the page verbatim — a prompt-injected
+instruction can at worst emit text that is not on the page, and such text never survives. Model
+outputs are parsed structurally (fixed schemas / label sets) everywhere. Scores cannot be gamed
+upward by page content alone: lone-source claims cap low and only-unproven carriers cap at 0.70.
+
+Pure orchestration over injected seams — fully testable offline. The serving layer wires the real
+corpus, gate, search, cache and endpoints. Analysed articles never enter the canonical store.
 """
 
 from __future__ import annotations
 
+import re
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -123,14 +132,18 @@ class ArticleAnalysis:
     facts: list[ClaimReading]
     projections: list[ClaimReading]  # forecasts/opinions — shown, never scored as truth
     score: StoryScore                # the one overall read (band hero, number behind)
-    publisher_score: float | None    # reputation_score() when rated; None = "not yet rated"
+    publisher_score: float | None    # reputation lookup (canonical-aware); None = "not yet rated"
     live: LiveMeta | None = None     # live-corroboration coverage, when the pass ran
+    dropped_claims: int = 0          # "claims" that failed the quote-the-page check (injection guard)
 
 
 # Seam types. ``CorpusLookup`` returns, per claim text, a HYDRATED CorpusFact or None — the
 # serving layer implements it as cached-embedding match + one bounded DB fetch for the matches.
+# ``GateFn`` inspects (publisher_domain, page_title) and returns a user-facing rejection message
+# when the page is not a news article, else None.
 CorpusLookup = Callable[[Sequence[str]], Sequence[CorpusFact | None]]
 SearchFn = Callable[[str], list[LiveCandidate]]
+GateFn = Callable[[str, str], str | None]
 ProgressFn = Callable[[str, dict[str, Any]], None]
 
 
@@ -147,6 +160,59 @@ def _detect_language(text: str) -> str:
     except Exception:  # noqa: BLE001 - language is display metadata, never fatal
         return "unknown"
     return detect_lang(text)
+
+
+def _rep(reputation: Mapping[str, float], name: str) -> float | None:
+    """Reputation lookup that survives source-string variants: raw, then canonical (§6.7) —
+    so bbc.co.uk finds a track record stored under bbc.com / "BBC News"."""
+    hit = reputation.get(name)
+    if hit is not None:
+        return hit
+    return reputation.get(canonical_source(name))
+
+
+# ── adversarial-input hygiene ────────────────────────────────────────────────────────────────────
+
+# Invisible / direction-override characters used to smuggle instructions past a human reviewer:
+# zero-widths, bidi overrides + isolates, word-joiners, BOM. Plus C0/C1 controls (keep \\t \\n).
+_INVISIBLE = re.compile(
+    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f"  # C0 (except tab/newline) + DEL + C1
+    "\u200b-\u200f"                              # zero-widths + LRM/RLM
+    "\u202a-\u202e"                              # bidi embeddings/overrides
+    "\u2060-\u2064"                              # word joiner + invisible operators
+    "\u2066-\u2069"                              # bidi isolates
+    "\ufeff]"                                     # BOM / zero-width no-break space
+)
+
+
+def sanitise_body(text: str, *, max_chars: int = 60_000) -> str:
+    """Article text hygiene before it reaches any prompt: strip invisible/bidi/control characters
+    (instruction-smuggling vectors), collapse blank-line runs, and cap the length (also bounds
+    token spend). The page is DATA — this keeps it legible data."""
+    text = _INVISIBLE.sub("", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if len(text) > max_chars:
+        cut = text.rfind(" ", 0, max_chars)
+        text = text[: cut if cut > max_chars // 2 else max_chars]
+    return text.strip()
+
+
+_WS = re.compile(r"\s+")
+
+
+def _norm(text: str) -> str:
+    return _WS.sub(" ", text).strip().lower()
+
+
+def verify_spans(claims: list[Claim], body: str) -> tuple[list[Claim], int]:
+    """Keep only claims whose ``evidence_span`` actually quotes the page (whitespace-normalised).
+
+    The extractor is REQUIRED to quote verbatim, so this is a structural injection guard: a
+    prompt-injected "claim" that isn't on the page cannot survive, whatever the model was talked
+    into. Returns (kept, dropped_count)."""
+    hay = _norm(body)
+    kept = [c for c in claims if c.evidence_span and _norm(c.evidence_span) in hay]
+    return kept, len(claims) - len(kept)
 
 
 def match_claims(
@@ -231,8 +297,8 @@ def _corpus_reading(
         match.extremity,
         grounding=match.grounding,
     )
-    rated = source in reputation or any(
-        s in reputation for grp in match.originator_sources for s in grp
+    rated = _rep(reputation, source) is not None or any(
+        _rep(reputation, s) is not None for grp in match.originator_sources for s in grp
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, match.extremity,
@@ -262,7 +328,7 @@ def _lone_reading(
         independent_originators=cor.independent_originators, has_primary=cor.has_primary,
         disputed=False, grounding=None, verdict=verdict, tier=tier, matched_cluster_id=None,
     )
-    return reading, source in reputation
+    return reading, _rep(reputation, source) is not None
 
 
 def _live_reading(
@@ -282,39 +348,10 @@ def _live_reading(
         independent_originators=cor.independent_originators, has_primary=cor.has_primary,
         disputed=False, grounding=None, verdict=verdict, tier=tier, matched_cluster_id=None,
     )
-    rated = source in reputation or any(r.source in reputation for r in matched_rows)
+    rated = _rep(reputation, source) is not None or any(
+        _rep(reputation, r.source) is not None for r in matched_rows
+    )
     return reading, rated
-
-
-def _gather_candidates(
-    queries: list[str],
-    search: SearchFn,
-    *,
-    own_source: str,
-    own_url: str,
-    accept: Callable[[LiveCandidate], bool] | None,
-    max_total: int,
-    workers: int,
-) -> tuple[list[LiveCandidate], int]:
-    """Run the live searches in parallel and merge to a deduped, filtered candidate pool.
-    Returns (pool capped at ``max_total``, considered-count before the cap)."""
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        results = list(ex.map(lambda q: _safe_search(search, q), queries))
-    own_canon = canonical_source(own_source)
-    seen: set[str] = set()
-    pool: list[LiveCandidate] = []
-    for cands in results:
-        for c in cands:
-            if not c.body or c.url == own_url or c.url in seen:
-                continue
-            # The pasted outlet can never corroborate itself (§5.5) — skip before fetch cost.
-            if canonical_source(c.domain) == own_canon:
-                continue
-            if accept is not None and not accept(c):
-                continue
-            seen.add(c.url)
-            pool.append(c)
-    return pool[:max_total], len(pool)
 
 
 def _safe_search(search: SearchFn, query: str) -> list[LiveCandidate]:
@@ -324,6 +361,54 @@ def _safe_search(search: SearchFn, query: str) -> list[LiveCandidate]:
         return []
 
 
+def _safe_extract(extract: Callable[..., list[Claim]], cand: LiveCandidate) -> list[str]:
+    """A candidate article's claim texts; a failed extraction drops the candidate, never the run."""
+    try:
+        return [c.text for c in extract(cand.body, source_metadata=cand.domain)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+class _LiveShared:
+    """State shared by the per-claim live workers: URL dedupe, a per-URL extraction cache (one
+    LLM read per candidate however many claims it serves), and the honest global caps."""
+
+    def __init__(self, max_candidates: int) -> None:
+        self.lock = threading.Lock()
+        self.seen: set[str] = set()
+        self.texts: dict[str, list[str]] = {}   # url -> extracted claim texts
+        self.bodies: dict[str, str] = {}
+        self.budget = max_candidates
+        self.considered = 0
+
+    def take(self, cands: list[LiveCandidate]) -> list[LiveCandidate]:
+        out: list[LiveCandidate] = []
+        with self.lock:
+            for c in cands:
+                if c.url in self.seen:
+                    if c.url in self.bodies:  # already fetched for another claim — reuse free
+                        out.append(c)
+                    continue
+                self.considered += 1
+                if self.budget <= 0:
+                    continue
+                self.budget -= 1
+                self.seen.add(c.url)
+                out.append(c)
+        return out
+
+    def extract_once(self, cand: LiveCandidate, extract: Callable[..., list[Claim]]) -> list[str]:
+        with self.lock:
+            if cand.url in self.texts:
+                return self.texts[cand.url]
+        texts = _safe_extract(extract, cand)  # LLM call outside the lock
+        with self.lock:
+            self.texts.setdefault(cand.url, texts)
+            if texts:
+                self.bodies.setdefault(cand.url, cand.body)
+            return self.texts[cand.url]
+
+
 def analyse_article(
     url: str,
     *,
@@ -331,6 +416,7 @@ def analyse_article(
     corpus_lookup: CorpusLookup | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
+    gate: GateFn | None = None,
     fetch: Callable[[str], FetchedPage | None] = fetch_page,
     extract: Callable[..., list[Claim]] = extract_claims,
     classify: Callable[..., list[Claim]] = classify_claims,
@@ -340,13 +426,15 @@ def analyse_article(
     same_fact_threshold: float = 0.82,
     live_max_searches: int = 10,
     live_max_candidates: int = 18,
+    body_max_chars: int = 60_000,
     max_workers: int = 4,
     progress: ProgressFn | None = None,
 ) -> ArticleAnalysis:
     """Analyse one pasted URL end-to-end. ``corpus_lookup`` inherits existing corroboration;
-    ``search`` corroborates novel claims live; either may be None (that leg is skipped).
+    ``search`` corroborates novel claims live (per claim, in parallel — chips resolve as their
+    evidence lands); ``gate`` rejects non-news pages. Any seam may be None (that leg is skipped).
 
-    Raises AnalyseError (user-facing message) when no article can be extracted from the URL —
+    Raises AnalyseError (user-facing message) when the URL yields no article or fails the gate —
     never a fake score."""
 
     def emit(kind: str, data: dict[str, Any]) -> None:
@@ -357,13 +445,19 @@ def analyse_article(
     if page is None or not page.body:
         raise AnalyseError("could not extract an article from this URL")
     source = _domain(url)
-    language = language_of(page.body)
+    body = sanitise_body(page.body, max_chars=body_max_chars)
+    language = language_of(body)
     emit("fetched", {"title": page.title, "source": source, "language": language,
                      "date": page.date})
 
-    claims = classify(
-        extract(page.body, source_metadata=source, language=language), article_text=page.body
-    )
+    if gate is not None:
+        rejection = gate(source, page.title or "")
+        if rejection:
+            raise AnalyseError(rejection)
+
+    extracted = extract(body, source_metadata=source, language=language)
+    extracted, dropped = verify_spans(extracted, body)  # injection guard: must quote the page
+    claims = classify(extracted, article_text=body)
     fact_claims = [c for c in claims if c.kind != "projection"]
     projections = [c for c in claims if c.kind == "projection"]
     emit("extracted", {
@@ -373,6 +467,7 @@ def analyse_article(
             for c in fact_claims
         ],
         "projections": [{"text": c.text, "speaker": c.speaker} for c in projections],
+        "dropped": dropped,
     })
 
     matches: Sequence[CorpusFact | None]
@@ -390,7 +485,7 @@ def analyse_article(
     # Corpus-matched claims resolve instantly.
     for i, m in enumerate(matches):
         if m is not None:
-            resolve(i, _corpus_reading(fact_claims[i], page.body, source, m, reputation))
+            resolve(i, _corpus_reading(fact_claims[i], body, source, m, reputation))
 
     # Novel claims: rate extremity (needed for both the lone read and search priority)…
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -401,7 +496,7 @@ def analyse_article(
     live: LiveMeta | None = None
     if search is None or not novel_idx:
         for i in novel_idx:
-            resolve(i, _lone_reading(fact_claims[i], page.body, source, extremities[i], reputation))
+            resolve(i, _lone_reading(fact_claims[i], body, source, extremities[i], reputation))
         if search is not None:
             live = LiveMeta(0, 0, 0, 0)
     else:
@@ -414,44 +509,51 @@ def analyse_article(
         ))
         selected, skipped = ranked[:live_max_searches], ranked[live_max_searches:]
         for i in skipped:  # over the search cap — resolved honestly as lone, and REPORTED (meta)
-            resolve(i, _lone_reading(fact_claims[i], page.body, source, extremities[i], reputation))
+            resolve(i, _lone_reading(fact_claims[i], body, source, extremities[i], reputation))
         emit("searching", {"claims": len(selected)})
 
-        pool, considered = _gather_candidates(
-            [fact_claims[i].text[:200] for i in selected], search,
-            own_source=source, own_url=url, accept=accept_candidate,
-            max_total=live_max_candidates, workers=max_workers,
-        )
-        # Extract each candidate's claims with the SAME extractor the feed uses.
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            cand_claims = list(ex.map(lambda c: _safe_extract(extract, c), pool))
-        rows: list[ClaimRow] = []
-        bodies: dict[str, str] = {}
-        for cand, texts in zip(pool, cand_claims):
-            if not texts:
-                continue
-            bodies[cand.url] = cand.body
-            rows.extend(
-                ClaimRow(id=f"live-{len(rows) + n}", text=t, article_id=cand.url, source=cand.domain)
-                for n, t in enumerate(texts)
-            )
+        own_canon = canonical_source(source)
+        shared = _LiveShared(live_max_candidates)
 
-        # One batched same-fact pass: every selected claim vs every candidate claim (§5.4 bar).
-        by_claim: dict[int, list[ClaimRow]] = {i: [] for i in selected}
-        if rows:
-            sel_texts = [fact_claims[i].text for i in selected]
-            vecs = np.asarray(embed([*sel_texts, *[r.text for r in rows]]), dtype=np.float64)
-            sim = _unit(vecs[: len(sel_texts)]) @ _unit(vecs[len(sel_texts):]).T
-            for pos, i in enumerate(selected):
-                by_claim[i] = [rows[j] for j in np.nonzero(sim[pos] >= same_fact_threshold)[0]]
-        for i in selected:
+        def live_one(i: int) -> None:
+            """One claim's whole live journey — search → read candidates → fold → resolve —
+            so its chip lights up the moment its own evidence is weighed."""
+            claim = fact_claims[i]
+            emit("checking", {"index": i})
+            found = _safe_search(search, claim.text[:200])
+            usable = [
+                c for c in found
+                if c.body and c.url != url and canonical_source(c.domain) != own_canon
+                and (accept_candidate is None or accept_candidate(c))
+            ]
+            rows: list[ClaimRow] = []
+            bodies: dict[str, str] = {}
+            for cand in shared.take(usable):
+                texts = shared.extract_once(cand, extract)
+                if not texts:
+                    continue
+                bodies[cand.url] = cand.body
+                rows.extend(
+                    ClaimRow(id=f"live-{i}-{n}", text=t, article_id=cand.url, source=cand.domain)
+                    for n, t in enumerate(texts)
+                )
+            matched_rows: list[ClaimRow] = []
+            if rows:  # one small same-fact pass for THIS claim (§5.4 bar)
+                vecs = np.asarray(embed([claim.text, *[r.text for r in rows]]), dtype=np.float64)
+                sim = (_unit(vecs[:1]) @ _unit(vecs[1:]).T)[0]
+                matched_rows = [rows[j] for j in np.nonzero(sim >= same_fact_threshold)[0]]
             resolve(i, _live_reading(
-                fact_claims[i], page.body, source, extremities[i],
-                by_claim[i], bodies, reputation,
+                claim, body, source, extremities[i], matched_rows,
+                {u: shared.bodies[u] for u in {r.article_id for r in matched_rows}},
+                reputation,
             ))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            list(ex.map(live_one, selected))
         live = LiveMeta(
             searched_claims=len(selected), skipped_claims=len(skipped),
-            candidates_considered=considered, candidates_used=len(bodies),
+            candidates_considered=shared.considered,
+            candidates_used=len(shared.bodies),
         )
 
     done = [r for r in readings if r is not None]
@@ -481,13 +583,5 @@ def analyse_article(
     return ArticleAnalysis(
         url=url, source=source, title=page.title, language=language, image=page.image,
         date=page.date, facts=done, projections=proj_readings, score=score,
-        publisher_score=reputation.get(source), live=live,
+        publisher_score=_rep(reputation, source), live=live, dropped_claims=dropped,
     )
-
-
-def _safe_extract(extract: Callable[..., list[Claim]], cand: LiveCandidate) -> list[str]:
-    """A candidate article's claim texts; a failed extraction drops the candidate, never the run."""
-    try:
-        return [c.text for c in extract(cand.body, source_metadata=cand.domain)]
-    except Exception:  # noqa: BLE001
-        return []
