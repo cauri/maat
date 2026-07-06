@@ -82,12 +82,11 @@ def classify_claims(
     filled = prompt.replace("{article_text}", article_text or "(none)").replace(
         "{claims_json}", claims_json
     )
-    reply = claude_complete(filled, model=model, max_tokens=2000, stage="classify")
-    raw = reply.text
-    start, end = raw.find("["), raw.rfind("]")
-    if start == -1 or end == -1:
-        raise ValueError(f"no JSON array in model output: {raw[:200]!r}")
-    results = json.loads(raw[start : end + 1])
+    # A claim-dense article needs headroom — at 2000 the array truncated mid-object (each result
+    # carries a "reason") and the WHOLE classification was lost (observed live on a long war
+    # roundup, P14). Same fix as extract.py: pay only for what is generated.
+    reply = claude_complete(filled, model=model, max_tokens=8000, stage="classify")
+    results = _classifications(reply.text, len(claims))
     return [
         c.model_copy(
             update={
@@ -98,3 +97,33 @@ def classify_claims(
         )
         for c, r in zip(claims, results)
     ]
+
+
+def _classifications(raw: str, n: int) -> list[dict]:
+    """Parse the model's JSON array of per-claim results, salvaging a truncated tail.
+
+    Mirrors extract._claim_objects: close the array after the last COMPLETE object rather than
+    discarding everything. Then PAD to ``n`` — results zip 1:1 with the input claims, so a short
+    array must never silently DROP claims; an unpadded claim keeps kind=None (routed as a
+    checkable fact downstream) rather than vanishing from the pipeline.
+    """
+    start = raw.find("[")
+    if start == -1:
+        raise ValueError(f"no JSON array in model output: {raw[:200]!r}")
+    end = raw.rfind("]")
+    results: list | None = None
+    if end > start:
+        try:
+            results = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            results = None  # truncated mid-array — salvage the complete objects below
+    if results is None:
+        last_obj = raw.rfind("}")
+        if last_obj <= start:
+            raise ValueError(f"no parseable JSON array in model output: {raw[:200]!r}")
+        try:
+            results = json.loads(raw[start : last_obj + 1] + "]")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"no parseable JSON array in model output: {raw[:200]!r}") from e
+    results = list(results)[:n]
+    return results + [{} for _ in range(n - len(results))]

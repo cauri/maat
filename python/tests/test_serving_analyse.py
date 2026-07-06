@@ -206,6 +206,26 @@ def test_post_analyse_streams_claims_then_done(monkeypatch):
     assert got.json()["analysis"]["overall"]["band"] == "corroborated"
 
 
+def test_internal_errors_never_leak_to_the_wire(monkeypatch):
+    monkeypatch.setattr(sa, "_LIMITER", PerIpRateLimiter(capacity=100, refill_per_sec=100))
+    sa._RESULTS.clear()
+
+    async def host_ok(_h, _p):
+        return True
+
+    monkeypatch.setattr(sa, "_host_is_public", host_ok)
+
+    def exploding_engine(url, **kw):
+        raise ValueError("no JSON array in model output: 'SECRET INTERNALS'")
+
+    monkeypatch.setattr(sa, "analyse_article", exploding_engine)
+    client = TestClient(_app())
+    r = client.post("/api/v2/analyse", json={"url": "https://example.com/story"})
+    assert "event: error" in r.text
+    assert "SECRET INTERNALS" not in r.text
+    assert "analysis failed" in r.text
+
+
 def test_post_analyse_bad_url_yields_error_event(monkeypatch):
     monkeypatch.setattr(sa, "_LIMITER", PerIpRateLimiter(capacity=100, refill_per_sec=100))
     sa._RESULTS.clear()

@@ -48,6 +48,11 @@ _EXTREMITY_RANK = {"routine": 0, "ordinary": 1, "notable": 2, "significant": 3, 
 _ANALYSED = "analysed"
 
 
+class AnalyseError(ValueError):
+    """A user-facing analysis failure — its message is safe to show the reader verbatim.
+    Anything else that escapes the engine is internal and must be masked at the wire."""
+
+
 @dataclass(frozen=True)
 class CorpusFact:
     """One existing Maat cluster, hydrated as a fold target for a matched claim.
@@ -341,8 +346,8 @@ def analyse_article(
     """Analyse one pasted URL end-to-end. ``corpus_lookup`` inherits existing corroboration;
     ``search`` corroborates novel claims live; either may be None (that leg is skipped).
 
-    Raises ValueError when no article can be extracted from the URL — the endpoint maps that to
-    a clear 422, never a fake score."""
+    Raises AnalyseError (user-facing message) when no article can be extracted from the URL —
+    never a fake score."""
 
     def emit(kind: str, data: dict[str, Any]) -> None:
         if progress is not None:
@@ -350,7 +355,7 @@ def analyse_article(
 
     page = fetch(url)
     if page is None or not page.body:
-        raise ValueError("could not extract an article from this URL")
+        raise AnalyseError("could not extract an article from this URL")
     source = _domain(url)
     language = language_of(page.body)
     emit("fetched", {"title": page.title, "source": source, "language": language,
