@@ -75,6 +75,7 @@ from maat.serving import admin_auth
 from maat.serving import favicon
 from maat.serving import ratelimit
 from maat.serving import spend as spend_mod
+from maat.serving.analyse import analyse_router
 from maat.serving.console_api import console_router
 from maat.serving.buildcache import VersionCache, data_version
 from maat.serving.feed import feed_router
@@ -145,6 +146,12 @@ if feed_router is not None:
 # (serving/social.py), folded read-time like the admin events. None only if FastAPI is absent.
 if social_router is not None:
     app.include_router(social_router)
+
+# The public Analyse surface (P14, #365) — POST /api/v2/analyse (SSE) + GET /api/v2/analyse/{id}.
+# Carries its OWN strict per-IP limiter + global concurrency gate inside the route (an analysis
+# is real LLM + search spend); analysed URLs never enter the canonical store.
+if analyse_router is not None:
+    app.include_router(analyse_router)
 
 # Console v2 command/query API (#304) — the JSON contract the Next.js console (console/) and Sia
 # (#306) read/command through, at /console/api. Queries read projections; commands emit ADMIN_*

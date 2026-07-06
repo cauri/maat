@@ -284,6 +284,19 @@ services:
       nats:
         condition: service_healthy
 
+  # Public site (maat.press/analyse, P14 #365): the Analyse surface — Maat's product page on the
+  # open web (likely to replace the marketing landing page as the apex front door). Next.js
+  # standalone, loopback-only; Caddy routes maat.press/analyse* (+ /_next assets) here and
+  # maat.press/api/analyse* to the reader, so the page and its API are same-origin (no CORS).
+  site:
+    build: ./site
+    image: maat-site:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3200:3200"
+    depends_on:
+      - reader
+
   # cat-cafe (#32) — LLM observability + spend sink. The pipeline exports OTLP spans here (model +
   # token usage per call → cost). UI is admin-only on loopback (reach it like the reader console,
   # via `ssh -L 8800:localhost:8800`); OTLP :4318 stays internal on the compose network. The
@@ -320,6 +333,7 @@ services:
       - reader
       - marketing
       - console
+      - site
 
 volumes:
   pgdata:

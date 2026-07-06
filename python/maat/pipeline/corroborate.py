@@ -472,12 +472,15 @@ def corroborate_fixed(
     decay: dict[str, float] | None = None,
     primary_lift: float | None = None,
     cap: float | None = None,
+    grounding: str | None = None,
 ) -> Corroboration:
     """Recompute ONE cluster over a FIXED claim set (operator-decided) — no same-fact
     re-clustering, no LLM. The admin console (P8 F3) uses this when an operator splits,
     merges, or moves claims: take the given claims AS a single cluster, collapse to
     independent originators (§5.5), and read confidence (§5.6-5.7). Extremity is carried
     over from the original cluster rather than re-rated — deterministic, free, testable.
+    ``grounding`` (#228) likewise carries a cluster's existing grounding verdict through to
+    ``confidence_read`` — the Analyse surface (P14) folds a pasted article into a cluster's read.
     """
     if not claims:
         raise ValueError("corroborate_fixed needs at least one claim")
@@ -497,6 +500,7 @@ def corroborate_fixed(
         has_primary=primary,
         extremity=extremity,
         confidence=confidence_read(
-                    eff, primary, extremity, decay=decay, primary_lift=primary_lift, cap=cap
+                    eff, primary, extremity, decay=decay, primary_lift=primary_lift, cap=cap,
+                    grounding=grounding,
                 ),
     )

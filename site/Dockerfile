@@ -1,0 +1,35 @@
+# Maat public site (Next.js, standalone output) — the Analyse surface (P14, #365).
+#
+# Served behind Caddy at maat.press/analyse (the future public front door; it will likely
+# replace the marketing landing page). Runs on the box's loopback: Caddy → 127.0.0.1:3200.
+
+# --- deps: install from a clean lockfile ----------------------------------------------
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# --- builder: compile the standalone server -------------------------------------------
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# --- runner: minimal runtime ----------------------------------------------------------
+FROM node:22-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3200 \
+    HOSTNAME=0.0.0.0
+RUN addgroup -S nodejs -g 1001 && adduser -S nextjs -u 1001
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+USER nextjs
+EXPOSE 3200
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
+  CMD wget -qO- http://127.0.0.1:3200/healthz >/dev/null 2>&1 || exit 1
+CMD ["node", "server.js"]
