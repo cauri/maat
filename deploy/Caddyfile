@@ -61,7 +61,26 @@ www.maat.press {
 	reverse_proxy 127.0.0.1:8080
 }
 
-# Send the apex to www so there's one canonical home.
+# Apex: the Analyse surface (P14, #365) — Maat's public product page — plus its same-origin API;
+# everything else still redirects to the landing site until the apex cutover. The page and API
+# share maat.press so the browser needs no CORS; /api/analyse* is rewritten onto the reader's
+# /api/v2/analyse* routes. SSE must stream unbuffered (flush_interval -1).
 maat.press {
-	redir https://www.maat.press{uri} permanent
+	encode zstd gzip
+
+	@site path /analyse /analyse/* /_next/* /healthz /favicon.ico /robots.txt
+	handle @site {
+		reverse_proxy 127.0.0.1:3200
+	}
+
+	handle /api/analyse* {
+		uri replace /api/analyse /api/v2/analyse
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		redir https://www.maat.press{uri} permanent
+	}
 }

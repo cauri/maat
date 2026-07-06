@@ -90,6 +90,26 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+  # Public site (Next.js, site/) — the Analyse surface (P14, #365). Deterministic gates:
+  # lint + types + build. Like the console job, advisory for merges; the box builds the image
+  # from the rsynced source at deploy time.
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+
   # Push-to-deploy: only on main, only after the deterministic gates pass.
   # Deploys the infra baseline today; extends to the app image once it exists.
   deploy:
@@ -124,6 +144,11 @@ jobs:
           rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
             --exclude 'node_modules' --exclude '.next' --exclude '.env*' \
             console/ "root@$DEPLOY_HOST:/root/console/"
+          # site/ too: the prod compose builds the public Analyse surface from ../site (P14, #365)
+          # for maat.press/analyse. Same build-on-box flow as the console.
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            --exclude 'node_modules' --exclude '.next' --exclude '.env*' \
+            site/ "root@$DEPLOY_HOST:/root/site/"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             deploy/docker-compose.prod.yml "root@$DEPLOY_HOST:/root/docker-compose.yml"
           # Caddyfile too: the admin-console vhost (D32) + the www.maat.press marketing vhost live
