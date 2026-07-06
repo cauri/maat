@@ -198,12 +198,15 @@ def sanitise_body(text: str, *, max_chars: int = 60_000) -> str:
 
 
 _WS = re.compile(r"\s+")
-# Typographic variants the model routinely normalises when quoting (curly quotes, long dashes,
-# ellipsis, soft hyphen) — fold BOTH sides to ASCII so a verbatim quote isn't false-dropped over
-# punctuation glyphs (observed live: 13/36 BBC snippets discarded purely on curly quotes).
+# The model normalises punctuation GLYPHS when quoting — and swaps quote KINDS outright (BBC's
+# “double curly” came back as 'single straight'; 13/39 real spans false-dropped on exactly this).
+# Quotes carry no factual content, so DELETE every quote mark from both sides; fold dash/ellipsis
+# variants. The guarantee is unchanged: the span's WORDS must still appear on the page verbatim.
 _TYPO = str.maketrans({
-    "‘": "'", "’": "'", "‚": "'", "‛": "'",
-    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
+    "'": None, '"': None, "`": None, "´": None,
+    "‘": None, "’": None, "‚": None, "‛": None,
+    "“": None, "”": None, "„": None, "«": None, "»": None,
+    "‹": None, "›": None,
     "–": "-", "—": "-", "−": "-",
     "…": "...", "­": None,
 })
