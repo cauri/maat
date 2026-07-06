@@ -32,6 +32,7 @@ import os
 import re
 import socket
 import time
+import traceback
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -48,6 +49,7 @@ from maat.acquire.source_gate import prefiltered_reject
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.trajectory import load_trajectory
 from maat.pipeline.analyse import (
+    AnalyseError,
     ArticleAnalysis,
     ClaimReading,
     CorpusFact,
@@ -480,7 +482,8 @@ async def run_analysis(
     progress: Callable[[str, dict], None] | None = None,
 ) -> dict:
     """Analyse ``url`` (or serve the fresh cached result), returning the public payload.
-    Raises ValueError with a user-facing message for anything the caller did wrong."""
+    Raises AnalyseError with a user-facing message for anything the caller did wrong; any
+    other exception is internal and must be masked at the wire."""
     norm = normalise_url(url)
     aid = analysis_id(norm)
     pool = state.pool
@@ -490,7 +493,7 @@ async def run_analysis(
             return payload
     err = await check_url(norm)
     if err:
-        raise ValueError(err)
+        raise AnalyseError(err)
 
     async with _SEM:  # bound concurrent LLM analyses; queued requests wait their turn
         assets = await _load_assets(pool)
@@ -576,9 +579,10 @@ def _make_router():
                 payload = await run_analysis(state, req.url, refresh=req.refresh,
                                              progress=progress)
                 queue.put_nowait(("done", {"analysis": payload}))
-            except ValueError as e:
+            except AnalyseError as e:  # user-facing by contract — safe to show verbatim
                 queue.put_nowait(("error", {"detail": str(e)}))
-            except Exception:  # noqa: BLE001 - never leak internals to the public wire
+            except Exception:  # noqa: BLE001 - internal: log to the container, mask on the wire
+                traceback.print_exc()
                 queue.put_nowait(("error", {"detail": "analysis failed — try again shortly"}))
 
         async def stream():
