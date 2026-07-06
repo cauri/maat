@@ -284,6 +284,18 @@ def test_injected_claim_that_does_not_quote_the_page_is_dropped():
     assert res.dropped_claims == 1
 
 
+def test_span_check_survives_typographic_quote_differences():
+    from maat.pipeline.analyse import verify_spans
+
+    body = "The governor said the bank’s plan was “fully funded” — twice."
+    quoted = Claim(text="The bank's plan was fully funded", voice="own",
+                   evidence_span="the bank's plan was \"fully funded\" - twice")
+    off_page = Claim(text="x", voice="own", evidence_span="never on the page")
+    kept, dropped = verify_spans([quoted, off_page], body)
+    assert [c.text for c in kept] == ["The bank's plan was fully funded"]
+    assert dropped == 1
+
+
 def test_sanitise_strips_hidden_characters_and_caps():
     from maat.pipeline.analyse import sanitise_body
 

@@ -198,10 +198,19 @@ def sanitise_body(text: str, *, max_chars: int = 60_000) -> str:
 
 
 _WS = re.compile(r"\s+")
+# Typographic variants the model routinely normalises when quoting (curly quotes, long dashes,
+# ellipsis, soft hyphen) — fold BOTH sides to ASCII so a verbatim quote isn't false-dropped over
+# punctuation glyphs (observed live: 13/36 BBC snippets discarded purely on curly quotes).
+_TYPO = str.maketrans({
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
+    "–": "-", "—": "-", "−": "-",
+    "…": "...", "­": None,
+})
 
 
 def _norm(text: str) -> str:
-    return _WS.sub(" ", text).strip().lower()
+    return _WS.sub(" ", text.translate(_TYPO)).strip().lower()
 
 
 def verify_spans(claims: list[Claim], body: str) -> tuple[list[Claim], int]:
