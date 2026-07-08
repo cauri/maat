@@ -483,8 +483,81 @@ def public_reasons(analysis: ArticleAnalysis) -> list[str]:
     return reasons
 
 
+def _trim(text: str, n: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def _cap(text: str) -> str:
+    return text[:1].upper() + text[1:] if text else text
+
+
+def claim_tally(facts: list[ClaimReading]) -> dict[str, int]:
+    """Headline counts for the card + captions (verdict-level, no mechanism)."""
+    t = {"total": len(facts), "corroborated": 0, "single_source": 0, "disputed": 0, "primary": 0}
+    for r in facts:
+        v = r.verdict
+        if v.startswith(("Well corroborated", "Corroborated")):
+            t["corroborated"] += 1
+        elif v.startswith("Disputed"):
+            t["disputed"] += 1
+        elif v.startswith("Only this source"):
+            t["single_source"] += 1
+        elif v.startswith("Stated by the primary"):
+            t["primary"] += 1
+    return t
+
+
+def share_copy(analysis: ArticleAnalysis, reasons: list[str]) -> dict[str, Any]:
+    """Per-platform share text, templated from the ruling — deterministic, defensible, and
+    "what, not how" (says the claims weren't corroborated by independent reporting, never the
+    mechanism; never overstates a named publisher's article as "false"). Measured tone."""
+    s = analysis.score
+    title = _trim(analysis.title or "this article", 90)
+    headline = s.label if s.forecast_only else f"{s.label} · {s.score}/100"
+    top = _cap(reasons[0]) if reasons else ""
+    pub = analysis.source
+    pub_rec = (f" (track record {round(analysis.publisher_score * 100)}/100)"
+               if analysis.publisher_score is not None else "")
+
+    og_description = _trim(
+        f"{headline}. " + (f"{top}. " if top else "")
+        + "Maat weighs each factual claim against independent reporting — not tone or bias.",
+        200,
+    )
+    twitter_text = _trim(
+        f"I ran “{_trim(analysis.title or 'this article', 64)}” through Maat: {headline}."
+        + (f" {top}." if top else "") + " Weigh any article yourself →",
+        240,
+    )
+    linkedin_text = (
+        "I checked this article with Maat, which weighs how well a story's factual claims hold "
+        "up against independent reporting.\n\n"
+        f"Verdict: {headline}." + (f"\nKey finding: {top}." if top else "")
+        + f"\nPublisher: {pub}{pub_rec}."
+        + "\n\nMaat weighs claims, not tone or bias. Weigh any article at maat.press/analyse"
+    )
+    instagram_caption = (
+        f"Maat weighed “{title}”: {headline}." + (f" {top}." if top else "")
+        + "\n\nMaat scores how well a news story's factual claims hold up against independent "
+        "reporting — not its tone or bias.\n\n"
+        "Weigh any article yourself — link in bio (maat.press/analyse)\n\n"
+        "#news #medialiteracy #factcheck #journalism #press #maat"
+    )
+    return {
+        "headline": headline,
+        "tally": claim_tally(analysis.facts),
+        "og_title": _trim(f"Maat weighed “{title}”", 90),
+        "og_description": og_description,
+        "twitter_text": twitter_text,
+        "linkedin_text": linkedin_text,
+        "instagram_caption": instagram_caption,
+    }
+
+
 def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
     pub = analysis.publisher_score
+    reasons = public_reasons(analysis)
     return {
         "analysis_id": aid,
         "url": analysis.url,
@@ -504,12 +577,13 @@ def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
             "score": analysis.score.score,
             "band": analysis.score.band,
             "label": analysis.score.label,
-            "reasons": public_reasons(analysis),
+            "reasons": reasons,
             "capped": analysis.score.capped,
             "forecast_only": analysis.score.forecast_only,
         },
         "claims": [public_claim(r) for r in analysis.facts],
         "projections": [public_projection(r) for r in analysis.projections],
+        "share": share_copy(analysis, reasons),
         "scope": SCOPE_LINE,
         "analysed_at": datetime.now(timezone.utc).isoformat(),
     }

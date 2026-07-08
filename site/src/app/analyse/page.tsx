@@ -1,12 +1,41 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
+import { loadAnalysis, PUBLIC_ORIGIN } from "@/lib/server";
 import Analyser from "./analyser";
 
-export const metadata: Metadata = {
-  title: "Maat — weigh the news",
-  description:
-    "Paste a link to any news article. Maat breaks it into its claims, checks each one against independent reporting, and gives the article one clear read.",
-};
+const DEFAULT_TITLE = "Maat — weigh the news";
+const DEFAULT_DESC =
+  "Paste a link to any news article. Maat breaks it into its claims, checks each one against independent reporting, and gives the article one clear read.";
+
+// Per-analysis OG/Twitter tags for a shared ?id= link: when a platform crawls the URL it unfurls
+// the article's verdict card. (The live tab's client-side ?id= update doesn't re-run this — it
+// doesn't need to; only crawlers of the shared URL do.)
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}): Promise<Metadata> {
+  const sp = await searchParams;
+  const id = typeof sp.id === "string" ? sp.id : undefined;
+  const base: Metadata = { metadataBase: new URL(PUBLIC_ORIGIN), title: DEFAULT_TITLE, description: DEFAULT_DESC };
+  if (!id) return base;
+  const a = await loadAnalysis(id);
+  if (!a) return base;
+  const card = `${PUBLIC_ORIGIN}/card?id=${encodeURIComponent(id)}&format=landscape`;
+  const pageUrl = `${PUBLIC_ORIGIN}/analyse?id=${encodeURIComponent(id)}`;
+  const title = a.share.og_title;
+  const description = a.share.og_description;
+  return {
+    metadataBase: new URL(PUBLIC_ORIGIN),
+    title,
+    description,
+    openGraph: {
+      title, description, url: pageUrl, siteName: "Maat", type: "article",
+      images: [{ url: card, width: 1200, height: 630, alt: title }],
+    },
+    twitter: { card: "summary_large_image", title, description, images: [card] },
+  };
+}
 
 export default function AnalysePage() {
   return (

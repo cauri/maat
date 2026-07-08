@@ -63,8 +63,8 @@ def _reading(**kw):
 
 def _analysis(facts, score, **kw):
     return ArticleAnalysis(
-        url="https://example.com/story", source="example.com",
-        title="T", language="en", image=None, date=None,
+        url="https://example.com/story", source=kw.pop("source", "example.com"),
+        title=kw.pop("title", "T"), language="en", image=None, date=None,
         facts=facts, projections=kw.pop("projections", []),
         score=score, publisher_score=kw.pop("publisher_score", None), live=None,
     )
@@ -202,6 +202,62 @@ def test_no_registry_kickoff_when_publisher_already_rated(monkeypatch):
     assert payload["publisher"]["rated"] is True
     assert payload["publisher"]["review_started"] is False
     assert "maat.events.source.registered" not in published
+
+
+# --- share copy (templated, defensible, "what not how") --------------------------------------
+
+
+def test_share_copy_is_defensible_and_leaks_no_mechanism():
+    dq = StoryScore(20, "disqualified", "Fails verification",
+                    ["a central significant claim rests on a single unsupported source"],
+                    False, False)
+    analysis = _analysis(
+        [_reading(central=True, verdict="Only this source — below the bar for a significant claim",
+                  tier="floor")],
+        dq, title="Bank sold its gold, insider says", source="chronicle.example",
+    )
+    share = sa.share_copy(analysis, sa.public_reasons(analysis))
+    blob = " ".join([share["og_title"], share["og_description"], share["twitter_text"],
+                     share["linkedin_text"], share["instagram_caption"]])
+    # measured + accurate: carries the verdict, never calls it "false", never leaks mechanism
+    assert "Fails verification · 20/100" in share["headline"]
+    assert "false" not in blob.lower() and "fake" not in blob.lower()
+    for leak in ("originator", "cluster", "corroborate_fixed", "embedding", "§"):
+        assert leak not in blob.lower()
+    assert "independent reporting" in share["og_description"]
+    assert len(share["twitter_text"]) <= 240
+    assert "link in bio" in share["instagram_caption"]
+    assert "#" in share["instagram_caption"]
+
+
+def test_share_copy_tally_and_publisher_record():
+    ok = StoryScore(72, "corroborated", "Corroborated", [], False, False)
+    facts = [
+        _reading(central=True, verdict="Well corroborated", tier="hi"),
+        _reading(verdict="Corroborated", tier="mid"),
+        _reading(verdict="Only this source so far", tier="lo"),
+    ]
+    analysis = _analysis(facts, ok, publisher_score=0.83)
+    share = sa.share_copy(analysis, sa.public_reasons(analysis))
+    assert share["tally"] == {"total": 3, "corroborated": 2, "single_source": 1,
+                              "disputed": 0, "primary": 0}
+    assert "83/100" in share["linkedin_text"]          # publisher track record surfaced
+    assert share["headline"] == "Corroborated · 72/100"
+
+
+def test_share_copy_forecast_only_has_no_number():
+    fc = StoryScore(0, "forecast", "Forecast / opinion", ["no checkable facts"], False, True)
+    share = sa.share_copy(_analysis([], fc), ["no checkable factual claims yet"])
+    assert share["headline"] == "Forecast / opinion"
+    assert "/100" not in share["headline"]
+
+
+def test_public_payload_includes_share_block():
+    ok = StoryScore(70, "corroborated", "Corroborated", ["x"], False, False)
+    payload = sa.public_payload(_analysis([_reading(central=True)], ok), "an-1")
+    assert "share" in payload
+    assert set(payload["share"]) >= {"headline", "tally", "og_title", "og_description",
+                                     "twitter_text", "linkedin_text", "instagram_caption"}
 
 
 # --- canonical-URL collapse (same article, variant URLs → one cache entry) --------------------
