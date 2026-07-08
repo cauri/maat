@@ -216,6 +216,20 @@ def _norm(text: str) -> str:
     return _WS.sub(" ", text.translate(_TYPO)).strip().lower()
 
 
+def claim_position(evidence_span: str, body: str) -> float:
+    """Where a claim's evidence sits in the article, as a 0–1 fraction of the way down — so the
+    Analyse page can highlight it at the right spot in a MINIATURE (skeleton) rendering without any
+    article prose leaving the server. Whitespace/typography-normalised (same fold as the span
+    guard); 0.0 when not locatable."""
+    if not evidence_span or not body:
+        return 0.0
+    hay = _norm(body)
+    if not hay:
+        return 0.0
+    i = hay.find(_norm(evidence_span))
+    return round(max(0.0, min(1.0, i / len(hay))), 4) if i >= 0 else 0.0
+
+
 def verify_spans(claims: list[Claim], body: str) -> tuple[list[Claim], int]:
     """Keep only claims whose ``evidence_span`` actually quotes the page (whitespace-normalised).
 
@@ -475,7 +489,8 @@ def analyse_article(
     emit("extracted", {
         "facts": [
             {"text": c.text, "voice": c.voice, "speaker": c.speaker,
-             "central": c.in_headline or c.is_synthesis}
+             "central": c.in_headline or c.is_synthesis,
+             "position": claim_position(c.evidence_span, body)}
             for c in fact_claims
         ],
         "projections": [{"text": c.text, "speaker": c.speaker} for c in projections],
