@@ -44,7 +44,7 @@ import numpy as np
 
 from maat import events as events_mod
 from maat.acquire import apify, gdelt, source_gate
-from maat.acquire.fetch import fetch_article
+from maat.acquire.fetch import FetchedPage, fetch_article, fetch_page
 from maat.acquire.source_gate import prefiltered_reject
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.trajectory import load_trajectory
@@ -119,6 +119,51 @@ def normalise_url(url: str) -> str:
 def analysis_id(url: str) -> str:
     """Stable id for an analysis = hash of the normalised URL (mirrors the clock's article ids)."""
     return "an-" + hashlib.sha1(normalise_url(url).encode()).hexdigest()[:18]
+
+
+_VARIANT_PREFIXES = ("www.", "amp.", "m.", "mobile.")
+
+
+def _strip_variant(host: str) -> str:
+    h = (host or "").lower().rstrip(".")
+    for p in _VARIANT_PREFIXES:
+        if h.startswith(p):
+            return h[len(p):]
+    return h
+
+
+def _same_publisher(host_a: str, host_b: str) -> bool:
+    """Do two hostnames belong to the same publisher? Deliberately conservative — a false 'no'
+    just means we re-analyse; a false 'yes' would let a page borrow another outlet's identity."""
+    ha, hb = _strip_variant(host_a), _strip_variant(host_b)
+    if ha and ha == hb:
+        return True
+    if ha and hb and (ha.endswith("." + hb) or hb.endswith("." + ha)):  # subdomain of the other
+        return True
+    ca = canonical_source(host_a)                       # both resolve to the same KNOWN outlet
+    return ca == canonical_source(host_b) and "." not in ca  # registry slug (no dot) vs passthrough
+
+
+def identity_url(pasted_norm: str, page: FetchedPage) -> str:
+    """The URL a paste is CACHED under: the page's own canonical URL when it declares one AND it
+    belongs to the same publisher (AMP / mobile / share / tracking variants collapse to one
+    entry), else the normalised pasted URL.
+
+    The same-publisher guard is a REPUTATION-LAUNDERING defence: a page must not claim another
+    outlet's canonical to be analysed — and scored — as that outlet. Cross-publisher syndication
+    dedup is a separate, content-based problem (not this)."""
+    canon = (page.canonical or "").strip()
+    if not canon:
+        return pasted_norm
+    try:
+        cp = urlparse(canon)
+    except ValueError:
+        return pasted_norm
+    if cp.scheme not in ("http", "https") or not cp.hostname:
+        return pasted_norm
+    if not _same_publisher(urlparse(pasted_norm).hostname or "", cp.hostname):
+        return pasted_norm
+    return normalise_url(canon)
 
 
 # ── SSRF guard (mirrors the image proxy's, serving/feed.py) ─────────────────────────────────────
@@ -491,11 +536,15 @@ def _fresh(analysed_at: str | None) -> bool:
 
 
 async def _stored_payload(pool: Any, aid: str) -> dict | None:
-    """A completed analysis from the events log (the durable cache) — newest wins."""
+    """A completed analysis from the events log (the durable cache) — newest wins.
+
+    Keyed on ``stream_id`` (== the analysis id, set at publish time), so this is an indexed
+    point-lookup via the existing ``events_stream_idx (stream_id, id)`` — no scan over the shared
+    log as analyses accumulate, and no redundant index to maintain."""
     try:
         row = await pool.fetchrow(
-            "select data from events where type = 'analysis.completed' "
-            "and data->>'analysis_id' = $1 order by id desc limit 1",
+            "select data from events where stream_id = $1 and type = 'analysis.completed' "
+            "order by id desc limit 1",
             aid,
         )
     except Exception:  # noqa: BLE001 - a cache-read failure just means re-analyse
@@ -526,6 +575,8 @@ async def run_analysis(
     norm = normalise_url(url)
     aid = analysis_id(norm)
     pool = state.pool
+    # 1) Exact re-paste (incl. tracking/fragment/case variants → same normalised URL): served
+    #    from cache with no fetch at all.
     if not refresh:
         payload = await cached_payload(pool, aid)
         if payload is not None and _fresh(payload.get("analysed_at")):
@@ -534,24 +585,40 @@ async def run_analysis(
     if err:
         raise AnalyseError(err)
 
+    # 2) Fetch once (outside the analysis gate — a canonical cache hit shouldn't hold a slot). The
+    #    page's declared canonical URL collapses AMP/mobile/share variants of ONE article (same
+    #    publisher) onto a single cache identity, so the second variant skips the ~minutes of LLM
+    #    work even though it still pays the ~seconds of fetch.
+    page = await asyncio.to_thread(fetch_page, norm)
+    if page is None or not page.body:
+        raise AnalyseError("could not extract an article from this URL")
+    ident = identity_url(norm, page)
+    canon_aid = analysis_id(ident)
+    if canon_aid != aid and not refresh:
+        payload = await cached_payload(pool, canon_aid)
+        if payload is not None and _fresh(payload.get("analysed_at")):
+            _cache_put(aid, payload)  # alias the pasted variant → canonical (fast next time, this process)
+            return payload
+
     async with _SEM:  # bound concurrent LLM analyses; queued requests wait their turn
         assets = await _load_assets(pool)
         loop = asyncio.get_running_loop()
         lookup = make_corpus_lookup(loop, pool, assets)
         analysis = await asyncio.to_thread(
             analyse_article,
-            norm,
+            ident,                          # identity = canonical when collapsed (correct publisher)
             reputation=assets.reputation,
             corpus_lookup=lookup,
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),
             gate=make_gate() if _GATED else None,
+            fetch=lambda _u: page,          # reuse the page we already fetched — never fetch twice
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,
             progress=progress,
         )
-    payload = public_payload(analysis, aid)
+    payload = public_payload(analysis, canon_aid)
     nats = getattr(state, "nats", None)
     # An unrated publisher enters the EXISTING reliability-review pipeline (#241): registering
     # it queues the source-registry agent's backfill of its past reporting → a scored track
@@ -567,12 +634,16 @@ async def run_analysis(
             payload["publisher"]["review_started"] = True
         except Exception:  # noqa: BLE001 - review kickoff is best-effort
             pass
-    _cache_put(aid, payload)
+    # Cache + persist under the CANONICAL id (shares/links use it); alias the pasted variant in
+    # this process so a same-process re-paste of the AMP/mobile URL is instant too.
+    _cache_put(canon_aid, payload)
+    if canon_aid != aid:
+        _cache_put(aid, payload)
     if nats is not None:
         try:  # durable cache + audit trail; best-effort, never blocks the response
             await events_mod.publish(
-                nats, "analysis.completed", aid,
-                {"analysis_id": aid, "url": norm, "analysis": payload},
+                nats, "analysis.completed", canon_aid,
+                {"analysis_id": canon_aid, "url": ident, "analysis": payload},
                 tenant_id=events_mod.PUBLIC_TENANT,
             )
         except Exception:  # noqa: BLE001
