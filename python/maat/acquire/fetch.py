@@ -26,6 +26,7 @@ class FetchedPage:
     title: str | None = None
     image: str | None = None  # lead image (og:image) — display-only, never a veracity signal
     date: str | None = None   # publication date (ISO) when the page states one
+    canonical: str | None = None  # the page's declared canonical URL (<link rel=canonical>/og:url)
 
 
 def fetch_page(url: str, *, min_chars: int = 200) -> FetchedPage | None:
@@ -38,16 +39,18 @@ def fetch_page(url: str, *, min_chars: int = 200) -> FetchedPage | None:
     )
     if not text or len(text) < min_chars:
         return None
-    title = image = date = None
+    title = image = date = canonical = None
     try:
         md = extract_metadata(downloaded)
         if md:
             title = getattr(md, "title", None) or None
             image = getattr(md, "image", None) or None
             date = getattr(md, "date", None) or None
+            # trafilatura fills `url` from <link rel="canonical"> / og:url when the page states one.
+            canonical = getattr(md, "url", None) or None
     except Exception:  # noqa: BLE001 - metadata is best-effort enrichment, never fatal
         pass
-    return FetchedPage(body=text, title=title, image=image, date=date)
+    return FetchedPage(body=text, title=title, image=image, date=date, canonical=canonical)
 
 
 def fetch_article(url: str, *, min_chars: int = 200) -> tuple[str | None, str | None]:

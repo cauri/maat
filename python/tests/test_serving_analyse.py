@@ -11,10 +11,19 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 import maat.serving.analyse as sa
+from maat.acquire.fetch import FetchedPage
 from maat.learning.story_credibility import StoryScore
 from maat.pipeline.analyse import ArticleAnalysis, ClaimReading, LiveCandidate
 from maat.pipeline.claim import Claim
 from maat.serving.ratelimit import PerIpRateLimiter
+
+
+def _patch_page(monkeypatch, *, canonical=None, body="A sufficiently long article body for the test."):
+    """run_analysis now fetches once before analysing — stub it so tests never hit the network."""
+    monkeypatch.setattr(
+        sa, "fetch_page", lambda *_a, **_k: FetchedPage(body=body, title="T", canonical=canonical)
+    )
+
 
 # --- url identity ----------------------------------------------------------------------------
 
@@ -142,6 +151,7 @@ def test_registry_review_kickoff_for_unrated_publisher(monkeypatch):
         return True
 
     monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    _patch_page(monkeypatch)
     reading = _reading(central=True, matched_cluster_id=None)
     analysis = _analysis([reading], StoryScore(58, "developing", "Developing", [], False, False))
     monkeypatch.setattr(sa, "analyse_article", lambda url, **kw: analysis)
@@ -172,6 +182,7 @@ def test_no_registry_kickoff_when_publisher_already_rated(monkeypatch):
         return True
 
     monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    _patch_page(monkeypatch)
     reading = _reading(central=True, matched_cluster_id=None)
     analysis = _analysis([reading], StoryScore(70, "corroborated", "Corroborated", [], False, False),
                          publisher_score=0.8)
@@ -191,6 +202,79 @@ def test_no_registry_kickoff_when_publisher_already_rated(monkeypatch):
     assert payload["publisher"]["rated"] is True
     assert payload["publisher"]["review_started"] is False
     assert "maat.events.source.registered" not in published
+
+
+# --- canonical-URL collapse (same article, variant URLs → one cache entry) --------------------
+
+
+def test_same_publisher_variants_and_registry():
+    assert sa._same_publisher("amp.cnn.com", "www.cnn.com") is True
+    assert sa._same_publisher("m.example.com", "example.com") is True
+    assert sa._same_publisher("news.example.com", "example.com") is True   # subdomain
+    assert sa._same_publisher("bbc.co.uk", "bbc.com") is True              # registry-known outlet
+    assert sa._same_publisher("evil.example", "nytimes.com") is False
+
+
+def test_identity_url_same_publisher_canonical_collapses():
+    page = FetchedPage(body="x", canonical="https://www.example.com/story")
+    ident = sa.identity_url(sa.normalise_url("https://amp.example.com/story?utm_source=t"), page)
+    assert ident == "https://www.example.com/story"
+
+
+def test_identity_url_cross_publisher_canonical_is_ignored_laundering_guard():
+    # A page must not borrow another outlet's identity by declaring its canonical.
+    pasted = sa.normalise_url("https://spam.example/story")
+    page = FetchedPage(body="x", canonical="https://www.nytimes.com/2026/real-story")
+    assert sa.identity_url(pasted, page) == pasted
+
+
+def test_identity_url_no_canonical_uses_pasted():
+    pasted = sa.normalise_url("https://example.com/story")
+    assert sa.identity_url(pasted, FetchedPage(body="x", canonical=None)) == pasted
+
+
+def test_amp_variant_reuses_the_canonical_analysis_skipping_the_llm(monkeypatch):
+    """Pasting an AMP variant of an already-analysed article serves the stored canonical result
+    (one fetch, no re-analysis)."""
+    sa._RESULTS.clear()
+
+    async def host_ok(_h, _p):
+        return True
+
+    monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    canon_url = "https://www.example.com/story"
+    _patch_page(monkeypatch, canonical=canon_url)
+    canon_aid = sa.analysis_id(canon_url)
+
+    fresh_payload = {
+        "analysed_at": datetime.now(timezone.utc).isoformat(),
+        "overall": {"band": "corroborated", "score": 71, "label": "Corroborated"},
+        "publisher": {"domain": "example.com", "rated": False, "score": None},
+    }
+
+    class CachePool(FakePool):
+        async def fetchrow(self, query, *args):
+            if "analysis.completed" in query and args and args[0] == canon_aid:
+                return {"data": {"analysis_id": canon_aid, "analysis": fresh_payload}}
+            return None
+
+    called: list[int] = []
+
+    def must_not_run(*_a, **_k):
+        called.append(1)
+        raise AssertionError("analyse_article must not run for a cache hit")
+
+    monkeypatch.setattr(sa, "analyse_article", must_not_run)
+
+    class State:
+        pool = CachePool()
+        nats = None
+
+    import asyncio
+
+    got = asyncio.run(sa.run_analysis(State(), "https://amp.example.com/story?utm_source=x"))
+    assert called == []                      # the expensive path never ran
+    assert got["overall"]["score"] == 71     # served the stored canonical analysis
 
 
 def test_check_url_rejects_bad_schemes_and_ports():
@@ -243,6 +327,7 @@ def test_post_analyse_streams_claims_then_done(monkeypatch):
         return True
 
     monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    _patch_page(monkeypatch)
 
     reading = _reading(central=True, matched_cluster_id=None)
     analysis = _analysis([reading], StoryScore(70, "corroborated", "Corroborated",
@@ -284,6 +369,7 @@ def test_internal_errors_never_leak_to_the_wire(monkeypatch):
         return True
 
     monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    _patch_page(monkeypatch)
 
     def exploding_engine(url, **kw):
         raise ValueError("no JSON array in model output: 'SECRET INTERNALS'")
