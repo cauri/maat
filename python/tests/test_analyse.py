@@ -296,6 +296,26 @@ def test_span_check_survives_typographic_quote_differences():
     assert dropped == 1
 
 
+def test_claim_position_locates_evidence_in_the_body():
+    from maat.pipeline.analyse import claim_position
+
+    body = "First paragraph here. " * 5 + "The bank sold its gold. " + "Tail sentence. " * 20
+    assert claim_position("The bank sold its gold", body) > 0.1
+    assert claim_position("The bank sold its gold", body) < 0.5
+    assert claim_position("nowhere in the text", body) == 0.0  # not locatable → 0
+    assert claim_position("", body) == 0.0
+    early = claim_position("First paragraph here", body)
+    assert 0.0 <= early < 0.1  # near the top
+
+
+def test_extracted_event_carries_claim_positions():
+    seen = {}
+    analyse(progress=lambda k, d: seen.__setitem__(k, d) if k == "extracted" else None)
+    facts = seen["extracted"]["facts"]
+    assert all("position" in f for f in facts)
+    assert all(0.0 <= f["position"] <= 1.0 for f in facts)
+
+
 def test_sanitise_strips_hidden_characters_and_caps():
     from maat.pipeline.analyse import sanitise_body
 
