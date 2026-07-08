@@ -48,8 +48,18 @@ function trim(s: string, n: number): string {
   return t.length <= n ? t : t.slice(0, n - 1).trimEnd() + "…";
 }
 
+function tallyFromClaims(claims: Analysis["claims"]): { total: number; corroborated: number; single_source: number; disputed: number } {
+  const t = { total: claims.length, corroborated: 0, single_source: 0, disputed: 0 };
+  for (const c of claims) {
+    if (c.verdict.startsWith("Well corroborated") || c.verdict.startsWith("Corroborated")) t.corroborated++;
+    else if (c.verdict.startsWith("Disputed")) t.disputed++;
+    else if (c.verdict.startsWith("Only this source")) t.single_source++;
+  }
+  return t;
+}
+
 function tallyLine(a: Analysis): string {
-  const t = a.share.tally;
+  const t = a.share?.tally ?? tallyFromClaims(a.claims ?? []);
   const parts = [`${t.total} claim${t.total === 1 ? "" : "s"} weighed`];
   if (t.corroborated) parts.push(`${t.corroborated} corroborated`);
   if (t.disputed) parts.push(`${t.disputed} disputed`);

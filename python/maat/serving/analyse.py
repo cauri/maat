@@ -492,11 +492,10 @@ def _cap(text: str) -> str:
     return text[:1].upper() + text[1:] if text else text
 
 
-def claim_tally(facts: list[ClaimReading]) -> dict[str, int]:
+def _tally_from_verdicts(verdicts: list[str]) -> dict[str, int]:
     """Headline counts for the card + captions (verdict-level, no mechanism)."""
-    t = {"total": len(facts), "corroborated": 0, "single_source": 0, "disputed": 0, "primary": 0}
-    for r in facts:
-        v = r.verdict
+    t = {"total": len(verdicts), "corroborated": 0, "single_source": 0, "disputed": 0, "primary": 0}
+    for v in verdicts:
         if v.startswith(("Well corroborated", "Corroborated")):
             t["corroborated"] += 1
         elif v.startswith("Disputed"):
@@ -508,37 +507,42 @@ def claim_tally(facts: list[ClaimReading]) -> dict[str, int]:
     return t
 
 
-def share_copy(analysis: ArticleAnalysis, reasons: list[str]) -> dict[str, Any]:
+def claim_tally(facts: list[ClaimReading]) -> dict[str, int]:
+    return _tally_from_verdicts([r.verdict for r in facts])
+
+
+def _build_share(*, title: str | None, source: str, label: str, score: int, forecast_only: bool,
+                 top_reason: str, pub_score_100: int | None, tally: dict[str, int]) -> dict[str, Any]:
     """Per-platform share text, templated from the ruling — deterministic, defensible, and
     "what, not how" (says the claims weren't corroborated by independent reporting, never the
-    mechanism; never overstates a named publisher's article as "false"). Measured tone."""
-    s = analysis.score
-    title = _trim(analysis.title or "this article", 90)
-    headline = s.label if s.forecast_only else f"{s.label} · {s.score}/100"
-    top = _cap(reasons[0]) if reasons else ""
-    pub = analysis.source
-    pub_rec = (f" (track record {round(analysis.publisher_score * 100)}/100)"
-               if analysis.publisher_score is not None else "")
+    mechanism; never overstates a named publisher's article as "false"). Measured tone.
 
+    Pure over primitives so it runs from a live ArticleAnalysis OR a stored payload dict (an
+    analysis cached before this feature existed backfills its share block on read)."""
+    disp = _trim(title or "this article", 90)
+    headline = label if forecast_only else f"{label} · {score}/100"
+    top = _cap(top_reason) if top_reason else ""
+    pub_rec = f" (track record {pub_score_100}/100)" if pub_score_100 is not None else ""
     og_description = _trim(
         f"{headline}. " + (f"{top}. " if top else "")
         + "Maat weighs each factual claim against independent reporting — not tone or bias.",
         200,
     )
     twitter_text = _trim(
-        f"I ran “{_trim(analysis.title or 'this article', 64)}” through Maat: {headline}."
+        f"I ran “{_trim(title or 'this article', 64)}” through Maat: {headline}."
         + (f" {top}." if top else "") + " Weigh any article yourself →",
         240,
     )
     linkedin_text = (
         "I checked this article with Maat, which weighs how well a story's factual claims hold "
         "up against independent reporting.\n\n"
-        f"Verdict: {headline}." + (f"\nKey finding: {top}." if top else "")
-        + f"\nPublisher: {pub}{pub_rec}."
+        f"Verdict: {headline}."
+        + (f"\nKey finding: {top}." if top else "")
+        + (f"\nPublisher: {source}{pub_rec}." if source else "")
         + "\n\nMaat weighs claims, not tone or bias. Weigh any article at maat.press/analyse"
     )
     instagram_caption = (
-        f"Maat weighed “{title}”: {headline}." + (f" {top}." if top else "")
+        f"Maat weighed “{disp}”: {headline}." + (f" {top}." if top else "")
         + "\n\nMaat scores how well a news story's factual claims hold up against independent "
         "reporting — not its tone or bias.\n\n"
         "Weigh any article yourself — link in bio (maat.press/analyse)\n\n"
@@ -546,13 +550,37 @@ def share_copy(analysis: ArticleAnalysis, reasons: list[str]) -> dict[str, Any]:
     )
     return {
         "headline": headline,
-        "tally": claim_tally(analysis.facts),
-        "og_title": _trim(f"Maat weighed “{title}”", 90),
+        "tally": tally,
+        "og_title": _trim(f"Maat weighed “{disp}”", 90),
         "og_description": og_description,
         "twitter_text": twitter_text,
         "linkedin_text": linkedin_text,
         "instagram_caption": instagram_caption,
     }
+
+
+def share_copy(analysis: ArticleAnalysis, reasons: list[str]) -> dict[str, Any]:
+    return _build_share(
+        title=analysis.title, source=analysis.source, label=analysis.score.label,
+        score=analysis.score.score, forecast_only=analysis.score.forecast_only,
+        top_reason=reasons[0] if reasons else "",
+        pub_score_100=(round(analysis.publisher_score * 100)
+                       if analysis.publisher_score is not None else None),
+        tally=claim_tally(analysis.facts),
+    )
+
+
+def share_copy_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the share block from a stored public payload — for analyses cached before the
+    share feature shipped, so a shared link to any of them still unfurls + renders a card."""
+    o = payload.get("overall", {})
+    reasons = o.get("reasons") or [""]
+    return _build_share(
+        title=payload.get("title"), source=payload.get("source", ""), label=o.get("label", ""),
+        score=int(o.get("score", 0) or 0), forecast_only=bool(o.get("forecast_only", False)),
+        top_reason=reasons[0], pub_score_100=(payload.get("publisher") or {}).get("score"),
+        tally=_tally_from_verdicts([c.get("verdict", "") for c in payload.get("claims", [])]),
+    )
 
 
 def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
@@ -635,6 +663,10 @@ async def cached_payload(pool: Any, aid: str) -> dict | None:
         return hit[1]
     stored = await _stored_payload(pool, aid)
     if stored is not None:
+        # Backfill the share block for analyses cached before the feature shipped, so a shared
+        # link to any of them still unfurls its OG card + renders the image (which read `share`).
+        if isinstance(stored, dict) and "share" not in stored:
+            stored["share"] = share_copy_from_payload(stored)
         _cache_put(aid, stored)
     return stored
 
