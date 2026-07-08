@@ -1,41 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Analysis, PublicClaim } from "@/lib/types";
+import ShareCard from "./share-card";
 
-// ── the public wire types (serving/analyse.py — verdicts only, never the mechanism) ────────────
-
-type PublicClaim = {
-  text: string;
-  voice: "own" | "attributed";
-  speaker: string | null;
-  central: boolean;
-  extremity: string;
-  score: number;
-  verdict: string;
-  tier: "hi" | "mid" | "lo" | "floor" | "none";
-};
-
-type PublicProjection = { text: string; speaker: string | null; verdict: string };
-
-type Analysis = {
-  analysis_id: string;
-  url: string;
-  source: string;
-  title: string | null;
-  date: string | null;
-  publisher: { domain: string; rated: boolean; score: number | null; review_started?: boolean };
-  overall: {
-    score: number;
-    band: string;
-    label: string;
-    reasons: string[];
-    capped: boolean;
-    forecast_only: boolean;
-  };
-  claims: PublicClaim[];
-  projections: PublicProjection[];
-  scope: string;
-};
+// Wire types (serving/analyse.py — verdicts only, never the mechanism) live in @/lib/types so the
+// page's OG metadata and the card renderer share one definition.
 
 type Skeleton = { text: string; speaker: string | null; central: boolean };
 type ChipState = "queued" | "checking";
@@ -372,6 +342,8 @@ export default function Analyser() {
           </div>
         </section>
       )}
+
+      {analysis && <ShareCard analysis={analysis} />}
     </>
   );
 }

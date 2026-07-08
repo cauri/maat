@@ -296,6 +296,11 @@ services:
     build: ./site
     image: maat-site:local
     restart: unless-stopped
+    environment:
+      # Server-side reads (card image render + per-analysis OG metadata) hit the reader in-cluster,
+      # not back out through Caddy. Public origin is used to build absolute OG image URLs.
+      SITE_API_INTERNAL: "http://reader:8000"
+      SITE_PUBLIC_ORIGIN: "${SITE_PUBLIC_ORIGIN:-https://maat.press}"
     ports:
       - "127.0.0.1:3200:3200"
     depends_on:
