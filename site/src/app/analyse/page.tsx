@@ -23,8 +23,11 @@ export async function generateMetadata({
   if (!a) return base;
   const card = `${PUBLIC_ORIGIN}/card?id=${encodeURIComponent(id)}&format=landscape`;
   const pageUrl = `${PUBLIC_ORIGIN}/analyse?id=${encodeURIComponent(id)}`;
-  const title = a.share.og_title;
-  const description = a.share.og_description;
+  const headline = a.overall.forecast_only ? a.overall.label : `${a.overall.label} · ${a.overall.score}/100`;
+  const title = a.share?.og_title ?? `Maat weighed “${a.title ?? "this article"}”`;
+  const description =
+    a.share?.og_description ??
+    `${headline}. Maat weighs each factual claim against independent reporting — not tone or bias.`;
   return {
     metadataBase: new URL(PUBLIC_ORIGIN),
     title,

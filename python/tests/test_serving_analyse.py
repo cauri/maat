@@ -252,6 +252,50 @@ def test_share_copy_forecast_only_has_no_number():
     assert "/100" not in share["headline"]
 
 
+def test_share_copy_from_payload_rebuilds_from_a_stored_dict():
+    old = {
+        "title": "Bank sold its gold, insider says", "source": "chronicle.example",
+        "publisher": {"domain": "chronicle.example", "rated": True, "score": 74},
+        "overall": {"score": 20, "band": "disqualified", "label": "Fails verification",
+                    "reasons": ["a central significant claim rests on a single unsupported source"],
+                    "forecast_only": False},
+        "claims": [{"verdict": "Only this source so far"}, {"verdict": "Corroborated"},
+                   {"verdict": "Well corroborated"}],
+    }
+    share = sa.share_copy_from_payload(old)
+    assert share["headline"] == "Fails verification · 20/100"
+    assert share["tally"] == {"total": 3, "corroborated": 2, "single_source": 1,
+                              "disputed": 0, "primary": 0}
+    assert "74/100" in share["linkedin_text"]
+    assert "false" not in share["og_description"].lower()
+
+
+def test_cached_payload_backfills_share_for_pre_feature_entries():
+    import asyncio
+
+    sa._RESULTS.clear()
+    old = {
+        "analysis_id": "an-old", "title": "T", "source": "bbc.co.uk",
+        "publisher": {"domain": "bbc.co.uk", "rated": False, "score": None},
+        "overall": {"score": 20, "band": "disqualified", "label": "Fails verification",
+                    "reasons": ["a central significant claim rests on a single unsupported source"],
+                    "capped": False, "forecast_only": False},
+        "claims": [{"verdict": "Only this source so far"}, {"verdict": "Corroborated"}],
+        "analysed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    class Pool(FakePool):
+        async def fetchrow(self, query, *args):
+            if "analysis.completed" in query:
+                return {"data": {"analysis": old}}
+            return None
+
+    got = asyncio.run(sa.cached_payload(Pool(), "an-old"))
+    assert got is not None and "share" in got  # backfilled on read
+    assert got["share"]["headline"] == "Fails verification · 20/100"
+    assert got["share"]["tally"]["total"] == 2
+
+
 def test_public_payload_includes_share_block():
     ok = StoryScore(70, "corroborated", "Corroborated", ["x"], False, False)
     payload = sa.public_payload(_analysis([_reading(central=True)], ok), "an-1")

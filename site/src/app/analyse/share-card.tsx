@@ -56,6 +56,7 @@ export default function ShareCard({ analysis }: { analysis: Analysis }) {
 
   const id = analysis.analysis_id;
   const s = analysis.share;
+  if (!s) return null; // server backfills share on every payload; guard against any gap rather than crash
   // Relative URLs resolve against the current origin in the browser — no origin state needed.
   const landscape = `/card?id=${encodeURIComponent(id)}&format=landscape`;
   const square = `/card?id=${encodeURIComponent(id)}&format=square`;
