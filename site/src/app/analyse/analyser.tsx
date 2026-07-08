@@ -126,8 +126,7 @@ export default function Analyser() {
   const [resolvedCount, setResolvedCount] = useState(0);
   const [dropped, setDropped] = useState(0);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [miniLeaving, setMiniLeaving] = useState(false);
-  const [rowsRevealed, setRowsRevealed] = useState(true);
+  const [morphComplete, setMorphComplete] = useState(false);
   const running = useRef(false);
   const morphed = useRef(false);
   const highlightRefs = useRef<Map<number, HTMLElement>>(new Map());
@@ -158,70 +157,73 @@ export default function Analyser() {
   }, [phase, skeletons.length]);
 
   // The morph: each highlighted claim flies from its spot in the mini-page into its list row.
-  // Reduced-motion or any measurement gap → clean cross-fade instead (never breaks).
+  // All work + state updates run inside a rAF callback (measure after layout; also keeps setState
+  // out of the effect body). Reduced-motion or any measurement gap → clean reveal (never breaks).
   useLayoutEffect(() => {
     if (phase !== "weighing" || morphed.current) return;
     morphed.current = true;
     const stage = stageRef.current;
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const hs = highlightRefs.current;
-    const rs = rowRefs.current;
-    if (reduce || !stage || hs.size === 0 || rs.size === 0) {
-      setMiniLeaving(true);
-      setRowsRevealed(true);
-      return;
-    }
-    setRowsRevealed(false);
-    let base: DOMRect;
-    let pending = 0;
-    let animated = false;
-    try {
-      base = stage.getBoundingClientRect();
-    } catch {
-      setMiniLeaving(true);
-      setRowsRevealed(true);
-      return;
-    }
-    hs.forEach((hEl, i) => {
-      try {
-        const rEl = rs.get(i);
-        if (!rEl) return;
-        const h = hEl.getBoundingClientRect();
-        const r = rEl.getBoundingClientRect();
-        if (h.width === 0 || r.width === 0) return;
-        const chip = document.createElement("div");
-        chip.className = "fly-chip";
-        chip.style.left = `${h.left - base.left}px`;
-        chip.style.top = `${h.top - base.top}px`;
-        chip.style.width = `${h.width}px`;
-        chip.style.height = `${h.height}px`;
-        stage.appendChild(chip);
-        pending++;
-        animated = true;
-        const dx = r.left - base.left - (h.left - base.left);
-        const dy = r.top - base.top - (h.top - base.top);
-        const anim = chip.animate(
-          [
-            { transform: "translate(0,0)", opacity: 0.95 },
-            { transform: `translate(${dx}px, ${dy}px)`, opacity: 0 },
-          ],
-          { duration: 640, delay: i * 65, easing: "cubic-bezier(.5,0,.2,1)", fill: "forwards" },
-        );
-        anim.onfinish = () => {
-          chip.remove();
-          if (--pending === 0) setRowsRevealed(true);
-        };
-      } catch {
-        /* skip this chip — rows still reveal via the safety timer */
+    let timer = 0;
+    const raf = requestAnimationFrame(() => {
+      const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      const hs = highlightRefs.current;
+      const rs = rowRefs.current;
+      if (reduce || !stage || hs.size === 0 || rs.size === 0) {
+        setMorphComplete(true);
+        return;
       }
+      let base: DOMRect;
+      try {
+        base = stage.getBoundingClientRect();
+      } catch {
+        setMorphComplete(true);
+        return;
+      }
+      let pending = 0;
+      let animated = false;
+      hs.forEach((hEl, i) => {
+        try {
+          const rEl = rs.get(i);
+          if (!rEl) return;
+          const h = hEl.getBoundingClientRect();
+          const r = rEl.getBoundingClientRect();
+          if (h.width === 0 || r.width === 0) return;
+          const chip = document.createElement("div");
+          chip.className = "fly-chip";
+          chip.style.left = `${h.left - base.left}px`;
+          chip.style.top = `${h.top - base.top}px`;
+          chip.style.width = `${h.width}px`;
+          chip.style.height = `${h.height}px`;
+          stage.appendChild(chip);
+          pending++;
+          animated = true;
+          const dx = r.left - base.left - (h.left - base.left);
+          const dy = r.top - base.top - (h.top - base.top);
+          const anim = chip.animate(
+            [
+              { transform: "translate(0,0)", opacity: 0.95 },
+              { transform: `translate(${dx}px, ${dy}px)`, opacity: 0 },
+            ],
+            { duration: 640, delay: i * 65, easing: "cubic-bezier(.5,0,.2,1)", fill: "forwards" },
+          );
+          anim.onfinish = () => {
+            chip.remove();
+            if (--pending === 0) setMorphComplete(true);
+          };
+        } catch {
+          /* skip this chip — rows still reveal via the safety timer */
+        }
+      });
+      if (!animated) {
+        setMorphComplete(true);
+        return;
+      }
+      timer = window.setTimeout(() => setMorphComplete(true), 640 + hs.size * 65 + 300);
     });
-    setMiniLeaving(true);
-    if (!animated) {
-      setRowsRevealed(true);
-      return;
-    }
-    const safety = setTimeout(() => setRowsRevealed(true), 640 + hs.size * 65 + 300);
-    return () => clearTimeout(safety);
+    return () => {
+      cancelAnimationFrame(raf);
+      if (timer) clearTimeout(timer);
+    };
   }, [phase]);
 
   const analyse = useCallback(
@@ -241,8 +243,7 @@ export default function Analyser() {
       setChipStates([]);
       setResolvedCount(0);
       setDropped(0);
-      setMiniLeaving(false);
-      setRowsRevealed(true);
+      setMorphComplete(false);
       setActivity("Fetching the article…");
       try {
         const res = await fetch("/api/analyse", {
@@ -348,7 +349,7 @@ export default function Analyser() {
             source={meta?.source ?? ""}
             title={meta?.title ?? null}
             facts={miniFacts}
-            leaving={miniLeaving}
+            leaving={phase === "weighing"}
             registerHighlight={(i, el) => {
               if (el) highlightRefs.current.set(i, el);
               else highlightRefs.current.delete(i);
@@ -406,7 +407,7 @@ export default function Analyser() {
               {dropped} snippet{dropped === 1 ? "" : "s"} discarded — could not be verified against the page text.
             </p>
           )}
-          <div className="card" style={{ opacity: phase === "weighing" && !rowsRevealed ? 0 : 1, transition: "opacity .45s ease" }}>
+          <div className="card" style={{ opacity: phase === "weighing" && !morphComplete ? 0 : 1, transition: "opacity .45s ease" }}>
             {listSkeletons.map((s, i) => (
               <ClaimRow
                 key={i}
