@@ -424,6 +424,37 @@ def test_websearch_verified_contradiction_disputes():
     assert res.live.web_contradicted == 1
 
 
+def test_websearch_co_owned_outlets_collapse_to_one_originator():
+    # Anti-laundering (#41/#254): two verified, entailed sources that are CO-OWNED must roll up to
+    # one independent originator — so web search surfacing several sister outlets can't inflate the
+    # count. Both cite the gold sale (verbatim + entailed); with the ownership map they collapse.
+    from maat.pipeline.identity import canonical_source
+
+    cited = {
+        _PASTED_URL: _BODY,
+        "https://outlet-a.example/gold": _BBC_BODY,   # contains _GOLD_QUOTE_BBC
+        "https://outlet-b.example/gold": _CB_BODY,    # contains _GOLD_QUOTE_CB
+    }
+
+    def fetch(url):
+        b = cited.get(url)
+        return FetchedPage(body=b, title=None, image=None, date="2026-07-06") if b else None
+
+    cites = [
+        Citation("https://outlet-a.example/gold", "outlet-a.example", _GOLD_QUOTE_BBC),
+        Citation("https://outlet-b.example/gold", "outlet-b.example", _GOLD_QUOTE_CB),
+    ]
+    own = {canonical_source("outlet-a.example"): "grpco",
+           canonical_source("outlet-b.example"): "grpco"}
+
+    ungrouped = analyse(web_search=_web_search(cites), fetch=fetch, nli=_nli)
+    grouped = analyse(web_search=_web_search(cites), fetch=fetch, nli=_nli, ownership=own)
+    g_un = next(r for r in ungrouped.facts if r.claim.text == _GOLD)
+    g_gr = next(r for r in grouped.facts if r.claim.text == _GOLD)
+    assert g_un.independent_originators == 3   # pasted + outlet-a + outlet-b
+    assert g_gr.independent_originators == 2    # pasted + (a & b collapsed to one owner)
+
+
 def test_websearch_support_outweighs_a_lone_contradiction():
     # Both an entailing source and a contradicting one: support present → not auto-disputed.
     res = _analyse_ws([

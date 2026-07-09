@@ -340,7 +340,7 @@ def claim_verdict(
 
 def _corpus_reading(
     claim: Claim, body: str, source: str, match: CorpusFact,
-    reputation: Mapping[str, float],
+    reputation: Mapping[str, float], ownership: dict[str, str] | None = None,
 ) -> tuple[ClaimReading, bool]:
     """Fold the pasted article into an existing cluster's read (reprints collapse, an independent
     report counts) and inherit the cluster's extremity/grounding/disputed standing."""
@@ -350,6 +350,7 @@ def _corpus_reading(
         {**match.bodies, _ANALYSED: body},
         match.extremity,
         grounding=match.grounding,
+        ownership=ownership,
     )
     rated = _rep(reputation, source) is not None or any(
         _rep(reputation, s) is not None for grp in match.originator_sources for s in grp
@@ -389,18 +390,23 @@ def _live_reading(
     claim: Claim, body: str, source: str, extremity: str,
     matched_rows: list[ClaimRow], bodies: dict[str, str],
     reputation: Mapping[str, float],
-    *, disputed: bool = False,
+    *, disputed: bool = False, ownership: dict[str, str] | None = None,
 ) -> tuple[ClaimReading, bool]:
     """Fold live-found corroborating claims with the pasted article's own assertion — the same
     §5.5 collapse and §5.6 read the feed uses, over evidence found minutes ago.
 
     ``disputed`` (P14 #381): a verified outside source CONTRADICTS the claim (NLI) and none
     corroborate it — carried through to ``corroborate_fixed`` as ``grounding="contradicted"`` (the
-    read multiplies down) and to the verdict ("Disputed — contradicted by stronger reporting")."""
+    read multiplies down) and to the verdict ("Disputed — contradicted by stronger reporting").
+
+    ``ownership`` (#41/#254): co-owned outlets found live collapse to ONE independent originator —
+    the same anti-laundering rollup the feed applies, so web search surfacing several sister
+    outlets of one group cannot inflate the count."""
     grounding = "contradicted" if disputed else None
     own = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
     cor = corroborate_fixed(
-        [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding
+        [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding,
+        ownership=ownership,
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity,
@@ -624,6 +630,7 @@ def analyse_article(
     url: str,
     *,
     reputation: Mapping[str, float],
+    ownership: dict[str, str] | None = None,
     corpus_lookup: CorpusLookup | None = None,
     web_search: WebSearchFn | None = None,
     nli: NliFn | None = None,
@@ -707,7 +714,7 @@ def analyse_article(
     # Corpus-matched claims resolve instantly.
     for i, m in enumerate(matches):
         if m is not None:
-            resolve(i, _corpus_reading(fact_claims[i], body, source, m, reputation))
+            resolve(i, _corpus_reading(fact_claims[i], body, source, m, reputation, ownership))
 
     # Novel claims: rate extremity (needed for both the lone read and search priority)…
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -788,7 +795,7 @@ def analyse_article(
                     tally["contra"] += 1
             resolve(i, _live_reading(
                 claim, body, source, extremities[i], matched_rows, bodies, reputation,
-                disputed=dispute,
+                disputed=dispute, ownership=ownership,
             ))
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
