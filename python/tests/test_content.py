@@ -213,6 +213,46 @@ def test_zyte_page_falls_back_to_browser_html():
     assert page is not None and "appeals court" in page.body
 
 
+# ── soft-404 / bot-block guard ───────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("title", [
+    "Not Found", "404 | PBS", "We can't find that page", "Access Denied",
+    "403 Forbidden", "Are you a robot?", "Page Not Found",
+])
+def test_soft_404_titles_rejected(title):
+    # A block/404 interstitial with plenty of nav chrome still isn't an article.
+    node = {"@type": "NewsArticle", "headline": title, "articleBody": BODY}
+    assert page_from_downloaded(html_page(jsonld=node), "https://walled.example/s") is None
+
+
+def test_real_headline_mentioning_not_found_is_kept():
+    # False-positive guard: a genuine article whose HEADLINE happens to contain the phrase must
+    # survive — the guard matches the title as an error signal, not any body mention.
+    node = {"@type": "NewsArticle",
+            "headline": "Missing hikers not found after three-day search, rescuers say",
+            "articleBody": BODY}
+    page = page_from_downloaded(html_page(jsonld=node), "https://news.example/s")
+    assert page is not None and page.body == BODY
+
+
+def test_apify_rung_rejects_soft_404_and_falls_through(monkeypatch):
+    monkeypatch.setattr(content, "_fetch_html", lambda url: None)
+
+    class _Art:
+        url, domain, title, image = "u", "d", "404 | PBS", None
+        body = BODY
+
+    from maat.acquire import apify
+    monkeypatch.setattr(apify, "available", lambda: True)
+    monkeypatch.setattr(apify, "search_and_fetch", lambda *a, **k: [_Art()])
+    zyte_called = []
+    monkeypatch.setattr(content, "_fetch_via_zyte",
+                        lambda url, min_chars: zyte_called.append(1) or None)
+    assert fetch_page("https://walled.example/s") is None
+    assert zyte_called  # apify's soft-404 was dropped, ladder advanced to the zyte rung
+
+
 # ── the public seam ──────────────────────────────────────────────────────────────────────────────
 
 
