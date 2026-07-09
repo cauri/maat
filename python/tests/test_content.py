@@ -157,7 +157,7 @@ def test_downloaded_teaser_jsonld_loses_to_fuller_generic_body():
 
 
 def test_ladder_serves_direct_rung(monkeypatch):
-    monkeypatch.setattr(content, "_fetch_html", lambda url: html_page(article_text=BODY))
+    monkeypatch.setattr(content, "_fetch_html", lambda url, **kw: html_page(article_text=BODY))
     monkeypatch.setattr(
         content, "_fetch_via_apify",
         lambda url, min_chars: pytest.fail("apify rung must not run when direct serves"),
@@ -167,7 +167,7 @@ def test_ladder_serves_direct_rung(monkeypatch):
 
 
 def test_ladder_falls_through_to_apify(monkeypatch):
-    monkeypatch.setattr(content, "_fetch_html", lambda url: None)
+    monkeypatch.setattr(content, "_fetch_html", lambda url, **kw: None)
     monkeypatch.setattr(
         content, "_fetch_via_apify",
         lambda url, min_chars: FetchedPage(body=BODY, title="via apify"),
@@ -179,7 +179,7 @@ def test_ladder_falls_through_to_apify(monkeypatch):
 def test_ladder_zyte_inert_without_key_and_last(monkeypatch):
     monkeypatch.delenv("MAAT_ZYTE_API_KEY", raising=False)
     monkeypatch.delenv("ZYTE_API_KEY", raising=False)
-    monkeypatch.setattr(content, "_fetch_html", lambda url: None)
+    monkeypatch.setattr(content, "_fetch_html", lambda url, **kw: None)
     monkeypatch.setattr(content, "_fetch_via_apify", lambda url, min_chars: None)
     calls = []
     monkeypatch.setattr(
@@ -267,7 +267,7 @@ def test_direct_rung_treats_consent_redirect_as_a_wall(monkeypatch):
 
 
 def test_apify_rung_rejects_soft_404_and_falls_through(monkeypatch):
-    monkeypatch.setattr(content, "_fetch_html", lambda url: None)
+    monkeypatch.setattr(content, "_fetch_html", lambda url, **kw: None)
 
     class _Art:
         url, domain, title, image = "u", "d", "404 | PBS", None

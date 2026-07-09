@@ -34,6 +34,7 @@ import socket
 import time
 import traceback
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -549,31 +550,54 @@ def parse_citations(text: str, n: int) -> list[list[Citation]]:
     return out
 
 
+# A single web-search call shares ONE server-side search budget across all its claims, so cramming
+# ~15 claims into one call starves each — the model runs out of searches and central claims come
+# back uncorroborated. Batch into small groups (each gets a full budget) and run the batches in
+# PARALLEL — better coverage AND lower wall-clock (the batches overlap instead of summing).
+_SEARCH_BATCH = int(os.environ.get("MAAT_ANALYSE_SEARCH_BATCH", "4"))
+
+
+def _search_batch(claim_texts: Sequence[str], own_domain: str, blocked: list[str]) -> list[list[Citation]]:
+    """One web-search call over a small batch of claims → per-claim citations (aligned)."""
+    n = len(claim_texts)
+    claims_block = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(claim_texts))
+    prompt = SEARCH_PROMPT.replace("{own_domain}", own_domain or "unknown").replace(
+        "{claims}", claims_block
+    )
+    tool: dict = {
+        "type": _WEB_SEARCH_TOOL_TYPE, "name": "web_search", "max_uses": 3 * n + 2,
+    }
+    if blocked:
+        tool["blocked_domains"] = blocked
+    try:
+        blocks = claude_web_search(prompt, tools=[tool], model=_SEARCH_MODEL)
+    except Exception:  # noqa: BLE001 - a failed batch leaves its claims to the Apify fallback
+        return [[] for _ in range(n)]
+    return parse_citations(_blocks_text(blocks), n)
+
+
 def make_web_search(denied: set[str]):
-    """The pipeline's WebSearchFn: one web-search-enabled Claude call over ALL selected claims →
-    per-claim citations (url + verbatim quote). Blocks the article's own outlet and denied sources
-    at the tool level; the pipeline re-verifies domain, quote, and entailment regardless."""
+    """The pipeline's WebSearchFn: per-claim citations (url + verbatim quote) from web search.
+    Claims are batched (each batch a separate call with its own search budget) and the batches run
+    concurrently. Blocks the article's own outlet + denied sources at the tool level; the pipeline
+    re-verifies domain, quote, and entailment regardless."""
 
     def web_search(claim_texts: Sequence[str], own_domain: str) -> list[list[Citation]]:
         n = len(claim_texts)
         if not n:
             return []
         blocked = sorted({d for d in (own_domain, *denied) if d})
-        claims_block = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(claim_texts))
-        prompt = SEARCH_PROMPT.replace("{own_domain}", own_domain or "unknown").replace(
-            "{claims}", claims_block
-        )
-        tool: dict = {
-            "type": _WEB_SEARCH_TOOL_TYPE, "name": "web_search",
-            "max_uses": min(2 * n + 2, 20),
-        }
-        if blocked:
-            tool["blocked_domains"] = blocked
-        try:
-            blocks = claude_web_search(prompt, tools=[tool], model=_SEARCH_MODEL)
-        except Exception:  # noqa: BLE001 - a failed web-search leaves every claim to the fallback
-            return [[] for _ in range(n)]
-        return parse_citations(_blocks_text(blocks), n)
+        batches = [
+            list(claim_texts[s : s + _SEARCH_BATCH]) for s in range(0, n, _SEARCH_BATCH)
+        ]
+        with ThreadPoolExecutor(max_workers=len(batches)) as ex:
+            results = list(ex.map(
+                lambda b: _search_batch(b, own_domain, blocked), batches
+            ))
+        out: list[list[Citation]] = []
+        for r in results:
+            out.extend(r)
+        return out[:n] + [[] for _ in range(n - len(out))]
 
     return web_search
 

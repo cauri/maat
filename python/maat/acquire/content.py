@@ -79,6 +79,10 @@ def _is_consent_wall(final_url: str) -> bool:
 
 _MAX_HTML_BYTES = 5_000_000          # bound memory on pathological pages
 _FETCH_TIMEOUT = 20.0
+# Quote-verification fetches (#381) are latency-sensitive and best-effort — many per analysis, and a
+# walled/slow one just falls back to the NLI judgement. Cap them tight so one hanging cited page
+# can't stall a claim; the pasted article keeps the full 20s.
+_FAST_FETCH_TIMEOUT = 8.0
 _ZYTE_TIMEOUT = 60.0
 _ZYTE_URL = "https://api.zyte.com/v1/extract"
 
@@ -105,7 +109,7 @@ class FetchedPage:
 # ── rung 1: impersonated fetch ───────────────────────────────────────────────────────────────────
 
 
-def _fetch_html(url: str) -> str | None:
+def _fetch_html(url: str, *, timeout: float = _FETCH_TIMEOUT) -> str | None:
     """Raw page HTML via a Chrome-impersonated client, or None (non-200, non-HTML, no body).
 
     curl_cffi mimics a real browser's TLS + HTTP/2 fingerprint — the cheapest single upgrade
@@ -121,7 +125,7 @@ def _fetch_html(url: str) -> str | None:
         r = curl.get(
             url,
             impersonate="chrome",
-            timeout=_FETCH_TIMEOUT,
+            timeout=timeout,
             allow_redirects=True,
             headers={"Accept-Language": "en;q=0.9, *;q=0.5"},
         )
@@ -447,7 +451,7 @@ def fetch_page(url: str, *, min_chars: int = 200, fast: bool = False) -> Fetched
         )
         return page
 
-    html = _fetch_html(url)
+    html = _fetch_html(url, timeout=_FAST_FETCH_TIMEOUT if fast else _FETCH_TIMEOUT)
     if html:
         page = page_from_downloaded(html, url, min_chars=min_chars)
         if page is not None:
