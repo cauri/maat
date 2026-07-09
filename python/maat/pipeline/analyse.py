@@ -100,6 +100,26 @@ class LiveMeta:
     skipped_claims: int          # novel claims not searched (over the cap) — resolved as lone
     candidates_considered: int   # after dedupe/filters, before the total cap
     candidates_used: int         # actually fetched + claim-extracted
+    # Web-search-path observability (0 on the Apify-only path). Not public — an ops signal for the
+    # audit event (#382): how corroboration was actually reached, and how often it fell back.
+    web_corroborated: int = 0    # claims with >=1 verbatim-verified, NLI-entailed outside source
+    web_contradicted: int = 0    # claims a verified outside source CONTRADICTS (feeds disputed)
+    apify_fallbacks: int = 0     # claims where web-search found nothing → fell back to Apify
+    nli_available: bool = True   # False → NLI model down; web-search corroboration degraded
+
+
+@dataclass(frozen=True)
+class Citation:
+    """One source the web-search pass offers for a claim: a URL and the verbatim passage it says
+    asserts the claim. The passage is UNTRUSTED — the pipeline re-fetches the page through the
+    extraction ladder and checks the quote is really there (``verify_quote``) before an NLI model
+    judges whether it actually entails the claim. The model proposes; deterministic code + NLI
+    decide — which is what stops a topically-similar-but-unrelated passage from reading as
+    agreement (the false-corroboration failure this rebuild fixes)."""
+
+    url: str
+    domain: str
+    quote: str
 
 
 @dataclass(frozen=True)
@@ -145,6 +165,14 @@ CorpusLookup = Callable[[Sequence[str]], Sequence[CorpusFact | None]]
 SearchFn = Callable[[str], list[LiveCandidate]]
 GateFn = Callable[[str, str], str | None]
 ProgressFn = Callable[[str, dict[str, Any]], None]
+# ``WebSearchFn`` is the PRIMARY corroboration seam (P14 #381): one web-search pass over ALL the
+# selected novel claims at once, returning, per claim (aligned with the input order), the outside
+# sources it found — each a Citation (url + verbatim quote). The serving layer implements it with
+# the Anthropic web_search tool; ``own_domain`` is passed so the provider can block the analysed
+# publisher's own pages. ``NliFn`` is the entailment judge (premise, hypothesis) → (label, prob) —
+# an NLI MODEL, not an LLM (cauri's call, #229/#381); None when the model is unavailable.
+WebSearchFn = Callable[[Sequence[str], str], Sequence[Sequence[Citation]]]
+NliFn = Callable[[str, str], tuple[str, float] | None]
 
 
 def _domain(url: str) -> str:
@@ -361,23 +389,146 @@ def _live_reading(
     claim: Claim, body: str, source: str, extremity: str,
     matched_rows: list[ClaimRow], bodies: dict[str, str],
     reputation: Mapping[str, float],
+    *, disputed: bool = False,
 ) -> tuple[ClaimReading, bool]:
     """Fold live-found corroborating claims with the pasted article's own assertion — the same
-    §5.5 collapse and §5.6 read the feed uses, over evidence found minutes ago."""
+    §5.5 collapse and §5.6 read the feed uses, over evidence found minutes ago.
+
+    ``disputed`` (P14 #381): a verified outside source CONTRADICTS the claim (NLI) and none
+    corroborate it — carried through to ``corroborate_fixed`` as ``grounding="contradicted"`` (the
+    read multiplies down) and to the verdict ("Disputed — contradicted by stronger reporting")."""
+    grounding = "contradicted" if disputed else None
     own = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
-    cor = corroborate_fixed([own, *matched_rows], {**bodies, _ANALYSED: body}, extremity)
+    cor = corroborate_fixed(
+        [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding
+    )
     verdict, tier = claim_verdict(
-        cor.confidence, cor.independent_originators, cor.has_primary, extremity
+        cor.confidence, cor.independent_originators, cor.has_primary, extremity,
+        disputed=disputed, grounding=grounding,
     )
     reading = ClaimReading(
         claim=claim, extremity=extremity, confidence=cor.confidence,
         independent_originators=cor.independent_originators, has_primary=cor.has_primary,
-        disputed=False, grounding=None, verdict=verdict, tier=tier, matched_cluster_id=None,
+        disputed=disputed, grounding=grounding, verdict=verdict, tier=tier, matched_cluster_id=None,
     )
     rated = _rep(reputation, source) is not None or any(
         _rep(reputation, r.source) is not None for r in matched_rows
     )
     return reading, rated
+
+
+# ── web-search corroboration (P14 #381): verbatim-verify a cited quote, then NLI-judge it ─────────
+
+
+def verify_quote(quote: str, body: str) -> bool:
+    """The cited passage must actually appear on the page (whitespace/typography-normalised — the
+    SAME fold as the pasted-article span guard). A quote that isn't on the page it names cannot
+    corroborate anything: this guards against a fabricated or mis-attributed citation, exactly as
+    ``verify_spans`` guards the pasted article against prompt-injected 'claims'."""
+    if not quote or not body:
+        return False
+    return _norm(quote) in _norm(body)
+
+
+# NLI id2label of the pinned cross-encoder (pipeline/nli.py): contradiction / entailment / neutral.
+_NLI_ENTAIL = "entailment"
+_NLI_CONTRADICT = "contradiction"
+
+
+def judge_entailment(
+    nli: NliFn | None, quote: str, claim_text: str,
+    *, min_entail: float = 0.5, min_contradict: float = 0.6,
+) -> str:
+    """An NLI MODEL's ruling on whether the cited passage supports the claim: 'entails' |
+    'contradicts' | 'neutral' | 'unknown'.
+
+    Only 'entails' counts as corroboration — this is the gate that stops a topically-similar but
+    unrelated passage (an Australian ankle-monitor ruling vs a French politician's sentence) from
+    being read as agreement, which cosine similarity could not tell apart. cauri's call: an NLI
+    model, not an LLM judge (#229/#381).
+
+    Judged BIDIRECTIONALLY: two independent reports of one fact often frame it differently — one
+    over-specifies ("handed a three-year sentence") where the other reframes ("term reduced to
+    three years") — so neither strictly entails the other, though both assert the same fact. We
+    accept entailment in EITHER direction (validated on real Le Pen coverage: bidirectional lifts
+    recall from 4/6 to 6/7 including cross-language French support, while every unrelated /
+    contradicting pair is still rejected). Contradiction is judged passage→claim only (the natural
+    'does the evidence dispute the claim'). 'unknown' when the model is unavailable — the caller
+    then does NOT count the source (it never trusts the search model's own claim→source mapping)."""
+    if nli is None:
+        return "unknown"
+    forward = nli(quote, claim_text)
+    reverse = nli(claim_text, quote)
+    if forward is None and reverse is None:
+        return "unknown"
+    for res in (forward, reverse):
+        if res is not None and res[0] == _NLI_ENTAIL and res[1] >= min_entail:
+            return "entails"
+    if forward is not None and forward[0] == _NLI_CONTRADICT and forward[1] >= min_contradict:
+        return "contradicts"
+    return "neutral"
+
+
+class _CiteFetch:
+    """Fetch each cited URL at most once across all claims (many claims cite the same page) and
+    cache the ladder body. A ``None`` entry caches a failed fetch so it is not retried."""
+
+    def __init__(self, fetch: Callable[[str], FetchedPage | None]) -> None:
+        self._fetch = fetch
+        self._lock = threading.Lock()
+        self._bodies: dict[str, str | None] = {}
+
+    def body(self, url: str) -> str | None:
+        with self._lock:
+            if url in self._bodies:
+                return self._bodies[url]
+        try:
+            page = self._fetch(url)
+            got = page.body if page and page.body else None
+        except Exception:  # noqa: BLE001 - a dead cited URL drops that source, never the run
+            got = None
+        with self._lock:
+            self._bodies.setdefault(url, got)
+            return self._bodies[url]
+
+
+def _websearch_rows(
+    i: int, claim: Claim, citations: Sequence[Citation], *,
+    url: str, own_canon: str, accept_candidate: Callable[[LiveCandidate], bool] | None,
+    cite_fetch: _CiteFetch, nli: NliFn | None, nli_min: float, contradict_min: float,
+) -> tuple[list[ClaimRow], dict[str, str], bool]:
+    """One claim's web-search corroboration: for each offered citation, exclude the pasted
+    outlet / denied domains, RE-FETCH the page (ladder), require the quote verbatim, then NLI-judge
+    entailment. Returns (corroborating rows, their bodies, contradicted?). Only verbatim-verified,
+    NLI-entailed sources become rows; a verified contradiction sets the flag."""
+    rows: list[ClaimRow] = []
+    bodies: dict[str, str] = {}
+    contradicted = False
+    seen: set[str] = set()
+    for n, cit in enumerate(citations):
+        if not cit.url or cit.url == url or cit.url in seen:
+            continue
+        if canonical_source(cit.domain) == own_canon:
+            continue  # the pasted outlet is not independent of itself
+        if accept_candidate is not None and not accept_candidate(
+            LiveCandidate(url=cit.url, domain=cit.domain, title="", body="")
+        ):
+            continue  # denied source / non-news (prefiltered_reject drops wikis, social, …)
+        body = cite_fetch.body(cit.url)
+        if not body or not verify_quote(cit.quote, body):
+            continue  # fabricated / mis-attributed citation — the quote isn't on the page
+        seen.add(cit.url)
+        verdict = judge_entailment(
+            nli, cit.quote, claim.text, min_entail=nli_min, min_contradict=contradict_min
+        )
+        if verdict == "entails":
+            rows.append(ClaimRow(
+                id=f"cite-{i}-{n}", text=cit.quote, article_id=cit.url, source=cit.domain
+            ))
+            bodies[cit.url] = body
+        elif verdict == "contradicts":
+            contradicted = True
+    return rows, bodies, contradicted
 
 
 def _safe_search(search: SearchFn, query: str) -> list[LiveCandidate]:
@@ -435,11 +586,47 @@ class _LiveShared:
             return self.texts[cand.url]
 
 
+def _apify_rows(
+    i: int, claim: Claim, *,
+    search: SearchFn, extract: Callable[..., list[Claim]],
+    embed: Callable[[list[str]], list[list[float]]], shared: _LiveShared,
+    accept_candidate: Callable[[LiveCandidate], bool] | None, own_canon: str, url: str,
+    same_fact_threshold: float,
+) -> tuple[list[ClaimRow], dict[str, str]]:
+    """The Apify corroboration path for ONE claim — search → read candidates (shared per-URL
+    extraction) → same-fact match at the §5.4 bar. The fallback when web-search finds nothing (and
+    the sole path when no web_search seam is wired — behaviour is byte-identical to before #381)."""
+    found = _safe_search(search, claim.text[:200])
+    usable = [
+        c for c in found
+        if c.body and c.url != url and canonical_source(c.domain) != own_canon
+        and (accept_candidate is None or accept_candidate(c))
+    ]
+    rows: list[ClaimRow] = []
+    for cand in shared.take(usable):
+        texts = shared.extract_once(cand, extract)
+        if not texts:
+            continue
+        rows.extend(
+            ClaimRow(id=f"live-{i}-{n}", text=t, article_id=cand.url, source=cand.domain)
+            for n, t in enumerate(texts)
+        )
+    matched_rows: list[ClaimRow] = []
+    if rows:  # one small same-fact pass for THIS claim (§5.4 bar)
+        vecs = np.asarray(embed([claim.text, *[r.text for r in rows]]), dtype=np.float64)
+        sim = (_unit(vecs[:1]) @ _unit(vecs[1:]).T)[0]
+        matched_rows = [rows[j] for j in np.nonzero(sim >= same_fact_threshold)[0]]
+    bodies = {u: shared.bodies[u] for u in {r.article_id for r in matched_rows}}
+    return matched_rows, bodies
+
+
 def analyse_article(
     url: str,
     *,
     reputation: Mapping[str, float],
     corpus_lookup: CorpusLookup | None = None,
+    web_search: WebSearchFn | None = None,
+    nli: NliFn | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
     gate: GateFn | None = None,
@@ -450,18 +637,26 @@ def analyse_article(
     embed: Callable[[list[str]], list[list[float]]] = mistral_embed,
     language_of: Callable[[str], str] = _detect_language,
     same_fact_threshold: float = 0.82,
+    nli_entail_min: float = 0.5,
+    nli_contradict_min: float = 0.6,
     live_max_searches: int = 10,
     live_max_candidates: int = 18,
     body_max_chars: int = 60_000,
     max_workers: int = 4,
     progress: ProgressFn | None = None,
 ) -> ArticleAnalysis:
-    """Analyse one pasted URL end-to-end. ``corpus_lookup`` inherits existing corroboration;
-    ``search`` corroborates novel claims live (per claim, in parallel — chips resolve as their
-    evidence lands); ``gate`` rejects non-news pages. Any seam may be None (that leg is skipped).
+    """Analyse one pasted URL end-to-end. ``corpus_lookup`` inherits existing corroboration.
 
-    Raises AnalyseError (user-facing message) when the URL yields no article or fails the gate —
-    never a fake score."""
+    Novel claims corroborate LIVE (per claim, in parallel — chips resolve as their evidence lands):
+      * ``web_search`` (PRIMARY, #381) — one pass over all selected novel claims returns cited
+        quotes; each is re-fetched (``fetch`` ladder), verbatim-verified, and NLI-judged (``nli``);
+        only entailed sources count, a verified contradiction disputes.
+      * ``search`` (Apify, FALLBACK) — the per-claim search→extract→cosine path, used when
+        web-search finds nothing for a claim (and the sole path when ``web_search`` is None, which
+        is byte-identical to the pre-#381 behaviour).
+
+    ``gate`` rejects non-news pages. Any seam may be None (that leg is skipped). Raises AnalyseError
+    (user-facing message) when the URL yields no article or fails the gate — never a fake score."""
 
     def emit(kind: str, data: dict[str, Any]) -> None:
         if progress is not None:
@@ -521,11 +716,12 @@ def analyse_article(
         )))
 
     live: LiveMeta | None = None
-    if search is None or not novel_idx:
+    have_live = web_search is not None or search is not None
+    if not have_live or not novel_idx:
         for i in novel_idx:
             resolve(i, _lone_reading(fact_claims[i], body, source, extremities[i], reputation))
-        if search is not None:
-            live = LiveMeta(0, 0, 0, 0)
+        if have_live:
+            live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None)
     else:
         # …then go out to the web for the ones that matter most: central claims first, then by
         # extremity (an extraordinary claim needs the evidence most), then article order.
@@ -540,47 +736,68 @@ def analyse_article(
         emit("searching", {"claims": len(selected)})
 
         own_canon = canonical_source(source)
-        shared = _LiveShared(live_max_candidates)
+        shared = _LiveShared(live_max_candidates)   # Apify path / fallback
+        cite_fetch = _CiteFetch(fetch)              # web-search quote verification (fetch once/URL)
+
+        # ONE web-search pass over all selected claims (#381): per-claim cited quotes, aligned with
+        # `selected`. A failed pass leaves every claim to the Apify fallback below.
+        citations: dict[int, Sequence[Citation]] = {}
+        if web_search is not None:
+            try:
+                results = web_search([fact_claims[i].text for i in selected], source)
+            except Exception:  # noqa: BLE001 - a failed web-search never sinks the analysis
+                results = []
+            for k, i in enumerate(selected):
+                if k < len(results):
+                    citations[i] = results[k]
+
+        tally = {"web": 0, "contra": 0, "fallback": 0}
+        tally_lock = threading.Lock()
 
         def live_one(i: int) -> None:
-            """One claim's whole live journey — search → read candidates → fold → resolve —
-            so its chip lights up the moment its own evidence is weighed."""
+            """One claim's whole live journey — web-search verify+judge (or Apify fallback) → fold
+            → resolve — so its chip lights up the moment its own evidence is weighed."""
             claim = fact_claims[i]
             emit("checking", {"index": i})
-            found = _safe_search(search, claim.text[:200])
-            usable = [
-                c for c in found
-                if c.body and c.url != url and canonical_source(c.domain) != own_canon
-                and (accept_candidate is None or accept_candidate(c))
-            ]
-            rows: list[ClaimRow] = []
-            bodies: dict[str, str] = {}
-            for cand in shared.take(usable):
-                texts = shared.extract_once(cand, extract)
-                if not texts:
-                    continue
-                bodies[cand.url] = cand.body
-                rows.extend(
-                    ClaimRow(id=f"live-{i}-{n}", text=t, article_id=cand.url, source=cand.domain)
-                    for n, t in enumerate(texts)
-                )
             matched_rows: list[ClaimRow] = []
-            if rows:  # one small same-fact pass for THIS claim (§5.4 bar)
-                vecs = np.asarray(embed([claim.text, *[r.text for r in rows]]), dtype=np.float64)
-                sim = (_unit(vecs[:1]) @ _unit(vecs[1:]).T)[0]
-                matched_rows = [rows[j] for j in np.nonzero(sim >= same_fact_threshold)[0]]
+            bodies: dict[str, str] = {}
+            contradicted = False
+            cits = citations.get(i)
+            if cits:
+                matched_rows, bodies, contradicted = _websearch_rows(
+                    i, claim, cits, url=url, own_canon=own_canon,
+                    accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
+                    nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                )
+            if matched_rows:
+                with tally_lock:
+                    tally["web"] += 1
+            elif search is not None:  # web-search found nothing usable → Apify fallback
+                matched_rows, bodies = _apify_rows(
+                    i, claim, search=search, extract=extract, embed=embed, shared=shared,
+                    accept_candidate=accept_candidate, own_canon=own_canon, url=url,
+                    same_fact_threshold=same_fact_threshold,
+                )
+                if matched_rows and web_search is not None:
+                    with tally_lock:
+                        tally["fallback"] += 1
+            # Conservative dispute: a verified outside source contradicts AND none corroborate.
+            dispute = contradicted and not matched_rows
+            if dispute:
+                with tally_lock:
+                    tally["contra"] += 1
             resolve(i, _live_reading(
-                claim, body, source, extremities[i], matched_rows,
-                {u: shared.bodies[u] for u in {r.article_id for r in matched_rows}},
-                reputation,
+                claim, body, source, extremities[i], matched_rows, bodies, reputation,
+                disputed=dispute,
             ))
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             list(ex.map(live_one, selected))
         live = LiveMeta(
             searched_claims=len(selected), skipped_claims=len(skipped),
-            candidates_considered=shared.considered,
-            candidates_used=len(shared.bodies),
+            candidates_considered=shared.considered, candidates_used=len(shared.bodies),
+            web_corroborated=tally["web"], web_contradicted=tally["contra"],
+            apify_fallbacks=tally["fallback"], nli_available=nli is not None,
         )
 
     done = [r for r in readings if r is not None]

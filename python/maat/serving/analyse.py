@@ -34,7 +34,7 @@ import socket
 import time
 import traceback
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -51,6 +51,7 @@ from maat.learning.trajectory import load_trajectory
 from maat.pipeline.analyse import (
     AnalyseError,
     ArticleAnalysis,
+    Citation,
     ClaimReading,
     CorpusFact,
     LiveCandidate,
@@ -59,7 +60,7 @@ from maat.pipeline.analyse import (
 )
 from maat.pipeline.corroborate import ClaimRow
 from maat.pipeline.identity import canonical_source
-from maat.providers.seam import mistral_embed
+from maat.providers.seam import claude_web_search, mistral_embed
 from maat.serving.buildcache import VersionCache, data_version
 from maat.serving.ratelimit import PerIpRateLimiter, client_ip
 from maat.serving.source_flags import denied_sources
@@ -80,6 +81,10 @@ SCOPE_LINE = (
 _TTL_S = int(os.environ.get("MAAT_ANALYSE_TTL", "21600"))          # re-analyse after 6h
 _CONCURRENCY = int(os.environ.get("MAAT_ANALYSE_CONCURRENCY", "2"))  # LLM analyses in flight
 _LIVE = os.environ.get("MAAT_ANALYSE_LIVE", "1") not in ("0", "false", "no")
+# Web-search corroboration (#381) — the primary live path; Apify (_LIVE) is its fallback. On by
+# default; turn off to run Apify-only. web_search_20260209 is available on Sonnet 4.6.
+_WEB_SEARCH = os.environ.get("MAAT_ANALYSE_WEB_SEARCH", "1") not in ("0", "false", "no")
+_SEARCH_MODEL = os.environ.get("MAAT_ANALYSE_SEARCH_MODEL", "claude-sonnet-4-6")
 _GATED = os.environ.get("MAAT_ANALYSE_GATE", "1") not in ("0", "false", "no")
 _MAX_SEARCHES = int(os.environ.get("MAAT_ANALYSE_MAX_SEARCHES", "10"))
 _MAX_CANDIDATES = int(os.environ.get("MAAT_ANALYSE_MAX_CANDIDATES", "18"))
@@ -413,6 +418,157 @@ def make_accept(denied: set[str]):
     return accept
 
 
+# ── web-search corroboration (#381): the PRIMARY live path ──────────────────────────────────────
+#
+# One web-search-enabled call finds, per claim, independent sources + the VERBATIM sentence that
+# asserts it. The pipeline re-fetches each cited page (extraction ladder), checks the quote is
+# really there, then an NLI model judges entailment — the model only proposes; deterministic code +
+# NLI decide. This replaced per-claim Apify search + per-candidate LLM extraction + cosine matching
+# (the "Corroborated · 83" false-positive path). Apify stays wired as the per-claim fallback.
+#
+# ⚠️ PROMPT REVIEW (cauri): this is a NEW in-app agent prompt — a first cut following the repo
+# prompt template (docs/prompt-template.md). Structure/tone up for review before it's treated as
+# locked; it is the canonical seed, overridable later via the prompt store (P8) like the extractor.
+_WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
+
+SEARCH_PROMPT = r"""# ROLE
+
+You are a corroboration researcher for a news-veracity engine. Given the factual claims of ONE
+article, you search the open web for INDEPENDENT reporting that asserts the SAME facts. You do not
+judge whether a claim is true — you find who else reports it and quote them, word for word.
+
+# GOALS
+
+- For each claim, surface independent news sources that state the same fact, each with the exact
+  sentence from that page which asserts it.
+
+# INSTRUCTIONS
+
+1. For each numbered claim, run web searches to find independent news reporting of that fact.
+2. Prefer established news outlets and primary sources (an official body's own release). A source
+   found while checking one claim may support another — reuse it wherever it applies.
+3. For each supporting source, copy ONE sentence VERBATIM from that page — the exact words as they
+   appear, no paraphrase, no ellipsis, no edits, no added or dropped words. If you cannot find a
+   verbatim sentence on the page that asserts the claim, omit that source.
+
+# GUIDELINES
+
+- "Independent" means a DIFFERENT publisher from the article's own outlet. Never return the
+  article's own publisher.
+- A claim may have several supporting sources, or none. Return an empty list for a claim you
+  cannot corroborate — do not stretch to fill it.
+- Match the FACT, not just the topic. A page about a related but different matter is not support.
+
+# GUARDRAILS
+
+- Never invent a URL, a publisher, or a quote. Every quote must be text you actually read on the
+  page at that URL; the engine re-fetches each page and discards any quote it cannot find there.
+- Do not assess truth, tone, or bias; only find who else reports the fact and quote them verbatim.
+- Do not return encyclopedias, wikis, social media, forums, or aggregators.
+
+# OUTPUT FORMAT
+
+A single JSON object and nothing else. Keys are the claim numbers as strings ("1" … "N"); each
+value is an array of objects {"url": string, "domain": string, "quote": string}. The quote is
+verbatim. Use an empty array for claims with no corroboration.
+
+# CONTEXT
+
+## ARTICLE PUBLISHER (never return its own pages)
+
+{own_domain}
+
+## CLAIMS
+
+{claims}
+"""
+
+
+def _domain_of(url: str) -> str:
+    try:
+        return urlparse(url).netloc.removeprefix("www.")
+    except ValueError:
+        return ""
+
+
+def _blocks_text(blocks: list[dict]) -> str:
+    return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+
+
+def parse_citations(text: str, n: int) -> list[list[Citation]]:
+    """Per-claim citations from the model's JSON reply (keys "1".."n"). Tolerant: pulls the JSON
+    object out of any surrounding prose/fences, skips malformed entries, never raises. Missing or
+    junk → an empty list for that claim (the claim then falls back to Apify)."""
+    out: list[list[Citation]] = [[] for _ in range(n)]
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return out
+    try:
+        obj = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return out
+    if not isinstance(obj, dict):
+        return out
+    for key, items in obj.items():
+        try:
+            idx = int(str(key)) - 1
+        except ValueError:
+            continue
+        if not (0 <= idx < n) or not isinstance(items, list):
+            continue
+        cits: list[Citation] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            quote = str(item.get("quote") or "").strip()
+            if not url or not quote:
+                continue
+            domain = str(item.get("domain") or "").strip().removeprefix("www.") or _domain_of(url)
+            cits.append(Citation(url=url, domain=domain, quote=quote))
+        out[idx] = cits
+    return out
+
+
+def make_web_search(denied: set[str]):
+    """The pipeline's WebSearchFn: one web-search-enabled Claude call over ALL selected claims →
+    per-claim citations (url + verbatim quote). Blocks the article's own outlet and denied sources
+    at the tool level; the pipeline re-verifies domain, quote, and entailment regardless."""
+
+    def web_search(claim_texts: Sequence[str], own_domain: str) -> list[list[Citation]]:
+        n = len(claim_texts)
+        if not n:
+            return []
+        blocked = sorted({d for d in (own_domain, *denied) if d})
+        claims_block = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(claim_texts))
+        prompt = SEARCH_PROMPT.replace("{own_domain}", own_domain or "unknown").replace(
+            "{claims}", claims_block
+        )
+        tool: dict = {
+            "type": _WEB_SEARCH_TOOL_TYPE, "name": "web_search",
+            "max_uses": min(2 * n + 2, 20),
+        }
+        if blocked:
+            tool["blocked_domains"] = blocked
+        try:
+            blocks = claude_web_search(prompt, tools=[tool], model=_SEARCH_MODEL)
+        except Exception:  # noqa: BLE001 - a failed web-search leaves every claim to the fallback
+            return [[] for _ in range(n)]
+        return parse_citations(_blocks_text(blocks), n)
+
+    return web_search
+
+
+def make_nli():
+    """The pipeline's NLI seam (entailment judge) — the loaded cross-encoder, or None when the NLI
+    model is unavailable (gated by MAAT_CONTRADICTION_NLI). None → the pipeline does not count
+    web-search citations as corroboration (it never trusts the search model's own mapping) and
+    falls back to Apify; it also flags the degradation in the audit meta."""
+    from maat.pipeline import nli
+
+    return nli.classify_pair if nli.available() else None
+
+
 def make_gate():
     """Reject pages that are not news articles, with a plain answer for the reader.
 
@@ -715,10 +871,14 @@ async def run_analysis(
             ident,                          # identity = canonical when collapsed (correct publisher)
             reputation=assets.reputation,
             corpus_lookup=lookup,
+            web_search=make_web_search(assets.denied) if (_LIVE and _WEB_SEARCH) else None,
+            nli=make_nli(),
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),
             gate=make_gate() if _GATED else None,
-            fetch=lambda _u: page,          # reuse the page we already fetched — never fetch twice
+            # Reuse the already-fetched pasted page for the pasted URL only; cited-page verification
+            # (#381) uses the real extraction ladder for every OTHER URL.
+            fetch=lambda u: page if u == ident else fetch_page(u),
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,

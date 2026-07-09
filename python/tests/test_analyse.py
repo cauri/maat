@@ -263,6 +263,179 @@ def test_progress_events_stream_in_order():
     assert kinds[-1] == "scored"
 
 
+# --- web-search corroboration (#381): verify quote + NLI-judge, not cosine ---------------------
+
+from maat.pipeline.analyse import (  # noqa: E402
+    Citation,
+    judge_entailment,
+    verify_quote,
+)
+
+_PASTED_URL = "https://www.chronicle.example/paris-story"
+_GOLD_QUOTE_BBC = "The central bank has sold about half of its gold reserves"   # verbatim in _BBC_BODY
+_GOLD_QUOTE_CB = "the bank confirms the sale of half its gold reserves"         # verbatim in _CB_BODY
+_ANKLE_BODY = (
+    "The High Court ruled ankle monitors unconstitutional for refugees. Those subject to "
+    "electronic monitoring would have their bracelets removed, the court said."
+)
+_ANKLE_QUOTE = "Those subject to electronic monitoring would have their bracelets removed"
+_DENIAL_BODY = "In a statement the central bank denied selling any gold reserves this year."
+_DENIAL_QUOTE = "the central bank denied selling any gold reserves"
+
+# Cited pages the ladder re-fetches to verify a quote. The pasted URL returns the analysed body.
+_CITED_BODIES = {
+    _PASTED_URL: _BODY,
+    "https://bbc.co.uk/gold": _BBC_BODY,
+    "https://centralbank.gov/report": _CB_BODY,
+    "https://hrlc.org.au/ankle": _ANKLE_BODY,
+    "https://denials.example/gold": _DENIAL_BODY,
+}
+
+
+def _cited_fetch(url):
+    body = _CITED_BODIES.get(url)
+    return FetchedPage(body=body, title=None, image=None, date="2026-07-06") if body else None
+
+
+def _nli(premise, hypothesis):
+    """Stand-in NLI cross-encoder: contradicts when either side denies the sale, else entails when
+    both are about the gold sale, else neutral — the calibrated per-pair judgement a cosine score
+    cannot make. Symmetric, so it behaves the same whichever direction the bidirectional judge
+    calls it."""
+    both = (premise + " " + hypothesis).lower()
+    if "denied" in both or "denies" in both:
+        return ("contradiction", 0.9)
+    if "gold" in premise.lower() and "gold" in hypothesis.lower():
+        return ("entailment", 0.95)
+    return ("neutral", 0.8)
+
+
+def _web_search(citations_for_gold):
+    def search(claim_texts, own_domain):
+        return [list(citations_for_gold) if t == _GOLD else [] for t in claim_texts]
+    return search
+
+
+def _analyse_ws(citations_for_gold, *, nli=_nli, **kw):
+    return analyse(
+        web_search=_web_search(citations_for_gold), fetch=_cited_fetch, nli=nli, **kw
+    )
+
+
+def test_verify_quote_folds_typography_and_rejects_absent():
+    assert verify_quote("the bank’s “gold” reserves", "The bank's \"gold\" reserves fell.")
+    assert not verify_quote("a sentence not on the page", _BBC_BODY)
+    assert not verify_quote("", _BBC_BODY)
+
+
+def test_judge_entailment_labels_and_thresholds():
+    assert judge_entailment(_nli, _GOLD_QUOTE_BBC, _GOLD) == "entails"
+    assert judge_entailment(_nli, _ANKLE_QUOTE, _GOLD) == "neutral"      # topically near, not entailed
+    assert judge_entailment(_nli, _DENIAL_QUOTE, _GOLD) == "contradicts"
+    assert judge_entailment(None, _GOLD_QUOTE_BBC, _GOLD) == "unknown"   # NLI unavailable
+    assert judge_entailment(lambda *_: ("entailment", 0.3), "q", "c", min_entail=0.5) == "neutral"
+
+
+def test_judge_entailment_is_bidirectional():
+    # Same fact, different framing: neither strictly entails the other, so a one-directional judge
+    # would MISS it. Entailment in EITHER direction is accepted (recovers real same-fact support).
+    def entails_only_reverse(premise, hypothesis):
+        return ("entailment", 0.9) if premise == "claim" else ("neutral", 0.95)
+
+    assert judge_entailment(entails_only_reverse, "quote", "claim") == "entails"
+
+    def entails_only_forward(premise, hypothesis):
+        return ("entailment", 0.9) if premise == "quote" else ("neutral", 0.95)
+
+    assert judge_entailment(entails_only_forward, "quote", "claim") == "entails"
+
+
+def test_websearch_entailed_quotes_corroborate():
+    res = _analyse_ws([
+        Citation("https://bbc.co.uk/gold", "bbc.co.uk", _GOLD_QUOTE_BBC),
+        Citation("https://centralbank.gov/report", "centralbank.gov", _GOLD_QUOTE_CB),
+    ])
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 3            # pasted + bbc + central bank
+    assert gold.has_primary is True                     # centralbank.gov is primary
+    assert gold.verdict in ("Corroborated", "Well corroborated")
+    assert res.score.band != "disqualified"             # the extraordinary claim cleared its bar
+    assert res.live.web_corroborated == 1
+    assert res.live.apify_fallbacks == 0
+    assert res.live.nli_available is True
+
+
+def test_websearch_nli_rejects_unrelated_verbatim_quote():
+    # THE false-corroboration kill: the quote IS verbatim on its page (verify passes), but it's
+    # about Australian ankle monitors, not this gold-sale claim. Cosine similarity called this a
+    # match (the "Corroborated · 83" bug); NLI says neutral, so it does NOT corroborate.
+    res = _analyse_ws([Citation("https://hrlc.org.au/ankle", "hrlc.org.au", _ANKLE_QUOTE)],
+                      search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 1            # stayed lone — the false match was rejected
+    assert gold.verdict == "Only this source — below the bar for a extraordinary claim"
+    assert res.score.band == "disqualified"
+    assert res.live.web_corroborated == 0
+
+
+def test_websearch_verbatim_guard_drops_fabricated_quote():
+    # The cited page is real, but the quote is NOT on it — a fabricated/mis-attributed citation.
+    res = _analyse_ws([Citation("https://bbc.co.uk/gold", "bbc.co.uk", "the bank denied it all")],
+                      search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 1            # unverifiable quote → dropped
+    assert res.live.web_corroborated == 0
+
+
+def test_websearch_excludes_own_outlet():
+    res = _analyse_ws([Citation(_PASTED_URL, "chronicle.example", "The central bank secretly sold half its gold")],
+                      search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 1            # the pasted outlet is not independent of itself
+
+
+def test_websearch_falls_back_to_apify_when_empty():
+    # web-search finds nothing for the claim → the Apify search seam rescues it (cauri-approved).
+    res = analyse(web_search=_web_search([]), fetch=_cited_fetch, nli=_nli,
+                  search=live_candidates, accept_candidate=_accept)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 3            # Apify corroborated
+    assert res.live.web_corroborated == 0
+    assert res.live.apify_fallbacks == 1
+
+
+def test_websearch_nli_unavailable_does_not_trust_the_model():
+    # No NLI model → verified quotes are NOT counted (never trust the search model's own mapping);
+    # with no Apify fallback the claim stays honestly lone, and the degradation is reported.
+    res = _analyse_ws([Citation("https://bbc.co.uk/gold", "bbc.co.uk", _GOLD_QUOTE_BBC)],
+                      nli=None, search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 1
+    assert res.live.web_corroborated == 0
+    assert res.live.nli_available is False
+
+
+def test_websearch_verified_contradiction_disputes():
+    res = _analyse_ws([Citation("https://denials.example/gold", "denials.example", _DENIAL_QUOTE)],
+                      search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.disputed is True
+    assert gold.verdict.startswith("Disputed")
+    assert res.live.web_contradicted == 1
+
+
+def test_websearch_support_outweighs_a_lone_contradiction():
+    # Both an entailing source and a contradicting one: support present → not auto-disputed.
+    res = _analyse_ws([
+        Citation("https://bbc.co.uk/gold", "bbc.co.uk", _GOLD_QUOTE_BBC),
+        Citation("https://denials.example/gold", "denials.example", _DENIAL_QUOTE),
+    ], search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.disputed is False
+    assert gold.independent_originators == 2            # pasted + bbc
+    assert res.live.web_contradicted == 0
+
+
 # --- adversarial input (the pasted page is attacker-controlled) ------------------------------
 
 

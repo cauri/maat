@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 import maat.serving.analyse as sa
 from maat.acquire.fetch import FetchedPage
 from maat.learning.story_credibility import StoryScore
-from maat.pipeline.analyse import ArticleAnalysis, ClaimReading, LiveCandidate
+from maat.pipeline.analyse import ArticleAnalysis, Citation, ClaimReading, LiveCandidate
 from maat.pipeline.claim import Claim
 from maat.serving.ratelimit import PerIpRateLimiter
 
@@ -131,6 +131,71 @@ def test_make_accept_filters_junk_and_denied():
     assert accept(ok) is True
     assert accept(junk) is False
     assert accept(denied) is False
+
+
+def test_parse_citations_maps_claims_and_skips_junk():
+    text = (
+        'Here you go:\n{\n'
+        '  "1": [{"url": "https://bbc.com/a", "domain": "www.bbc.com", "quote": "The bank sold gold."},'
+        '        {"url": "", "quote": "missing url — skip"},'
+        '        {"quote": "no url key — skip"}],\n'
+        '  "2": [],\n'
+        '  "9": [{"url": "https://out-of-range.example", "quote": "ignored"}]\n'
+        '}\ntrailing prose.'
+    )
+    cits = sa.parse_citations(text, 2)
+    assert len(cits) == 2
+    assert len(cits[0]) == 1                      # the two malformed entries were skipped
+    assert cits[0][0].url == "https://bbc.com/a"
+    assert cits[0][0].domain == "bbc.com"         # www. stripped
+    assert cits[0][0].quote == "The bank sold gold."
+    assert cits[1] == []                          # out-of-range key ignored
+
+
+def test_parse_citations_survives_non_json():
+    assert sa.parse_citations("no json here", 3) == [[], [], []]
+    assert sa.parse_citations("{not valid json", 2) == [[], []]
+
+
+def test_make_web_search_blocks_own_and_denied_and_parses(monkeypatch):
+    seen = {}
+
+    def fake_search(prompt, *, tools, model, **kw):
+        seen["prompt"] = prompt
+        seen["tool"] = tools[0]
+        seen["model"] = model
+        return [{"type": "text",
+                 "text": '{"1": [{"url": "https://reuters.com/x", "domain": "reuters.com", "quote": "q"}]}'}]
+
+    monkeypatch.setattr(sa, "claude_web_search", fake_search)
+    monkeypatch.setattr(sa, "_SEARCH_MODEL", "claude-sonnet-4-6")
+    ws = sa.make_web_search({"denied.example"})
+    out = ws(["The bank sold gold"], "chronicle.example")
+    assert out == [[Citation("https://reuters.com/x", "reuters.com", "q")]]
+    assert seen["tool"]["type"] == "web_search_20260209"
+    assert set(seen["tool"]["blocked_domains"]) == {"chronicle.example", "denied.example"}
+    assert "chronicle.example" in seen["prompt"]
+    assert "1. The bank sold gold" in seen["prompt"]
+
+
+def test_make_web_search_empty_claims_and_failure(monkeypatch):
+    ws = sa.make_web_search(set())
+    assert ws([], "x") == []
+
+    def boom(*a, **k):
+        raise RuntimeError("search API down")
+
+    monkeypatch.setattr(sa, "claude_web_search", boom)
+    assert sa.make_web_search(set())(["a", "b"], "x") == [[], []]  # failure → all-empty, not a crash
+
+
+def test_make_nli_returns_none_when_model_unavailable(monkeypatch):
+    from maat.pipeline import nli
+
+    monkeypatch.setattr(nli, "available", lambda: False)
+    assert sa.make_nli() is None
+    monkeypatch.setattr(nli, "available", lambda: True)
+    assert sa.make_nli() is nli.classify_pair
 
 
 def test_gate_hard_rejects_non_news_domains_without_llm():
