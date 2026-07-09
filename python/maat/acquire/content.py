@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, replace
 from urllib.parse import urljoin, urlparse
@@ -40,6 +41,26 @@ from trafilatura.metadata import extract_metadata
 log = logging.getLogger("maat.acquire.content")
 # readability-lxml narrates its retries ("ruthless removal did not work") at INFO — ops noise.
 logging.getLogger("readability").setLevel(logging.WARNING)
+
+# Soft-404 / bot-block guard: a hard-walled or dead page often returns HTTP 200 with an error
+# INTERSTITIAL (CNBC "Not Found", "404 | PBS", Reuters "We can't find that page"). trafilatura
+# and the Apify actor extract that chrome as if it were an article — >200 chars of nav that would
+# poison corroboration. A page whose TITLE is an error signal is never a real article; matched on
+# the title only (near-zero false positives — real headlines don't read "404 | Publisher"), so a
+# body that merely mentions "page not found" is untouched.
+_SOFT_404_TITLE = re.compile(
+    r"^\s*(?:404|403|error\s*\d*)\b"                 # leading status code ("404 | PBS")
+    r"|^\s*(?:not\s+found|access\s+denied|forbidden)\s*$"  # title IS the error ("Not Found")
+    r"|\bpage\s+not\s+found\b"                       # the standard phrasing
+    r"|\bcan(?:'|’)?t\s+find\s+that\s+page\b"        # Reuters' block page
+    r"|\b(?:are\s+you\s+a\s+robot|verify\s+you\s+are\s+human)\b",  # bot challenges
+    re.IGNORECASE,
+)
+
+
+def _is_soft_404(page: FetchedPage) -> bool:
+    return bool(page.title and _SOFT_404_TITLE.search(page.title))
+
 
 _MAX_HTML_BYTES = 5_000_000          # bound memory on pathological pages
 _FETCH_TIMEOUT = 20.0
@@ -295,9 +316,16 @@ def page_from_downloaded(html: str, url: str, *, min_chars: int = 200) -> Fetche
         # Truncation guard: some publishers put only a teaser in articleBody. Prefer the
         # generic read when it recovered substantially more of the article.
         if generic is not None and len(generic.body) > 2 * len(structured.body):
-            return _merge(generic, structured)
-        return _merge(structured, generic)
-    return generic
+            page = _merge(generic, structured)
+        else:
+            page = _merge(structured, generic)
+    else:
+        page = generic
+    # A page whose title is an error/block signal is not an article, however much chrome it
+    # extracted — drop it so the ladder falls through to the next rung.
+    if page is not None and _is_soft_404(page):
+        return None
+    return page
 
 
 # ── rung 4: apify re-fetch ───────────────────────────────────────────────────────────────────────
@@ -317,7 +345,11 @@ def _fetch_via_apify(url: str, *, min_chars: int) -> FetchedPage | None:
         return None
     for a in arts:
         if len(a.body) >= min_chars:
-            return FetchedPage(body=a.body, title=a.title or None, image=a.image)
+            page = FetchedPage(body=a.body, title=a.title or None, image=a.image)
+            if _is_soft_404(page):  # Apify renders block/404 interstitials as HTTP 200
+                log.info("fetch rung=apify url=%s soft-404 (title=%r)", url, a.title)
+                return None
+            return page
     return None
 
 
@@ -335,13 +367,15 @@ def zyte_page(data: dict, url: str, *, min_chars: int = 200) -> FetchedPage | No
     art = data.get("article") or {}
     body = art.get("articleBody") or ""
     if isinstance(body, str) and len(body) >= min_chars:
-        return FetchedPage(
+        page = FetchedPage(
             body=body,
             title=_str(art.get("headline")),
             image=_image_url(art.get("mainImage")),
             date=_str(art.get("datePublished")) or _str(art.get("datePublishedRaw")),
             canonical=_str(art.get("canonicalUrl")) or _str(art.get("url")),
         )
+        if not _is_soft_404(page):
+            return page
     html = data.get("browserHtml") or ""
     if isinstance(html, str) and html:
         return page_from_downloaded(html[:_MAX_HTML_BYTES], url, min_chars=min_chars)
