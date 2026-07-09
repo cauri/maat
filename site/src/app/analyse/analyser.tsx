@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Analysis, PublicClaim } from "@/lib/types";
 import MiniPage, { type MiniFact } from "./mini-page";
 import ShareCard from "./share-card";
@@ -14,6 +14,25 @@ type ChipState = "queued" | "checking";
 type Phase = "idle" | "reading" | "weighing" | "done" | "error";
 
 const EXTREMITY_LEVELS = ["routine", "ordinary", "notable", "significant", "extraordinary"];
+const EX_RANK: Record<string, number> = { routine: 0, ordinary: 1, notable: 2, significant: 3, extraordinary: 4 };
+
+// Display order (cauri): most significant first, and within a significance tier the least-supported
+// (lowest score) first. Resolved claims sort; still-weighing claims trail in document order — so
+// each claim rises into its place as it resolves.
+function orderedIndices(claims: (PublicClaim | undefined)[]): number[] {
+  const idx = claims.map((_, i) => i);
+  const resolved = idx.filter((i) => claims[i]);
+  const pending = idx.filter((i) => !claims[i]);
+  resolved.sort((a, b) => {
+    const ca = claims[a]!;
+    const cb = claims[b]!;
+    const byExtremity = (EX_RANK[cb.extremity] ?? 2) - (EX_RANK[ca.extremity] ?? 2);
+    if (byExtremity !== 0) return byExtremity;
+    if (ca.score !== cb.score) return ca.score - cb.score; // least supported first
+    return a - b; // stable
+  });
+  return [...resolved, ...pending];
+}
 
 async function* sseEvents(res: Response): AsyncGenerator<{ event: string; data: unknown }> {
   const reader = res.body!.getReader();
@@ -132,6 +151,7 @@ export default function Analyser() {
   const highlightRefs = useRef<Map<number, HTMLElement>>(new Map());
   const rowRefs = useRef<Map<number, HTMLElement>>(new Map());
   const stageRef = useRef<HTMLDivElement>(null);
+  const prevTops = useRef<Map<number, number>>(new Map());
 
   // A shared link (?id=an-…) renders the stored analysis directly — no reading/weighing.
   useEffect(() => {
@@ -226,6 +246,27 @@ export default function Analyser() {
     };
   }, [phase]);
 
+  // FLIP reorder — as claims resolve and the list re-sorts, rows glide to their new slot rather
+  // than jumping. Runs after every render; a row only animates if its position actually moved.
+  useLayoutEffect(() => {
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    rowRefs.current.forEach((el, i) => {
+      const top = el.offsetTop;
+      const prev = prevTops.current.get(i);
+      if (!reduce && prev !== undefined && Math.abs(prev - top) > 1) {
+        try {
+          el.animate(
+            [{ transform: `translateY(${prev - top}px)` }, { transform: "translateY(0)" }],
+            { duration: 380, easing: "cubic-bezier(.5,0,.2,1)" },
+          );
+        } catch {
+          /* no-op */
+        }
+      }
+      prevTops.current.set(i, top);
+    });
+  });
+
   const analyse = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -234,6 +275,7 @@ export default function Analyser() {
       morphed.current = false;
       highlightRefs.current.clear();
       rowRefs.current.clear();
+      prevTops.current.clear();
       setPhase("reading");
       setError(null);
       setAnalysis(null);
@@ -312,6 +354,7 @@ export default function Analyser() {
     ? analysis.claims.map((c) => ({ text: c.text, speaker: c.speaker, central: c.central, position: 0 }))
     : skeletons;
   const listClaims: (PublicClaim | undefined)[] = analysis ? analysis.claims : claims;
+  const order = useMemo(() => orderedIndices(listClaims), [listClaims]);
   const miniFacts: MiniFact[] = skeletons.map((s) => ({ text: s.text, central: s.central, position: s.position }));
 
   return (
@@ -408,10 +451,10 @@ export default function Analyser() {
             </p>
           )}
           <div className="card" style={{ opacity: phase === "weighing" && !morphComplete ? 0 : 1, transition: "opacity .45s ease" }}>
-            {listSkeletons.map((s, i) => (
+            {order.map((i) => (
               <ClaimRow
                 key={i}
-                skeleton={s}
+                skeleton={listSkeletons[i]}
                 claim={listClaims[i]}
                 state={chipStates[i] ?? "queued"}
                 rowRef={(el) => {
