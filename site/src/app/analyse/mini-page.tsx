@@ -44,7 +44,9 @@ export default function MiniPage({
         <span className="feather-anim" aria-hidden="true">
           ⚖
         </span>
-        {facts.length} claim{facts.length === 1 ? "" : "s"} found
+        {facts.length === 0
+          ? "Reading the article…"
+          : `${facts.length} claim${facts.length === 1 ? "" : "s"} found`}
       </div>
     </div>
   );

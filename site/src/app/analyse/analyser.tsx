@@ -169,10 +169,12 @@ export default function Analyser() {
       .catch(() => {});
   }, []);
 
-  // Once the article is read (claims found + highlighted), tip into weighing.
+  // Once the article is read (claims found + highlighted), tip into weighing — but hold the
+  // highlights on screen a beat so they read (the mini-page has already been scanning through the
+  // fetch, so the reading act has presence rather than flashing by).
   useEffect(() => {
     if (phase !== "reading" || skeletons.length === 0) return;
-    const t = setTimeout(() => setPhase("weighing"), 1200);
+    const t = setTimeout(() => setPhase("weighing"), 2200);
     return () => clearTimeout(t);
   }, [phase, skeletons.length]);
 
@@ -221,10 +223,11 @@ export default function Analyser() {
           const dy = r.top - base.top - (h.top - base.top);
           const anim = chip.animate(
             [
-              { transform: "translate(0,0)", opacity: 0.95 },
+              { transform: "translate(0,0)", opacity: 0.95, offset: 0 },
+              { transform: `translate(${dx * 0.5}px, ${dy * 0.5}px)`, opacity: 0.95, offset: 0.55 },
               { transform: `translate(${dx}px, ${dy}px)`, opacity: 0 },
             ],
-            { duration: 640, delay: i * 65, easing: "cubic-bezier(.5,0,.2,1)", fill: "forwards" },
+            { duration: 900, delay: i * 90, easing: "cubic-bezier(.45,0,.15,1)", fill: "forwards" },
           );
           anim.onfinish = () => {
             chip.remove();
@@ -238,7 +241,7 @@ export default function Analyser() {
         setMorphComplete(true);
         return;
       }
-      timer = window.setTimeout(() => setMorphComplete(true), 640 + hs.size * 65 + 300);
+      timer = window.setTimeout(() => setMorphComplete(true), 900 + hs.size * 90 + 400);
     });
     return () => {
       cancelAnimationFrame(raf);
@@ -348,7 +351,9 @@ export default function Analyser() {
   );
 
   const busy = phase === "reading" || phase === "weighing";
-  const showMini = (phase === "reading" || phase === "weighing") && skeletons.length > 0;
+  // Show the mini-page from the moment we start reading (a scanning shell during the fetch wait),
+  // through the morph; it collapses out (CSS) once weighing begins so it never leaves a gap.
+  const showMini = phase === "reading" || phase === "weighing";
   const showList = phase === "weighing" || phase === "done";
   const listSkeletons = analysis
     ? analysis.claims.map((c) => ({ text: c.text, speaker: c.speaker, central: c.central, position: 0 }))
@@ -392,7 +397,7 @@ export default function Analyser() {
             source={meta?.source ?? ""}
             title={meta?.title ?? null}
             facts={miniFacts}
-            leaving={phase === "weighing"}
+            leaving={phase === "weighing" && morphComplete}
             registerHighlight={(i, el) => {
               if (el) highlightRefs.current.set(i, el);
               else highlightRefs.current.delete(i);
