@@ -405,6 +405,59 @@ def claude_complete(prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int =
         return Reply(text=text, model=model)
 
 
+# Web search is a server-side tool: the model runs several searches server-side within one turn,
+# so the call can take a few minutes. A generous READ timeout (not the 60s judge default) with a
+# tight connect keeps a slow search alive without hanging a dead socket.
+_SEARCH_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
+
+
+def _blocks_text(blocks: list[dict]) -> str:
+    return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+
+
+def claude_web_search(
+    prompt: str, *, tools: list[dict], model: str = CLAUDE_JUDGE, max_tokens: int = 8000,
+    stage: str = "search", max_hops: int = 8,
+) -> list[dict]:
+    """A web-search-enabled Claude turn: run the server-side search tool and return the FINAL
+    assistant message's content blocks (the caller parses text/citations out of them).
+
+    The server runs its own tool loop; if it hits the per-turn iteration limit it stops with
+    ``stop_reason: "pause_turn"`` and we resume by re-sending the accumulated turn (the documented
+    continuation — no extra user message), up to ``max_hops``. Retries/backoff and per-endpoint
+    throttling are inherited from ``_post_json`` / the router, exactly like ``claude_complete``."""
+    ep = _CLAUDE_ROUTER.pick(stage)
+    ep.acquire(max_tokens)
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    content: list[dict] = []
+    in_tok = out_tok = 0
+    with llm_span("search", model, prompt) as span:
+        if span is not None:
+            span.set_attribute("maat.llm.endpoint", ep.name)
+        for _hop in range(max_hops):
+            data = _post_json(
+                ep.url,
+                headers=ep.headers(),
+                payload={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "tools": tools,
+                    "messages": messages,
+                },
+                timeout=_SEARCH_TIMEOUT,
+            )
+            content = data.get("content", []) or []
+            u = data.get("usage", {})
+            in_tok += u.get("input_tokens", 0)
+            out_tok += u.get("output_tokens", 0)
+            if data.get("stop_reason") == "pause_turn":
+                messages = [*messages, {"role": "assistant", "content": content}]
+                continue
+            break
+        record_completion(span, _blocks_text(content), input_tokens=in_tok, output_tokens=out_tok)
+    return content
+
+
 async def claude_stream(
     prompt: str, *, model: str = CLAUDE_JUDGE, max_tokens: int = 1024, stage: str = "default"
 ) -> AsyncIterator[str]:
