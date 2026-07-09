@@ -62,6 +62,21 @@ def _is_soft_404(page: FetchedPage) -> bool:
     return bool(page.title and _SOFT_404_TITLE.search(page.title))
 
 
+# A cookieless fetch of a GDPR-walled publisher is redirected to a consent interstitial rather than
+# the article (Yahoo → consent.yahoo.com/v2/collectConsent; others → cmp./consent. hosts, guce.,
+# a /gdpr or /cookie-consent path). Detected on the FINAL URL so the ladder escalates past it.
+_CONSENT_HOST = re.compile(r"(?:^|\.)(?:consent|guce|cmp|privacy)\.", re.IGNORECASE)
+_CONSENT_PATH = re.compile(r"collectconsent|/gdpr|/consent|cookie[-_]?consent", re.IGNORECASE)
+
+
+def _is_consent_wall(final_url: str) -> bool:
+    try:
+        p = urlparse(final_url)
+    except ValueError:
+        return False
+    return bool(_CONSENT_HOST.search(p.netloc) or _CONSENT_PATH.search(p.path))
+
+
 _MAX_HTML_BYTES = 5_000_000          # bound memory on pathological pages
 _FETCH_TIMEOUT = 20.0
 _ZYTE_TIMEOUT = 60.0
@@ -115,6 +130,12 @@ def _fetch_html(url: str) -> str | None:
         return None
     if r.status_code != 200:
         log.info("fetch rung=curl url=%s status=%s", url, r.status_code)
+        return None
+    if _is_consent_wall(str(r.url)):
+        # GDPR/cookie consent interstitial (Yahoo → consent.yahoo.com/collectConsent, etc.): a
+        # cookieless request is redirected here instead of the article. Treat as a wall so the
+        # ladder escalates to the browser rungs (Zyte renders the consent-accepted article).
+        log.info("fetch rung=curl url=%s consent-wall (final=%s)", url, str(r.url)[:80])
         return None
     ctype = (r.headers.get("content-type") or "").lower()
     if ctype and "html" not in ctype and "xml" not in ctype:
