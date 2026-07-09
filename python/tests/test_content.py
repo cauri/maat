@@ -236,6 +236,36 @@ def test_real_headline_mentioning_not_found_is_kept():
     assert page is not None and page.body == BODY
 
 
+@pytest.mark.parametrize("final,walled", [
+    ("https://consent.yahoo.com/v2/collectConsent?sessionId=3_cc", True),
+    ("https://guce.yahoo.com/consent", True),
+    ("https://cmp.example.com/", True),
+    ("https://www.example.com/cookie-consent", True),
+    ("https://www.example.com/gdpr", True),
+    ("https://www.bbc.com/news/live/c70yk5xjyl1t", False),
+    ("https://www.reuters.com/world/europe/some-article", False),   # 'consent' not a host label
+])
+def test_consent_wall_detection(final, walled):
+    assert content._is_consent_wall(final) is walled
+
+
+def test_direct_rung_treats_consent_redirect_as_a_wall(monkeypatch):
+    # A cookieless fetch redirected to a consent interstitial must NOT be accepted as the article —
+    # _fetch_html returns None so the ladder escalates to the browser rungs.
+    class _Resp:
+        status_code = 200
+        url = "https://consent.yahoo.com/v2/collectConsent?sessionId=3_cc"
+        headers = {"content-type": "text/html"}
+        text = "<html><body>Ihre Privatsphäre ist uns wichtig …</body></html>" * 50
+
+    import sys
+    import types
+    fake = types.ModuleType("curl_cffi")
+    fake.requests = types.SimpleNamespace(get=lambda *a, **k: _Resp())
+    monkeypatch.setitem(sys.modules, "curl_cffi", fake)
+    assert content._fetch_html("https://www.yahoo.com/news/articles/x.html") is None
+
+
 def test_apify_rung_rejects_soft_404_and_falls_through(monkeypatch):
     monkeypatch.setattr(content, "_fetch_html", lambda url: None)
 

@@ -378,13 +378,42 @@ def test_websearch_nli_rejects_unrelated_verbatim_quote():
     assert res.live.web_corroborated == 0
 
 
-def test_websearch_verbatim_guard_drops_fabricated_quote():
-    # The cited page is real, but the quote is NOT on it — a fabricated/mis-attributed citation.
-    res = _analyse_ws([Citation("https://bbc.co.uk/gold", "bbc.co.uk", "the bank denied it all")],
-                      search=None)
+def test_websearch_keeps_entailed_quote_on_unfetchable_page():
+    # Recall fix (#381): a bot-walled publisher we cannot re-fetch must NOT lose its corroboration
+    # — an NLI-entailed quote on an unfetchable page is kept on the NLI judgement alone. (The URL
+    # isn't in the fetch fixture, so the ladder returns None.)
+    res = _analyse_ws(
+        [Citation("https://walled.example/gold", "walled.example",
+                  "The central bank has sold about half of its gold reserves")],
+        search=None,
+    )
     gold = next(r for r in res.facts if r.claim.text == _GOLD)
-    assert gold.independent_originators == 1            # unverifiable quote → dropped
+    assert gold.independent_originators == 2            # pasted + the walled (NLI-verified) source
+    assert res.live.web_corroborated == 1
+
+
+def test_websearch_grounding_drops_misattributed_quote():
+    # Anti-fabrication: when we DO fetch the page and the quote's content is wholly absent from it,
+    # the citation is a mis-attribution and is dropped — even though NLI (here forced) entails it.
+    always_entails = lambda p, h: ("entailment", 0.95)  # noqa: E731
+    res = _analyse_ws(
+        [Citation("https://bbc.co.uk/gold", "bbc.co.uk",
+                  "Parliament debated fishing quotas near the Hebrides on Thursday")],
+        nli=always_entails, search=None,
+    )
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 1            # fetched _BBC_BODY, quote absent → dropped
     assert res.live.web_corroborated == 0
+
+
+def test_quote_grounded_relaxed_match():
+    from maat.pipeline.analyse import quote_grounded
+
+    body = "The central bank has sold about half of its gold reserves over recent months."
+    assert quote_grounded("The central bank has sold about half of its gold reserves", body)  # verbatim
+    assert quote_grounded("central bank sold half its gold reserves in recent months", body)   # reworded
+    assert not quote_grounded("Parliament debated fishing quotas near the Hebrides", body)      # unrelated
+    assert not quote_grounded("", body)
 
 
 def test_websearch_excludes_own_outlet():
@@ -422,6 +451,37 @@ def test_websearch_verified_contradiction_disputes():
     assert gold.disputed is True
     assert gold.verdict.startswith("Disputed")
     assert res.live.web_contradicted == 1
+
+
+def test_websearch_co_owned_outlets_collapse_to_one_originator():
+    # Anti-laundering (#41/#254): two verified, entailed sources that are CO-OWNED must roll up to
+    # one independent originator — so web search surfacing several sister outlets can't inflate the
+    # count. Both cite the gold sale (verbatim + entailed); with the ownership map they collapse.
+    from maat.pipeline.identity import canonical_source
+
+    cited = {
+        _PASTED_URL: _BODY,
+        "https://outlet-a.example/gold": _BBC_BODY,   # contains _GOLD_QUOTE_BBC
+        "https://outlet-b.example/gold": _CB_BODY,    # contains _GOLD_QUOTE_CB
+    }
+
+    def fetch(url):
+        b = cited.get(url)
+        return FetchedPage(body=b, title=None, image=None, date="2026-07-06") if b else None
+
+    cites = [
+        Citation("https://outlet-a.example/gold", "outlet-a.example", _GOLD_QUOTE_BBC),
+        Citation("https://outlet-b.example/gold", "outlet-b.example", _GOLD_QUOTE_CB),
+    ]
+    own = {canonical_source("outlet-a.example"): "grpco",
+           canonical_source("outlet-b.example"): "grpco"}
+
+    ungrouped = analyse(web_search=_web_search(cites), fetch=fetch, nli=_nli)
+    grouped = analyse(web_search=_web_search(cites), fetch=fetch, nli=_nli, ownership=own)
+    g_un = next(r for r in ungrouped.facts if r.claim.text == _GOLD)
+    g_gr = next(r for r in grouped.facts if r.claim.text == _GOLD)
+    assert g_un.independent_originators == 3   # pasted + outlet-a + outlet-b
+    assert g_gr.independent_originators == 2    # pasted + (a & b collapsed to one owner)
 
 
 def test_websearch_support_outweighs_a_lone_contradiction():

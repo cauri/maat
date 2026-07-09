@@ -60,6 +60,7 @@ from maat.pipeline.analyse import (
 )
 from maat.pipeline.corroborate import ClaimRow
 from maat.pipeline.identity import canonical_source
+from maat.pipeline.ownership import fold_ownership
 from maat.providers.seam import claude_web_search, mistral_embed
 from maat.serving.buildcache import VersionCache, data_version
 from maat.serving.ratelimit import PerIpRateLimiter, client_ip
@@ -222,6 +223,7 @@ class _Assets:
     embeds: np.ndarray | None               # rows aligned with ``facts`` (None → corpus leg off)
     reputation: dict[str, float]            # rated sources only (truth-over-time)
     denied: set[str]                        # operator-denied sources (#187)
+    ownership: dict[str, str]               # canonical source -> ownership group (#41/#254)
 
 
 _ASSETS_CACHE = VersionCache(maxsize=2)
@@ -245,6 +247,17 @@ async def _load_assets(pool: Any) -> _Assets:
     art_rows = await pool.fetch("select id, source from articles")
     flag_rows = await pool.fetch(
         "select data from events where type = 'admin.source.flagged' order by id"
+    )
+    # Ownership grouping (#41/#254): co-owned outlets collapse to one independent originator — the
+    # SAME anti-laundering rollup the feed's corroborate agent applies. Auto-resolved Wikidata graph
+    # UNDER the operator's manual groups, which override it (a wrong auto-merge would hide real
+    # corroboration, so the operator always wins).
+    owner_rows = await pool.fetch(
+        "select data from events where type = 'source.ownership.resolved' order by id"
+    )
+    grouped_rows = await pool.fetch(
+        "select distinct on (data->>'source') data->>'source' s, data->>'group' g "
+        "from events where type = 'admin.source.grouped' order by data->>'source', id desc"
     )
     # Latest English pivot per claim (#240) — same bounded distinct-on read as stories (#283).
     pivot_rows = await pool.fetch(
@@ -307,12 +320,18 @@ async def _load_assets(pool: Any) -> _Assets:
     for canon, (_n, score) in best.items():
         reputation.setdefault(canon, score)
 
+    auto_owner = fold_ownership(
+        json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in owner_rows
+    )
+    manual_owner = {canonical_source(r["s"]): r["g"] for r in grouped_rows if r["s"] and r["g"]}
+
     assets = _Assets(
         facts=facts,
         claim_ids=claim_ids,
         embeds=embeds,
         reputation=reputation,
         denied=denied_sources([r["data"] for r in flag_rows]),
+        ownership={**auto_owner, **manual_owner},   # manual overrides auto
     )
     _ASSETS_CACHE.put("assets", version, assets)
     return assets
@@ -870,6 +889,7 @@ async def run_analysis(
             analyse_article,
             ident,                          # identity = canonical when collapsed (correct publisher)
             reputation=assets.reputation,
+            ownership=assets.ownership,
             corpus_lookup=lookup,
             web_search=make_web_search(assets.denied) if (_LIVE and _WEB_SEARCH) else None,
             nli=make_nli(),
@@ -877,8 +897,9 @@ async def run_analysis(
             accept_candidate=make_accept(assets.denied),
             gate=make_gate() if _GATED else None,
             # Reuse the already-fetched pasted page for the pasted URL only; cited-page verification
-            # (#381) uses the real extraction ladder for every OTHER URL.
-            fetch=lambda u: page if u == ident else fetch_page(u),
+            # (#381) uses the FAST ladder rungs for every OTHER URL (no Apify/Zyte per cited URL —
+            # a walled citation falls back to the NLI judgement rather than paying the slow rungs).
+            fetch=lambda u: page if u == ident else fetch_page(u, fast=True),
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,

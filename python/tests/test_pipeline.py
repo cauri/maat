@@ -427,6 +427,30 @@ def test_corroborate_fixed_collapses_wire_then_reads_confidence():
     assert corr.confidence == confidence_read(2, False, "notable")
 
 
+def test_corroborate_fixed_applies_ownership_collapse():
+    # #41/#254 anti-laundering: two DIFFERENT co-owned outlets (distinct bodies, distinct sources —
+    # no lexical/cascade/canonical signal) must collapse to ONE independent originator when the
+    # ownership map groups them. Previously corroborate_fixed dropped the ownership arg entirely.
+    from maat.pipeline.corroborate import ClaimRow, corroborate_fixed
+    from maat.pipeline.identity import canonical_source
+
+    bodies = {
+        "sky": "The council approved the budget on Monday, a spokesperson said.",
+        "times": "Councillors passed the spending plan this week, the authority confirmed.",
+    }
+    claims = [
+        ClaimRow(id="11111111-0000-0000-0000-000000000001", text="budget approved",
+                 article_id="sky", source="skynews.com"),
+        ClaimRow(id="22222222-0000-0000-0000-000000000002", text="budget approved",
+                 article_id="times", source="thetimes.co.uk"),
+    ]
+    ownership = {canonical_source("skynews.com"): "newscorp",
+                 canonical_source("thetimes.co.uk"): "newscorp"}
+    assert corroborate_fixed(claims, bodies, "notable").independent_originators == 2  # ungrouped
+    assert corroborate_fixed(claims, bodies, "notable",
+                             ownership=ownership).independent_originators == 1  # co-owned → one
+
+
 def test_corroborate_fixed_honours_primary_and_carried_extremity():
     from maat.pipeline.corroborate import ClaimRow, confidence_read, corroborate_fixed
 

@@ -486,7 +486,9 @@ def corroborate_fixed(
         raise ValueError("corroborate_fixed needs at least one claim")
     art_source = {c.article_id: c.source for c in claims}
     article_ids = list(dict.fromkeys(c.article_id for c in claims))
-    groups_idx = collapse_originators(article_ids, bodies, art_source, duplicate_source_threshold)
+    groups_idx = collapse_originators(
+        article_ids, bodies, art_source, duplicate_source_threshold, ownership=ownership
+    )
     originators = [[article_ids[i] for i in g] for g in groups_idx]
     ind = len(originators)
     eff = effective_originators(originators, bodies, art_source)

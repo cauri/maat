@@ -340,7 +340,7 @@ def claim_verdict(
 
 def _corpus_reading(
     claim: Claim, body: str, source: str, match: CorpusFact,
-    reputation: Mapping[str, float],
+    reputation: Mapping[str, float], ownership: dict[str, str] | None = None,
 ) -> tuple[ClaimReading, bool]:
     """Fold the pasted article into an existing cluster's read (reprints collapse, an independent
     report counts) and inherit the cluster's extremity/grounding/disputed standing."""
@@ -350,6 +350,7 @@ def _corpus_reading(
         {**match.bodies, _ANALYSED: body},
         match.extremity,
         grounding=match.grounding,
+        ownership=ownership,
     )
     rated = _rep(reputation, source) is not None or any(
         _rep(reputation, s) is not None for grp in match.originator_sources for s in grp
@@ -389,18 +390,23 @@ def _live_reading(
     claim: Claim, body: str, source: str, extremity: str,
     matched_rows: list[ClaimRow], bodies: dict[str, str],
     reputation: Mapping[str, float],
-    *, disputed: bool = False,
+    *, disputed: bool = False, ownership: dict[str, str] | None = None,
 ) -> tuple[ClaimReading, bool]:
     """Fold live-found corroborating claims with the pasted article's own assertion — the same
     §5.5 collapse and §5.6 read the feed uses, over evidence found minutes ago.
 
     ``disputed`` (P14 #381): a verified outside source CONTRADICTS the claim (NLI) and none
     corroborate it — carried through to ``corroborate_fixed`` as ``grounding="contradicted"`` (the
-    read multiplies down) and to the verdict ("Disputed — contradicted by stronger reporting")."""
+    read multiplies down) and to the verdict ("Disputed — contradicted by stronger reporting").
+
+    ``ownership`` (#41/#254): co-owned outlets found live collapse to ONE independent originator —
+    the same anti-laundering rollup the feed applies, so web search surfacing several sister
+    outlets of one group cannot inflate the count."""
     grounding = "contradicted" if disputed else None
     own = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
     cor = corroborate_fixed(
-        [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding
+        [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding,
+        ownership=ownership,
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity,
@@ -421,13 +427,36 @@ def _live_reading(
 
 
 def verify_quote(quote: str, body: str) -> bool:
-    """The cited passage must actually appear on the page (whitespace/typography-normalised — the
-    SAME fold as the pasted-article span guard). A quote that isn't on the page it names cannot
-    corroborate anything: this guards against a fabricated or mis-attributed citation, exactly as
-    ``verify_spans`` guards the pasted article against prompt-injected 'claims'."""
+    """The cited passage appears on the page verbatim (whitespace/typography-normalised — the SAME
+    fold as the pasted-article span guard)."""
     if not quote or not body:
         return False
     return _norm(quote) in _norm(body)
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {w for w in _norm(text).split() if len(w) >= 4}
+
+
+def quote_grounded(quote: str, body: str, *, min_overlap: float = 0.6) -> bool:
+    """Is the cited quote grounded in the page we fetched? Verbatim, OR most of its content words
+    are present (token overlap ≥ ``min_overlap``).
+
+    RELAXED on purpose (#381): the search model quotes the page as ANTHROPIC fetched it, but our
+    re-fetch is often a different rendering (a bot-wall variant, a live-updated article, a consent
+    trim) — real coverage of the Le Pen sentencing was being dropped because the exact sentence
+    differed by a word. This is a best-effort anti-fabrication check, not the primary gate (NLI is):
+    it catches a quote whose content is wholly absent from the page (mis-attributed / fabricated)
+    while tolerating rendering drift. A page we CANNOT fetch is judged on NLI alone, never dropped
+    for being unfetchable."""
+    if not quote or not body:
+        return False
+    if verify_quote(quote, body):
+        return True
+    qt = _content_tokens(quote)
+    if not qt:
+        return False
+    return len(qt & _content_tokens(body)) / len(qt) >= min_overlap
 
 
 # NLI id2label of the pinned cross-encoder (pipeline/nli.py): contradiction / entailment / neutral.
@@ -497,10 +526,13 @@ def _websearch_rows(
     url: str, own_canon: str, accept_candidate: Callable[[LiveCandidate], bool] | None,
     cite_fetch: _CiteFetch, nli: NliFn | None, nli_min: float, contradict_min: float,
 ) -> tuple[list[ClaimRow], dict[str, str], bool]:
-    """One claim's web-search corroboration: for each offered citation, exclude the pasted
-    outlet / denied domains, RE-FETCH the page (ladder), require the quote verbatim, then NLI-judge
-    entailment. Returns (corroborating rows, their bodies, contradicted?). Only verbatim-verified,
-    NLI-entailed sources become rows; a verified contradiction sets the flag."""
+    """One claim's web-search corroboration. For each offered citation: exclude the pasted outlet /
+    denied domains, then NLI-JUDGE the quote against the claim (the hard gate — entailment counts,
+    contradiction disputes, everything else drops). An NLI-entailed source is then re-fetched
+    best-effort (FAST rungs only) and dropped ONLY if we got a body the quote is wholly absent from
+    (``quote_grounded``); a page we cannot fetch is kept on the NLI judgement — real corroboration
+    is never lost just because a publisher is hard to fetch. Returns (rows, their bodies,
+    contradicted?). The fold body is the fetched page when available, else the quote itself."""
     rows: list[ClaimRow] = []
     bodies: dict[str, str] = {}
     contradicted = False
@@ -514,20 +546,22 @@ def _websearch_rows(
             LiveCandidate(url=cit.url, domain=cit.domain, title="", body="")
         ):
             continue  # denied source / non-news (prefiltered_reject drops wikis, social, …)
-        body = cite_fetch.body(cit.url)
-        if not body or not verify_quote(cit.quote, body):
-            continue  # fabricated / mis-attributed citation — the quote isn't on the page
         seen.add(cit.url)
         verdict = judge_entailment(
             nli, cit.quote, claim.text, min_entail=nli_min, min_contradict=contradict_min
         )
-        if verdict == "entails":
-            rows.append(ClaimRow(
-                id=f"cite-{i}-{n}", text=cit.quote, article_id=cit.url, source=cit.domain
-            ))
-            bodies[cit.url] = body
-        elif verdict == "contradicts":
+        if verdict == "contradicts":
             contradicted = True
+            continue
+        if verdict != "entails":
+            continue  # neutral / unknown — never trust the search model's own mapping
+        body = cite_fetch.body(cit.url)  # best-effort; None when the publisher is walled
+        if body is not None and not quote_grounded(cit.quote, body):
+            continue  # fetched, but the quote's content isn't on the page → mis-attributed
+        rows.append(ClaimRow(
+            id=f"cite-{i}-{n}", text=cit.quote, article_id=cit.url, source=cit.domain
+        ))
+        bodies[cit.url] = body or cit.quote
     return rows, bodies, contradicted
 
 
@@ -624,6 +658,7 @@ def analyse_article(
     url: str,
     *,
     reputation: Mapping[str, float],
+    ownership: dict[str, str] | None = None,
     corpus_lookup: CorpusLookup | None = None,
     web_search: WebSearchFn | None = None,
     nli: NliFn | None = None,
@@ -707,7 +742,7 @@ def analyse_article(
     # Corpus-matched claims resolve instantly.
     for i, m in enumerate(matches):
         if m is not None:
-            resolve(i, _corpus_reading(fact_claims[i], body, source, m, reputation))
+            resolve(i, _corpus_reading(fact_claims[i], body, source, m, reputation, ownership))
 
     # Novel claims: rate extremity (needed for both the lone read and search priority)…
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -788,7 +823,7 @@ def analyse_article(
                     tally["contra"] += 1
             resolve(i, _live_reading(
                 claim, body, source, extremities[i], matched_rows, bodies, reputation,
-                disputed=dispute,
+                disputed=dispute, ownership=ownership,
             ))
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
