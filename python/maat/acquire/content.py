@@ -405,12 +405,18 @@ def _fetch_via_zyte(url: str, *, min_chars: int) -> FetchedPage | None:
 # ── the ladder ───────────────────────────────────────────────────────────────────────────────────
 
 
-def fetch_page(url: str, *, min_chars: int = 200) -> FetchedPage | None:
+def fetch_page(url: str, *, min_chars: int = 200, fast: bool = False) -> FetchedPage | None:
     """Download `url` → FetchedPage, or None if every rung fails or the text is too thin.
 
     Cheap-deterministic first, hostile-capable last; the serving rung is logged per URL so
     fetch failures are visible in ops instead of silently starving corroboration (the Le Pen
-    failure mode)."""
+    failure mode).
+
+    ``fast`` stops after the direct rung (curl + JSON-LD + trafilatura) — no Apify, no Zyte. Used
+    for corroboration-QUOTE verification (#381), where a walled page just falls back to the NLI
+    judgement rather than paying the slow hostile rungs on many cited URLs per analysis (those rungs
+    were what pushed a live analysis past ten minutes). The pasted article still gets the full
+    ladder."""
     t0 = time.monotonic()
 
     def served(rung: str, page: FetchedPage) -> FetchedPage:
@@ -426,6 +432,9 @@ def fetch_page(url: str, *, min_chars: int = 200) -> FetchedPage | None:
         if page is not None:
             return served("direct", page)
         log.info("fetch url=%s rung=direct fetched html=%d but no article body", url, len(html))
+
+    if fast:
+        return None
 
     page = _fetch_via_apify(url, min_chars=min_chars)
     if page is not None:

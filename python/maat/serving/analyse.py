@@ -897,8 +897,9 @@ async def run_analysis(
             accept_candidate=make_accept(assets.denied),
             gate=make_gate() if _GATED else None,
             # Reuse the already-fetched pasted page for the pasted URL only; cited-page verification
-            # (#381) uses the real extraction ladder for every OTHER URL.
-            fetch=lambda u: page if u == ident else fetch_page(u),
+            # (#381) uses the FAST ladder rungs for every OTHER URL (no Apify/Zyte per cited URL —
+            # a walled citation falls back to the NLI judgement rather than paying the slow rungs).
+            fetch=lambda u: page if u == ident else fetch_page(u, fast=True),
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,
