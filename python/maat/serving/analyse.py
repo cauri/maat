@@ -90,6 +90,11 @@ _LIVE = os.environ.get("MAAT_ANALYSE_LIVE", "1") not in ("0", "false", "no")
 # default; turn off to run Apify-only. web_search_20260209 is available on Sonnet 4.6.
 _WEB_SEARCH = os.environ.get("MAAT_ANALYSE_WEB_SEARCH", "1") not in ("0", "false", "no")
 _SEARCH_MODEL = os.environ.get("MAAT_ANALYSE_SEARCH_MODEL", "claude-sonnet-4-6")
+# NLI entailment gate thresholds (#389) — tunable in prod without a deploy once the web_neutral
+# recall-drift signal shows whether the gate is too strict. Model swap is the other lever
+# (MAAT_NLI_MODEL, in pipeline/nli.py).
+_NLI_ENTAIL_MIN = float(os.environ.get("MAAT_ANALYSE_NLI_ENTAIL_MIN", "0.5"))
+_NLI_CONTRADICT_MIN = float(os.environ.get("MAAT_ANALYSE_NLI_CONTRADICT_MIN", "0.6"))
 _GATED = os.environ.get("MAAT_ANALYSE_GATE", "1") not in ("0", "false", "no")
 _MAX_SEARCHES = int(os.environ.get("MAAT_ANALYSE_MAX_SEARCHES", "10"))
 _MAX_CANDIDATES = int(os.environ.get("MAAT_ANALYSE_MAX_CANDIDATES", "18"))
@@ -806,6 +811,7 @@ def ops_meta(analysis: ArticleAnalysis, *, secs: float | None = None) -> dict[st
             "candidates_used": lv.candidates_used,
             "web_corroborated": lv.web_corroborated,
             "web_contradicted": lv.web_contradicted,
+            "web_neutral": lv.web_neutral,
             "apify_fallbacks": lv.apify_fallbacks,
             "nli_available": lv.nli_available,
         }
@@ -955,6 +961,8 @@ async def run_analysis(
             # (#381) uses the FAST ladder rungs for every OTHER URL (no Apify/Zyte per cited URL —
             # a walled citation falls back to the NLI judgement rather than paying the slow rungs).
             fetch=lambda u: page if u == ident else fetch_page(u, fast=True),
+            nli_entail_min=_NLI_ENTAIL_MIN,
+            nli_contradict_min=_NLI_CONTRADICT_MIN,
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,

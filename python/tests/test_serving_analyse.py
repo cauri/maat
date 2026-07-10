@@ -258,7 +258,7 @@ def test_ops_meta_carries_coverage_never_the_public_payload(monkeypatch):
     _patch_page(monkeypatch)
     live = LiveMeta(searched_claims=5, skipped_claims=1, candidates_considered=9,
                     candidates_used=4, web_corroborated=3, web_contradicted=1,
-                    apify_fallbacks=2, nli_available=True)
+                    web_neutral=2, apify_fallbacks=2, nli_available=True)
     analysis = _analysis([_reading(central=True, matched_cluster_id=None)],
                          StoryScore(58, "developing", "Developing", [], False, False),
                          publisher_score=0.8, live=live, dropped_claims=2)
@@ -285,7 +285,7 @@ def test_ops_meta_carries_coverage_never_the_public_payload(monkeypatch):
     assert ops["live"] == {
         "searched_claims": 5, "skipped_claims": 1, "candidates_considered": 9,
         "candidates_used": 4, "web_corroborated": 3, "web_contradicted": 1,
-        "apify_fallbacks": 2, "nli_available": True,
+        "web_neutral": 2, "apify_fallbacks": 2, "nli_available": True,
     }
     # the public payload (served + cached) carries no ops block and no coverage numbers
     assert "ops" not in payload
