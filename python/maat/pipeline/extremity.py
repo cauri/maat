@@ -35,9 +35,13 @@ how surprising it would be before any evidence.
 # GUIDELINES (lowest to highest prior-implausibility)
 
 - routine — happens constantly and is near-always reported accurately; nothing rides on it being
-  wrong ("markets opened", "the council met", "the index closed lower").
+  wrong ("markets opened", "the council met", "the index closed lower"). Also a WELL-ESTABLISHED
+  background fact — common knowledge or settled science stated in passing ("Ebola spreads through
+  bodily fluids", "there is no approved vaccine for that strain", "the country has no coastline").
 - ordinary — normal hard news, an expected kind of event for its context ("a minister gave a
-  policy speech", "the central bank held rates", "a company reported quarterly earnings").
+  policy speech", "the central bank held rates", "a company reported quarterly earnings"). Also an
+  EXPECTED development within an already-reported situation ("the outbreak's case count rose",
+  "aid agencies warned health workers are at risk", "the death toll climbed as the crisis continued").
 - notable — consequential or mildly surprising, but unremarkable that it happened ("a minister
   resigned", "merger talks collapsed", "a factory closed with job losses").
 - significant — surprising and serious, or contested; a reasonable reader would want it
@@ -50,6 +54,11 @@ how surprising it would be before any evidence.
 # GUARDRAILS
 
 - Judge the prior only, never the truth: a claim can be extraordinary and true, or routine and false.
+- Rate the SURPRISE of the claim, not the GRAVITY of its subject. A grave or emotive topic — a
+  disease outbreak, a war, a disaster — does not by itself raise the prior. Well-established
+  background facts about such a topic, and figures or developments consistent with an
+  already-reported event, sit at routine or ordinary. Ask "how surprising is THIS claim if asserted
+  without support?", never "how serious is the subject?".
 - Rate the claim as written; do not import outside knowledge about the specific people or bodies named.
 - When genuinely between two levels, choose the LOWER — never inflate the bar.
 
