@@ -87,6 +87,47 @@ def test_post_json_retries_on_429_then_succeeds(monkeypatch):
     assert calls["n"] == 3  # 429 → 503 → 200
 
 
+def test_post_json_retries_transport_error_once(monkeypatch):
+    """#382: a transient read timeout (the killer of large candidate extractions) gets ONE retry
+    on its own budget; a second consecutive transport failure raises."""
+    calls = {"n": 0}
+
+    def timeout_then_ok(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("read timed out")
+        return _FakeResp(status_code=200, headers={}, payload={"ok": True})
+
+    monkeypatch.setattr(seam.httpx, "post", timeout_then_ok)
+    monkeypatch.setattr(seam.time, "sleep", lambda *_: None)
+
+    out = seam._post_json("https://x", headers={}, payload={}, timeout=seam._TIMEOUT)
+    assert out == {"ok": True}
+    assert calls["n"] == 2  # timeout → retry → 200
+
+
+def test_post_json_transport_budget_exhausts(monkeypatch):
+    calls = {"n": 0}
+
+    def always_timeout(*a, **k):
+        calls["n"] += 1
+        raise httpx.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(seam.httpx, "post", always_timeout)
+    monkeypatch.setattr(seam.time, "sleep", lambda *_: None)
+
+    with pytest.raises(httpx.ReadTimeout):
+        seam._post_json("https://x", headers={}, payload={}, timeout=seam._TIMEOUT)
+    assert calls["n"] == 2  # initial + the single transport retry (_TRANSPORT_RETRIES=1)
+
+
+def test_read_timeout_is_generous_for_long_generations():
+    # #382: the flat 60s read killed claim extraction on large bodies. Guard the floor so a future
+    # tidy-up doesn't quietly reintroduce the ReadTimeout failure mode.
+    assert seam._TIMEOUT.read >= 300
+    assert seam._TIMEOUT.connect <= 15  # dead sockets still fail fast
+
+
 def test_post_json_raises_after_exhausting_retries(monkeypatch):
     calls = {"n": 0}
 

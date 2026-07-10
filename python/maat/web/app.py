@@ -17,6 +17,7 @@ import asyncio
 import hmac
 import html
 import json
+import logging
 import os
 import sys
 import time
@@ -93,6 +94,24 @@ _BUS_DOWN = "Couldn't reach the event bus — nothing was saved."
 # Local admin event type (#123) — kept here, never edited into events.py (the kernel folds it
 # the same way it folds admin.threshold.changed; for the console it is purely an audit marker).
 ADMIN_THRESHOLD_REVERTED = "admin.threshold.reverted"
+
+
+def _configure_logging() -> None:
+    """Application logging (#382): uvicorn configures only ITS OWN loggers, so maat.* INFO records
+    (extraction-ladder rung telemetry, live-corroboration failures) were silently dropped by the
+    root logger's WARNING-level last-resort handler — an entire failed analysis logged one line.
+    One stream handler on the "maat" logger makes the pipeline observable; level via
+    MAAT_LOG_LEVEL. Idempotent — a reload / test re-import must not stack handlers."""
+    maat_log = logging.getLogger("maat")
+    if maat_log.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    maat_log.addHandler(handler)
+    maat_log.setLevel(os.environ.get("MAAT_LOG_LEVEL", "INFO").upper())
+
+
+_configure_logging()
 
 
 @asynccontextmanager
