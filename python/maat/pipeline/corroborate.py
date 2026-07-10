@@ -163,19 +163,38 @@ _GENERIC = {
     "the", "of", "and", "a", "an", "news", "press", "times", "daily", "post", "herald",
     "ministry", "official", "statement", "finance", "media", "agency", "group", "valoria",
 }
+# Domain-structural labels that carry NO originator identity — a source is very often a bare
+# domain ("dw.com", "news.sky.com") on the live/feed paths, and its TLD/host noise must never be
+# treated as a distinctive name token. Without this, the TLD "com" is a "significant token" of
+# EVERY .com source, and since "com" is a substring of countless words (be·com·e, out·com·e) the
+# citation-cascade check below fired between essentially any two domain sources — collapsing all
+# independent originators into one (the "Only this source" bug, #381). ccTLDs and 2-letter labels
+# are dropped by the length-≥3 token rule; these are the common multi-letter gTLDs/host bits.
+_DOMAIN_STOP = {
+    "com", "org", "net", "int", "edu", "gov", "mil", "info", "biz", "www", "co", "io",
+}
 _CASCADE_MARKERS = ("according to", "reported", "cited", " per ", "wrote", "citing")
 
 
 def _significant_tokens(source: str) -> list[str]:
-    return [t for t in re.findall(r"[A-Za-z]{2,}", source) if t.lower() not in _GENERIC]
+    """Distinctive name tokens of a source, for citation-cascade matching. Tokens must be ≥3
+    letters (2-letter labels — ccTLDs like "uk"/"ru", "dw" — are too collision-prone to match by
+    word) and neither generic news-words nor domain-structural labels (TLDs / "www")."""
+    return [
+        t for t in (m.lower() for m in re.findall(r"[A-Za-z]{3,}", source))
+        if t not in _GENERIC and t not in _DOMAIN_STOP
+    ]
 
 
 def _cites(body: str, source: str) -> bool:
-    """Does `body` explicitly attribute to `source` (a citation cascade)?"""
+    """Does `body` explicitly attribute to `source` (a citation cascade)?
+
+    A distinctive source token must appear as a WHOLE WORD — matching "sky" as a substring of
+    "whiskey" (or the old bug, the TLD "com" inside "become") is not an attribution."""
     low = body.lower()
     if not any(m in low for m in _CASCADE_MARKERS):
         return False
-    return any(t.lower() in low for t in _significant_tokens(source))
+    return any(re.search(rf"\b{re.escape(t)}\b", low) for t in _significant_tokens(source))
 
 
 def collapse_originators(
