@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import random
 import threading
@@ -24,6 +25,8 @@ from dataclasses import dataclass
 import httpx
 
 from maat.obs import llm_span, record_completion
+
+log = logging.getLogger("maat.providers.seam")
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -448,10 +451,12 @@ def claude_web_search(
     messages: list[dict] = [{"role": "user", "content": prompt}]
     content: list[dict] = []
     in_tok = out_tok = 0
+    t0 = time.monotonic()
     with llm_span("search", model, prompt) as span:
         if span is not None:
             span.set_attribute("maat.llm.endpoint", ep.name)
-        for _hop in range(max_hops):
+        for hop in range(max_hops):
+            t_hop = time.monotonic()
             data = _post_json(
                 ep.url,
                 headers=ep.headers(),
@@ -467,10 +472,21 @@ def claude_web_search(
             u = data.get("usage", {})
             in_tok += u.get("input_tokens", 0)
             out_tok += u.get("output_tokens", 0)
-            if data.get("stop_reason") == "pause_turn":
+            stop = data.get("stop_reason")
+            # Per-hop visibility (#391): a slow web-search batch was previously opaque — one call
+            # could stall for minutes across pause_turn continuations with nothing logged.
+            searches = sum(1 for b in content if b.get("type") == "server_tool_use")
+            log.info(
+                "web-search hop=%d stop=%s searches=%d in=%d out=%d hop_secs=%.1f total_secs=%.1f",
+                hop, stop, searches, u.get("input_tokens", 0), u.get("output_tokens", 0),
+                time.monotonic() - t_hop, time.monotonic() - t0,
+            )
+            if stop == "pause_turn":
                 messages = [*messages, {"role": "assistant", "content": content}]
                 continue
             break
+        else:
+            log.warning("web-search hit max_hops=%d without a terminal stop_reason", max_hops)
         record_completion(span, _blocks_text(content), input_tokens=in_tok, output_tokens=out_tok)
     return content
 

@@ -104,6 +104,9 @@ _SEM = asyncio.Semaphore(max(1, _CONCURRENCY))
 
 _RESULTS_MAX = 256
 _RESULTS: OrderedDict[str, tuple[float, dict]] = OrderedDict()  # id -> (monotonic ts, payload)
+# Strong references to decoupled analysis tasks so a client disconnect can't cancel them and the
+# GC can't collect a task no one awaits (#391). Cleared by each task's done-callback.
+_INFLIGHT: set[asyncio.Task] = set()
 
 
 # ── url identity ─────────────────────────────────────────────────────────────────────────────────
@@ -1072,24 +1075,32 @@ def _make_router():
                 traceback.print_exc()
                 queue.put_nowait(("error", {"detail": "analysis failed — try again shortly"}))
 
+        # Run the analysis DECOUPLED from the stream (#391): a client disconnect must NOT cancel it.
+        # The LLM+search spend runs on a thread inside run_analysis and completes regardless — the
+        # old `finally: task.cancel()` killed the coroutine at its await, so public_payload → cache
+        # → analysis.completed never ran and a whole paid analysis was lost. Now the task runs to
+        # completion and PERSISTS whether or not anyone is still listening; the module-level set is
+        # the strong reference that keeps it from being GC'd. Concurrency is bounded by _SEM.
+        task = asyncio.create_task(runner())
+        _INFLIGHT.add(task)
+        task.add_done_callback(_INFLIGHT.discard)
+
         async def stream():
-            task = asyncio.create_task(runner())
-            try:
-                yield _sse("start", {"analysis_id": aid})
-                while True:
-                    try:
-                        kind, data = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        yield ": keep-alive\n\n"  # hold proxies open through slow phases
-                        continue
-                    if kind in ("done", "error"):
-                        yield _sse(kind, data)
-                        return
-                    if kind == "scored":
-                        continue  # the final payload carries the score
-                    yield _sse(kind, _public_progress(kind, data))
-            finally:
-                task.cancel()
+            yield _sse("start", {"analysis_id": aid})
+            while True:
+                try:
+                    kind, data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    if task.done() and queue.empty():
+                        return  # analysis finished with nothing left to drain — don't hang open
+                    yield ": keep-alive\n\n"  # hold proxies open through slow phases
+                    continue
+                if kind in ("done", "error"):
+                    yield _sse(kind, data)
+                    return
+                if kind == "scored":
+                    continue  # the final payload carries the score
+                yield _sse(kind, _public_progress(kind, data))
 
         return StreamingResponse(
             stream(),

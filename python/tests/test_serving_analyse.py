@@ -593,6 +593,60 @@ def test_post_analyse_streams_claims_then_done(monkeypatch):
     assert got.json()["analysis"]["overall"]["band"] == "corroborated"
 
 
+def test_disconnect_does_not_cancel_persistence(monkeypatch):
+    """#391: a client that disconnects mid-analysis must NOT lose the work — the decoupled task
+    runs to completion and persists (cache) even though nobody is listening."""
+    import asyncio
+    import threading
+
+    import httpx
+
+    monkeypatch.setattr(sa, "_LIMITER", PerIpRateLimiter(capacity=100, refill_per_sec=100))
+    sa._RESULTS.clear()
+    sa._INFLIGHT.clear()
+
+    async def host_ok(_h, _p):
+        return True
+
+    monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    _patch_page(monkeypatch)
+    reading = _reading(central=True, matched_cluster_id=None)
+    analysis = _analysis([reading], StoryScore(70, "corroborated", "Corroborated", ["x"],
+                                               False, False))
+    started, release = threading.Event(), threading.Event()
+
+    def fake_engine(url, **kw):  # runs on a worker thread inside run_analysis
+        kw["progress"]("fetched", {"title": "T", "source": "example.com", "language": "en",
+                                   "date": None})
+        started.set()
+        release.wait(timeout=10)   # hold the analysis open so we can disconnect mid-flight
+        return analysis
+
+    monkeypatch.setattr(sa, "analyse_article", fake_engine)
+    url = "https://example.com/disconnect-story"
+
+    async def drive():
+        transport = httpx.ASGITransport(app=_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            async with client.stream("POST", "/api/v2/analyse", json={"url": url}) as resp:
+                async for _chunk in resp.aiter_text():
+                    break  # got the start event — now hang up
+        for _ in range(200):  # let the (decoupled) analysis reach its blocking point
+            if started.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert started.is_set(), "analysis never started"
+        release.set()  # let it finish AFTER the client is gone
+        aid = sa.analysis_id(url)
+        for _ in range(400):
+            if aid in sa._RESULTS:
+                break
+            await asyncio.sleep(0.02)
+        assert aid in sa._RESULTS, "analysis was lost on client disconnect"
+
+    asyncio.run(drive())
+
+
 def test_internal_errors_never_leak_to_the_wire(monkeypatch):
     monkeypatch.setattr(sa, "_LIMITER", PerIpRateLimiter(capacity=100, refill_per_sec=100))
     sa._RESULTS.clear()
