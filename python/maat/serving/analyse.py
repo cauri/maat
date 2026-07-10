@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import ipaddress
 import json
 import os
@@ -73,6 +74,8 @@ try:  # same guard as serving/feed.py — importable without FastAPI for pure-fn
     from pydantic import BaseModel, Field
 except ImportError:  # pragma: no cover
     APIRouter = Request = JSONResponse = StreamingResponse = BaseModel = Field = None  # type: ignore[assignment,misc]
+
+log = logging.getLogger("maat.serving.analyse")
 
 SCOPE_LINE = (
     "Maat measures whether this article's factual claims hold up against independent reporting"
@@ -412,18 +415,18 @@ def make_searcher() -> Callable[[str], list[LiveCandidate]]:
                     LiveCandidate(url=a.url, domain=a.domain, title=a.title, body=a.body)
                     for a in apify.search_and_fetch(query, max_results=6)
                 )
-            except Exception:  # noqa: BLE001 - a failed search leg never sinks the analysis
-                pass
+            except Exception as e:  # noqa: BLE001 - a failed search leg never sinks the analysis
+                log.warning("apify search leg failed for %r: %s", query[:60], type(e).__name__)
         if len(out) < 3:  # thin/no Apify → GDELT metadata + our own fetcher for bodies
             try:
-                arts = gdelt.search(gdelt_query(query), maxrecords=6, timespan="7d", retries=1)
+                arts = gdelt.search(gdelt_query(query), maxrecords=6, timespan="7d", retries=3)
                 for a in arts[:4]:
                     body, _image = fetch_article(a.url)
                     if body:
                         out.append(LiveCandidate(url=a.url, domain=a.domain,
                                                  title=a.title, body=body))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.warning("gdelt search leg failed for %r: %s", query[:60], type(e).__name__)
         return out
 
     return search
@@ -571,7 +574,8 @@ def _search_batch(claim_texts: Sequence[str], own_domain: str, blocked: list[str
         tool["blocked_domains"] = blocked
     try:
         blocks = claude_web_search(prompt, tools=[tool], model=_SEARCH_MODEL)
-    except Exception:  # noqa: BLE001 - a failed batch leaves its claims to the Apify fallback
+    except Exception as e:  # noqa: BLE001 - a failed batch leaves its claims to the Apify fallback
+        log.warning("web-search batch of %d claims failed: %s", n, type(e).__name__)
         return [[] for _ in range(n)]
     return parse_citations(_blocks_text(blocks), n)
 
@@ -782,6 +786,29 @@ def share_copy_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def ops_meta(analysis: ArticleAnalysis, *, secs: float | None = None) -> dict[str, Any]:
+    """Operator-only coverage meta for the ``analysis.completed`` audit event (#382): what the live
+    pass actually covered and HOW corroboration was reached (web vs Apify fallback, contradictions,
+    NLI availability, injection-guard drops, wall-clock). NEVER merged into the public payload —
+    the served cache reads only the ``analysis`` key, so this stays off the wire ("what, not how")."""
+    out: dict[str, Any] = {"dropped_claims": analysis.dropped_claims}
+    if secs is not None:
+        out["secs"] = secs
+    if analysis.live is not None:
+        lv = analysis.live
+        out["live"] = {
+            "searched_claims": lv.searched_claims,
+            "skipped_claims": lv.skipped_claims,
+            "candidates_considered": lv.candidates_considered,
+            "candidates_used": lv.candidates_used,
+            "web_corroborated": lv.web_corroborated,
+            "web_contradicted": lv.web_contradicted,
+            "apify_fallbacks": lv.apify_fallbacks,
+            "nli_available": lv.nli_available,
+        }
+    return out
+
+
 def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
     pub = analysis.publisher_score
     reasons = public_reasons(analysis)
@@ -909,6 +936,7 @@ async def run_analysis(
         assets = await _load_assets(pool)
         loop = asyncio.get_running_loop()
         lookup = make_corpus_lookup(loop, pool, assets)
+        t_analyse = time.monotonic()
         analysis = await asyncio.to_thread(
             analyse_article,
             ident,                          # identity = canonical when collapsed (correct publisher)
@@ -954,11 +982,17 @@ async def run_analysis(
         try:  # durable cache + audit trail; best-effort, never blocks the response
             await events_mod.publish(
                 nats, "analysis.completed", canon_aid,
-                {"analysis_id": canon_aid, "url": ident, "analysis": payload},
+                {
+                    "analysis_id": canon_aid, "url": ident, "analysis": payload,
+                    # Operator-only coverage meta (#382): HOW corroboration was reached — never
+                    # part of `analysis` (the public payload / cache read exactly that key), so
+                    # "what, not how" holds on the wire while the audit trail keeps the how.
+                    "ops": ops_meta(analysis, secs=round(time.monotonic() - t_analyse, 1)),
+                },
                 tenant_id=events_mod.PUBLIC_TENANT,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            log.warning("analysis.completed publish failed for %s: %s", canon_aid, type(e).__name__)
     return payload
 
 

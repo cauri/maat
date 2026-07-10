@@ -5,6 +5,7 @@ faked engine + DB seams.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
@@ -66,7 +67,8 @@ def _analysis(facts, score, **kw):
         url="https://example.com/story", source=kw.pop("source", "example.com"),
         title=kw.pop("title", "T"), language="en", image=None, date=None,
         facts=facts, projections=kw.pop("projections", []),
-        score=score, publisher_score=kw.pop("publisher_score", None), live=None,
+        score=score, publisher_score=kw.pop("publisher_score", None),
+        live=kw.pop("live", None), dropped_claims=kw.pop("dropped_claims", 0),
     )
 
 
@@ -236,6 +238,71 @@ def test_registry_review_kickoff_for_unrated_publisher(monkeypatch):
     assert payload["publisher"]["review_started"] is True
     assert "maat.events.source.registered" in published
     assert "maat.events.analysis.completed" in published
+
+
+def test_ops_meta_carries_coverage_never_the_public_payload(monkeypatch):
+    """#382: the analysis.completed event carries an operator-only `ops` block (coverage + how
+    corroboration was reached), while the public payload / cached GET read only `analysis` —
+    'what, not how' holds on the wire."""
+    import asyncio
+
+    from maat.pipeline.analyse import LiveMeta
+
+    monkeypatch.setattr(sa, "_LIMITER", PerIpRateLimiter(capacity=100, refill_per_sec=100))
+    sa._RESULTS.clear()
+
+    async def host_ok(_h, _p):
+        return True
+
+    monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    _patch_page(monkeypatch)
+    live = LiveMeta(searched_claims=5, skipped_claims=1, candidates_considered=9,
+                    candidates_used=4, web_corroborated=3, web_contradicted=1,
+                    apify_fallbacks=2, nli_available=True)
+    analysis = _analysis([_reading(central=True, matched_cluster_id=None)],
+                         StoryScore(58, "developing", "Developing", [], False, False),
+                         publisher_score=0.8, live=live, dropped_claims=2)
+    monkeypatch.setattr(sa, "analyse_article", lambda url, **kw: analysis)
+
+    events: list[tuple[str, dict]] = []
+
+    class FakeNats:
+        async def publish(self, subject, payload):
+            events.append((subject, json.loads(payload) if isinstance(payload, (bytes, str)) else payload))
+
+    class State:
+        pool = FakePool()
+        nats = FakeNats()
+
+    payload = asyncio.run(sa.run_analysis(State(), "https://example.com/story", refresh=True))
+
+    completed = [p for s, p in events if s.endswith("analysis.completed")]
+    assert len(completed) == 1
+    body = completed[0].get("data", completed[0])  # bus envelope wraps the event data
+    ops = body["ops"]
+    assert ops["dropped_claims"] == 2
+    assert ops["secs"] >= 0
+    assert ops["live"] == {
+        "searched_claims": 5, "skipped_claims": 1, "candidates_considered": 9,
+        "candidates_used": 4, "web_corroborated": 3, "web_contradicted": 1,
+        "apify_fallbacks": 2, "nli_available": True,
+    }
+    # the public payload (served + cached) carries no ops block and no coverage numbers
+    assert "ops" not in payload
+    assert "ops" not in body["analysis"]
+    assert "web_corroborated" not in str(payload)
+
+
+def test_ops_meta_pure_shapes():
+    a = _analysis([_reading()], StoryScore(50, "developing", "Developing", [], False, False))
+    assert sa.ops_meta(a) == {"dropped_claims": 0}  # no live pass → no live block, no secs
+    from maat.pipeline.analyse import LiveMeta
+
+    a2 = _analysis([_reading()], StoryScore(50, "developing", "Developing", [], False, False),
+                   live=LiveMeta(1, 0, 2, 2), dropped_claims=1)
+    out = sa.ops_meta(a2, secs=3.2)
+    assert out["secs"] == 3.2 and out["live"]["searched_claims"] == 1
+    assert out["live"]["nli_available"] is True  # dataclass default carried through
 
 
 def test_no_registry_kickoff_when_publisher_already_rated(monkeypatch):

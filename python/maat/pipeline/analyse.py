@@ -30,6 +30,7 @@ corpus, gate, search, cache and endpoints. Analysed articles never enter the can
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -50,6 +51,8 @@ from maat.pipeline.extract import extract_claims
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
 from maat.providers.seam import mistral_embed
+
+log = logging.getLogger("maat.pipeline.analyse")
 
 _BIG = ("significant", "extraordinary")
 _EXTREMITY_RANK = {"routine": 0, "ordinary": 1, "notable": 2, "significant": 3, "extraordinary": 4}
@@ -514,8 +517,11 @@ class _CiteFetch:
         try:
             page = self._fetch(url)
             got = page.body if page and page.body else None
-        except Exception:  # noqa: BLE001 - a dead cited URL drops that source, never the run
+        except Exception as e:  # noqa: BLE001 - a dead cited URL drops that source, never the run
+            log.warning("cite-fetch url=%s failed: %s", url, type(e).__name__)
             got = None
+        if got is None:
+            log.info("cite-fetch url=%s no body — citation judged on NLI alone", url)
         with self._lock:
             self._bodies.setdefault(url, got)
             return self._bodies[url]
@@ -568,7 +574,8 @@ def _websearch_rows(
 def _safe_search(search: SearchFn, query: str) -> list[LiveCandidate]:
     try:
         return search(query)
-    except Exception:  # noqa: BLE001 - one failed search must not sink the analysis
+    except Exception as e:  # noqa: BLE001 - one failed search must not sink the analysis
+        log.warning("live-search query=%r failed: %s", query[:60], type(e).__name__)
         return []
 
 
@@ -576,7 +583,9 @@ def _safe_extract(extract: Callable[..., list[Claim]], cand: LiveCandidate) -> l
     """A candidate article's claim texts; a failed extraction drops the candidate, never the run."""
     try:
         return [c.text for c in extract(cand.body, source_metadata=cand.domain)]
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        log.warning("candidate-extract url=%s body=%d failed: %s",
+                    cand.url, len(cand.body), type(e).__name__)
         return []
 
 
@@ -780,7 +789,9 @@ def analyse_article(
         if web_search is not None:
             try:
                 results = web_search([fact_claims[i].text for i in selected], source)
-            except Exception:  # noqa: BLE001 - a failed web-search never sinks the analysis
+            except Exception as e:  # noqa: BLE001 - a failed web-search never sinks the analysis
+                log.warning("web-search pass failed (%s) — all %d claims fall back to Apify",
+                            type(e).__name__, len(selected))
                 results = []
             for k, i in enumerate(selected):
                 if k < len(results):

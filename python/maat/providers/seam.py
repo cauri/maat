@@ -36,23 +36,36 @@ MISTRAL_EMBED_URL = "https://api.mistral.ai/v1/embeddings"
 # it). MAAT_LLM_RETRIES=0 disables. Tunable so a hard quota fails fast rather than hanging.
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_RETRIES = int(os.environ.get("MAAT_LLM_RETRIES", "4"))
+# Transport failures (read timeout, dropped connection) get their OWN, smaller budget (#382): a
+# long-generation retry is expensive, but ONE retry rescues the transient blip that otherwise
+# silently cost a whole extraction (the Le Pen candidate extractions died on exactly this).
+_TRANSPORT_RETRIES = int(os.environ.get("MAAT_LLM_TRANSPORT_RETRIES", "1"))
 _BACKOFF_CAP = 30.0
 
 
-def _retry_delay(attempt: int, resp: httpx.Response) -> float:
+def _retry_delay(attempt: int, resp: httpx.Response | None = None) -> float:
     """Seconds to wait before the next attempt. Prefers the server's Retry-After; otherwise
     exponential (1, 2, 4, 8 …) capped, with jitter to avoid synchronized retries."""
-    ra = resp.headers.get("retry-after", "").strip()
+    ra = (resp.headers.get("retry-after", "").strip() if resp is not None else "")
     if ra.isdigit():
         return min(float(ra), _BACKOFF_CAP)
     return min(2.0**attempt, _BACKOFF_CAP) + random.uniform(0.0, 0.5)
 
 
 def _post_json(url: str, *, headers: dict[str, str], payload: dict, timeout: httpx.Timeout) -> dict:
-    """POST → parsed JSON, retrying 429/5xx with backoff. Non-retryable errors raise immediately
-    via ``raise_for_status``; a persistent retryable error raises after the final attempt."""
+    """POST → parsed JSON, retrying 429/5xx with backoff (and transport errors, on a smaller
+    budget). Non-retryable errors raise immediately via ``raise_for_status``; a persistent
+    retryable error raises after the final attempt."""
+    transport_left = _TRANSPORT_RETRIES
     for attempt in range(_MAX_RETRIES + 1):
-        resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        try:
+            resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        except httpx.TransportError:
+            if transport_left <= 0 or attempt >= _MAX_RETRIES:
+                raise
+            transport_left -= 1
+            time.sleep(_retry_delay(attempt))
+            continue
         if resp.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:
             time.sleep(_retry_delay(attempt, resp))
             continue
@@ -366,7 +379,11 @@ CLAUDE_JUDGE = "claude-opus-4-8"
 MISTRAL_BULK = "mistral-small-latest"
 MISTRAL_EMBED = "mistral-embed"
 
-_TIMEOUT = httpx.Timeout(60.0)
+# Generous READ with a tight connect (#382): a Sonnet call generating thousands of tokens (claim
+# extraction on a dense article) needs minutes of read, not 60s — the old flat 60s ReadTimed-out
+# every large candidate extraction and silently starved corroboration. A dead socket still fails
+# fast on connect.
+_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
 
 @dataclass(frozen=True)
