@@ -107,6 +107,8 @@ class LiveMeta:
     # audit event (#382): how corroboration was actually reached, and how often it fell back.
     web_corroborated: int = 0    # claims with >=1 verbatim-verified, NLI-entailed outside source
     web_contradicted: int = 0    # claims a verified outside source CONTRADICTS (feeds disputed)
+    web_neutral: int = 0         # claims web-search FOUND sources for, but NLI entailed none (#389
+                                 # recall-drift signal — distinguishes "no coverage" from "rejected")
     apify_fallbacks: int = 0     # claims where web-search found nothing → fell back to Apify
     nli_available: bool = True   # False → NLI model down; web-search corroboration degraded
 
@@ -441,6 +443,43 @@ def _content_tokens(text: str) -> set[str]:
     return {w for w in _norm(text).split() if len(w) >= 4}
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _page_sentences(body: str) -> list[str]:
+    """Body split into candidate sentences (6–60 words) — the pool the second-chance NLI ranks."""
+    return [s.strip() for s in _SENTENCE_SPLIT.split(body)
+            if 6 <= len(s.split()) <= 60]
+
+
+def best_entailing_sentence(
+    body: str, claim_text: str, nli: NliFn | None,
+    *, min_entail: float = 0.5, top_k: int = 6,
+) -> str | None:
+    """A sentence from the page that ENTAILS the claim, or None (#389 recall).
+
+    Second chance when the search model quoted a sentence NLI didn't accept but the PAGE still
+    asserts the fact in different words: rank the page's own sentences by content-token overlap
+    with the claim and NLI the top few (bidirectionally, same gate as ``judge_entailment``). Only
+    an entailment survives, so this recovers reframed corroboration ("found guilty of embezzling
+    EU funds" ⇒ "convicted of misusing EU funds") WITHOUT loosening the gate — validated to leave
+    the false positives (Australian ankle-monitor pages) rejected."""
+    if nli is None or not body:
+        return None
+    qt = _content_tokens(claim_text)
+    if not qt:
+        return None
+    ranked = sorted(
+        _page_sentences(body),
+        key=lambda s: len(_content_tokens(s) & qt) / (len(_content_tokens(s)) or 1),
+        reverse=True,
+    )
+    for sentence in ranked[:top_k]:
+        if judge_entailment(nli, sentence, claim_text, min_entail=min_entail) == "entails":
+            return sentence
+    return None
+
+
 def quote_grounded(quote: str, body: str, *, min_overlap: float = 0.6) -> bool:
     """Is the cited quote grounded in the page we fetched? Verbatim, OR most of its content words
     are present (token overlap ≥ ``min_overlap``).
@@ -559,15 +598,22 @@ def _websearch_rows(
         if verdict == "contradicts":
             contradicted = True
             continue
-        if verdict != "entails":
-            continue  # neutral / unknown — never trust the search model's own mapping
         body = cite_fetch.body(cit.url)  # best-effort; None when the publisher is walled
-        if body is not None and not quote_grounded(cit.quote, body):
-            continue  # fetched, but the quote's content isn't on the page → mis-attributed
-        rows.append(ClaimRow(
-            id=f"cite-{i}-{n}", text=cit.quote, article_id=cit.url, source=cit.domain
-        ))
-        bodies[cit.url] = body or cit.quote
+        quote = cit.quote
+        if verdict == "entails":
+            if body is not None and not quote_grounded(quote, body):
+                continue  # fetched, but the quote's content isn't on the page → mis-attributed
+        elif body is not None:
+            # Neutral model quote, but we have the page (#389): the page may assert the fact in
+            # its own words — give the source a second chance from its own sentences.
+            sentence = best_entailing_sentence(body, claim.text, nli, min_entail=nli_min)
+            if sentence is None:
+                continue
+            quote = sentence
+        else:
+            continue  # neutral / unknown and unfetchable — never trust the model's own mapping
+        rows.append(ClaimRow(id=f"cite-{i}-{n}", text=quote, article_id=cit.url, source=cit.domain))
+        bodies[cit.url] = body or quote
     return rows, bodies, contradicted
 
 
@@ -797,7 +843,7 @@ def analyse_article(
                 if k < len(results):
                     citations[i] = results[k]
 
-        tally = {"web": 0, "contra": 0, "fallback": 0}
+        tally = {"web": 0, "contra": 0, "fallback": 0, "neutral": 0}
         tally_lock = threading.Lock()
 
         def live_one(i: int) -> None:
@@ -818,15 +864,19 @@ def analyse_article(
             if matched_rows:
                 with tally_lock:
                     tally["web"] += 1
-            elif search is not None:  # web-search found nothing usable → Apify fallback
-                matched_rows, bodies = _apify_rows(
-                    i, claim, search=search, extract=extract, embed=embed, shared=shared,
-                    accept_candidate=accept_candidate, own_canon=own_canon, url=url,
-                    same_fact_threshold=same_fact_threshold,
-                )
-                if matched_rows and web_search is not None:
+            else:
+                if cits:  # web-search returned sources but NLI entailed none (#389 recall signal)
                     with tally_lock:
-                        tally["fallback"] += 1
+                        tally["neutral"] += 1
+                if search is not None:  # web-search found nothing usable → Apify fallback
+                    matched_rows, bodies = _apify_rows(
+                        i, claim, search=search, extract=extract, embed=embed, shared=shared,
+                        accept_candidate=accept_candidate, own_canon=own_canon, url=url,
+                        same_fact_threshold=same_fact_threshold,
+                    )
+                    if matched_rows and web_search is not None:
+                        with tally_lock:
+                            tally["fallback"] += 1
             # Conservative dispute: a verified outside source contradicts AND none corroborate.
             dispute = contradicted and not matched_rows
             if dispute:
@@ -843,7 +893,8 @@ def analyse_article(
             searched_claims=len(selected), skipped_claims=len(skipped),
             candidates_considered=shared.considered, candidates_used=len(shared.bodies),
             web_corroborated=tally["web"], web_contradicted=tally["contra"],
-            apify_fallbacks=tally["fallback"], nli_available=nli is not None,
+            web_neutral=tally["neutral"], apify_fallbacks=tally["fallback"],
+            nli_available=nli is not None,
         )
 
     done = [r for r in readings if r is not None]

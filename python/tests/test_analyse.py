@@ -416,6 +416,54 @@ def test_quote_grounded_relaxed_match():
     assert not quote_grounded("", body)
 
 
+def test_best_entailing_sentence_recovers_reframed_fact():
+    from maat.pipeline.analyse import best_entailing_sentence
+
+    # The page asserts the fact in its OWN words; the second chance finds the entailing sentence.
+    body = ("Markets opened flat on Tuesday. The central bank offloaded roughly half of its gold "
+            "reserves this quarter. Analysts were divided on the move.")
+    hit = best_entailing_sentence(body, _GOLD, _nli)
+    assert hit is not None and "offloaded roughly half of its gold" in hit
+    # Unrelated page → no sentence entails (no false recovery).
+    assert best_entailing_sentence(_ANKLE_BODY, _GOLD, _nli) is None
+    assert best_entailing_sentence("", _GOLD, _nli) is None
+    assert best_entailing_sentence(body, _GOLD, None) is None  # NLI unavailable
+
+
+def test_websearch_second_chance_recovers_when_model_quote_is_neutral():
+    # #389: the model's quote is NEUTRAL (doesn't assert the claim), but the fetched page states
+    # the fact in its own words → the source is recovered from its own sentence, not dropped.
+    reworded_body = ("In a filing the bank said it had offloaded roughly half of its gold reserves "
+                     "this quarter as part of a rebalancing.")
+    cited = {_PASTED_URL: _BODY, "https://reworded.example/gold": reworded_body}
+
+    def fetch(url):
+        b = cited.get(url)
+        return FetchedPage(body=b, title=None, image=None, date="2026-07-06") if b else None
+
+    # The model quotes an on-topic-but-non-asserting sentence (neutral under the fixture NLI,
+    # which entails only when both texts mention the gold sale).
+    res = analyse(web_search=_web_search([
+        Citation("https://reworded.example/gold", "reworded.example",
+                 "The bank announced a major rebalancing of its reserves this quarter"),
+    ]), fetch=fetch, nli=_nli, search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 2       # pasted + the recovered source
+    assert res.live.web_corroborated == 1
+    assert res.live.web_neutral == 0               # it was recovered, not left neutral
+
+
+def test_live_meta_web_neutral_counts_found_but_rejected():
+    # A citation that neither the model quote NOR any page sentence entails → counted as neutral
+    # (recall-drift signal), and the claim stays lone.
+    res = _analyse_ws([Citation("https://hrlc.org.au/ankle", "hrlc.org.au", _ANKLE_QUOTE)],
+                      search=None)
+    gold = next(r for r in res.facts if r.claim.text == _GOLD)
+    assert gold.independent_originators == 1
+    assert res.live.web_corroborated == 0
+    assert res.live.web_neutral == 1
+
+
 def test_websearch_excludes_own_outlet():
     res = _analyse_ws([Citation(_PASTED_URL, "chronicle.example", "The central bank secretly sold half its gold")],
                       search=None)

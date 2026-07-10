@@ -90,6 +90,11 @@ _LIVE = os.environ.get("MAAT_ANALYSE_LIVE", "1") not in ("0", "false", "no")
 # default; turn off to run Apify-only. web_search_20260209 is available on Sonnet 4.6.
 _WEB_SEARCH = os.environ.get("MAAT_ANALYSE_WEB_SEARCH", "1") not in ("0", "false", "no")
 _SEARCH_MODEL = os.environ.get("MAAT_ANALYSE_SEARCH_MODEL", "claude-sonnet-4-6")
+# NLI entailment gate thresholds (#389) — tunable in prod without a deploy once the web_neutral
+# recall-drift signal shows whether the gate is too strict. Model swap is the other lever
+# (MAAT_NLI_MODEL, in pipeline/nli.py).
+_NLI_ENTAIL_MIN = float(os.environ.get("MAAT_ANALYSE_NLI_ENTAIL_MIN", "0.5"))
+_NLI_CONTRADICT_MIN = float(os.environ.get("MAAT_ANALYSE_NLI_CONTRADICT_MIN", "0.6"))
 _GATED = os.environ.get("MAAT_ANALYSE_GATE", "1") not in ("0", "false", "no")
 _MAX_SEARCHES = int(os.environ.get("MAAT_ANALYSE_MAX_SEARCHES", "10"))
 _MAX_CANDIDATES = int(os.environ.get("MAAT_ANALYSE_MAX_CANDIDATES", "18"))
@@ -104,6 +109,9 @@ _SEM = asyncio.Semaphore(max(1, _CONCURRENCY))
 
 _RESULTS_MAX = 256
 _RESULTS: OrderedDict[str, tuple[float, dict]] = OrderedDict()  # id -> (monotonic ts, payload)
+# Strong references to decoupled analysis tasks so a client disconnect can't cancel them and the
+# GC can't collect a task no one awaits (#391). Cleared by each task's done-callback.
+_INFLIGHT: set[asyncio.Task] = set()
 
 
 # ── url identity ─────────────────────────────────────────────────────────────────────────────────
@@ -803,6 +811,7 @@ def ops_meta(analysis: ArticleAnalysis, *, secs: float | None = None) -> dict[st
             "candidates_used": lv.candidates_used,
             "web_corroborated": lv.web_corroborated,
             "web_contradicted": lv.web_contradicted,
+            "web_neutral": lv.web_neutral,
             "apify_fallbacks": lv.apify_fallbacks,
             "nli_available": lv.nli_available,
         }
@@ -952,6 +961,8 @@ async def run_analysis(
             # (#381) uses the FAST ladder rungs for every OTHER URL (no Apify/Zyte per cited URL —
             # a walled citation falls back to the NLI judgement rather than paying the slow rungs).
             fetch=lambda u: page if u == ident else fetch_page(u, fast=True),
+            nli_entail_min=_NLI_ENTAIL_MIN,
+            nli_contradict_min=_NLI_CONTRADICT_MIN,
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,
@@ -1072,24 +1083,32 @@ def _make_router():
                 traceback.print_exc()
                 queue.put_nowait(("error", {"detail": "analysis failed — try again shortly"}))
 
+        # Run the analysis DECOUPLED from the stream (#391): a client disconnect must NOT cancel it.
+        # The LLM+search spend runs on a thread inside run_analysis and completes regardless — the
+        # old `finally: task.cancel()` killed the coroutine at its await, so public_payload → cache
+        # → analysis.completed never ran and a whole paid analysis was lost. Now the task runs to
+        # completion and PERSISTS whether or not anyone is still listening; the module-level set is
+        # the strong reference that keeps it from being GC'd. Concurrency is bounded by _SEM.
+        task = asyncio.create_task(runner())
+        _INFLIGHT.add(task)
+        task.add_done_callback(_INFLIGHT.discard)
+
         async def stream():
-            task = asyncio.create_task(runner())
-            try:
-                yield _sse("start", {"analysis_id": aid})
-                while True:
-                    try:
-                        kind, data = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        yield ": keep-alive\n\n"  # hold proxies open through slow phases
-                        continue
-                    if kind in ("done", "error"):
-                        yield _sse(kind, data)
-                        return
-                    if kind == "scored":
-                        continue  # the final payload carries the score
-                    yield _sse(kind, _public_progress(kind, data))
-            finally:
-                task.cancel()
+            yield _sse("start", {"analysis_id": aid})
+            while True:
+                try:
+                    kind, data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    if task.done() and queue.empty():
+                        return  # analysis finished with nothing left to drain — don't hang open
+                    yield ": keep-alive\n\n"  # hold proxies open through slow phases
+                    continue
+                if kind in ("done", "error"):
+                    yield _sse(kind, data)
+                    return
+                if kind == "scored":
+                    continue  # the final payload carries the score
+                yield _sse(kind, _public_progress(kind, data))
 
         return StreamingResponse(
             stream(),

@@ -121,6 +121,34 @@ def test_post_json_transport_budget_exhausts(monkeypatch):
     assert calls["n"] == 2  # initial + the single transport retry (_TRANSPORT_RETRIES=1)
 
 
+def test_web_search_follows_pause_turn_and_logs_each_hop(monkeypatch, caplog):
+    # #391: a slow web-search batch was opaque. Each hop (incl. pause_turn continuations) is logged
+    # with its stop_reason, search count, and timing; the loop follows pause_turn to completion.
+    hops = [
+        {"content": [{"type": "server_tool_use", "name": "web_search"}],
+         "stop_reason": "pause_turn", "usage": {"input_tokens": 100, "output_tokens": 20}},
+        {"content": [{"type": "text", "text": '{"1": []}'}],
+         "stop_reason": "end_turn", "usage": {"input_tokens": 200, "output_tokens": 40}},
+    ]
+    calls = {"n": 0}
+
+    def fake_post_json(url, *, headers, payload, timeout):
+        r = hops[calls["n"]]
+        calls["n"] += 1
+        return r
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setattr(seam, "_post_json", fake_post_json)
+    import logging
+    with caplog.at_level(logging.INFO, logger="maat.providers.seam"):
+        out = seam.claude_web_search("q", tools=[{"type": "web_search_20260209", "name": "web_search"}])
+    assert calls["n"] == 2  # followed pause_turn → end_turn
+    assert out == hops[1]["content"]
+    hop_lines = [r.message for r in caplog.records if "web-search hop=" in r.message]
+    assert len(hop_lines) == 2
+    assert "stop=pause_turn" in hop_lines[0] and "stop=end_turn" in hop_lines[1]
+
+
 def test_read_timeout_is_generous_for_long_generations():
     # #382: the flat 60s read killed claim extraction on large bodies. Guard the floor so a future
     # tidy-up doesn't quietly reintroduce the ReadTimeout failure mode.
