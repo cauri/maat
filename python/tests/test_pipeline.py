@@ -92,6 +92,38 @@ def test_collapse_wire_and_cascade_to_independent_originators():
     assert len(groups) == 2  # {afp, reprint, cascade} wire/cascade node + {indie}
 
 
+def test_independent_domain_sources_do_not_collapse_via_tld():
+    # Regression (#381): sources are BARE DOMAINS on the live/feed paths ("dw.com", "news.sky.com").
+    # The TLD "com" must NOT be treated as a distinctive source token — otherwise the citation
+    # cascade check (marker + token substring) fires between EVERY .com pair, because "com" is a
+    # substring of ordinary words (be·com·e, out·com·e, per), collapsing all independent
+    # originators into one. Four genuinely independent outlets, each with a cascade marker in its
+    # body, must stay four originators.
+    from maat.pipeline.corroborate import collapse_originators
+
+    bodies = {
+        "sky": "Sky News reports France confirmed its first Ebola case. Officials said it became clear.",
+        "dw": "According to health authorities the outbreak grew. The doctor recovered after treatment.",
+        "gpf": "The DRC outbreak, which reportedly began last month, has become a regional concern per agencies.",
+        "bbc": "France confirmed its first Ebola case, according to the health ministry; a doctor was admitted.",
+    }
+    sources = {"sky": "news.sky.com", "dw": "dw.com", "gpf": "geopoliticalfutures.com", "bbc": "bbc.com"}
+    assert len(collapse_originators(["sky", "dw", "gpf", "bbc"], bodies, sources)) == 4
+
+
+def test_cascade_still_collapses_on_named_attribution():
+    # The TLD fix must NOT disable real cascade detection: a body that explicitly attributes to a
+    # distinctively-named wire (matched as a whole word) still collapses onto it.
+    from maat.pipeline.corroborate import collapse_originators
+
+    bodies = {
+        "reuters": "The plant will close, cutting 400 jobs, the company said on Monday.",
+        "cascade": "The factory is shutting with heavy job losses, according to Reuters.",
+    }
+    sources = {"reuters": "reuters.com", "cascade": "localpaper.example"}
+    assert len(collapse_originators(["reuters", "cascade"], bodies, sources)) == 1
+
+
 def test_collapse_same_outlet_to_one_originator():
     from maat.pipeline.corroborate import collapse_originators
 
