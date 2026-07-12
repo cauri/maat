@@ -360,6 +360,7 @@ def _corpus_reading(
         match.extremity,
         grounding=match.grounding,
         ownership=ownership,
+        reputation=dict(reputation),  # S1 #399: established originators corroborate more
     )
     rated = _rep(reputation, source) is not None or any(
         _rep(reputation, s) is not None for grp in match.originator_sources for s in grp
@@ -383,7 +384,7 @@ def _lone_reading(
     """A claim with no outside evidence: a single originator, weighted by its own attribution
     quality (§5.2) — honest, never inflated."""
     row = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
-    cor = corroborate_fixed([row], {_ANALYSED: body}, extremity)
+    cor = corroborate_fixed([row], {_ANALYSED: body}, extremity, reputation=dict(reputation))
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity
     )
@@ -428,7 +429,7 @@ def _live_reading(
     own = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
     cor = corroborate_fixed(
         [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding,
-        ownership=ownership,
+        ownership=ownership, reputation=dict(reputation),  # S1 #399
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity,
