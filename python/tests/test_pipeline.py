@@ -269,6 +269,37 @@ def test_effective_originators_scales_by_reputation():
     assert bald == 0.3  # bald attribution (0.3) × top reputation (1.0)
 
 
+def test_claim_attribution_weight_from_voice_and_speaker():
+    from maat.pipeline.corroborate import claim_attribution_weight
+
+    body = "The ministry gave a briefing; the report was filed."  # has provenance markers
+    # attributed to a NAMED person / organisation → full
+    assert claim_attribution_weight("attributed", "Volodymyr Zelensky", body, "outlet.com") == 1.0
+    assert claim_attribution_weight("attributed", "Graham's office", body, "outlet.com") == 1.0
+    # attributed to a COLLECTIVE role (no actual name) → anonymous
+    assert claim_attribution_weight("attributed", "officials", body, "outlet.com") == 0.6
+    assert claim_attribution_weight("attributed", "sources familiar", body, "outlet.com") == 0.6
+    assert claim_attribution_weight("attributed", None, body, "outlet.com") == 0.6
+    # OWN voice in a sourced piece → the outlet's own reporting (between anonymous and named)
+    assert claim_attribution_weight("own", None, body, "outlet.com") == 0.7
+    # OWN voice in a provenance-FREE piece → bald (laundering risk)
+    assert claim_attribution_weight("own", None, "X happened.", "outlet.com") == 0.3
+    # a primary-source domain is full regardless of voice
+    assert claim_attribution_weight("own", None, "X.", "treasury.gov") == 1.0
+
+
+def test_effective_originators_attribution_override():
+    from maat.pipeline.corroborate import effective_originators
+
+    # the override sets the pasted article's weight (claim-aware); other articles fall back to the
+    # body scan. Here one named-attributed originator (override 1.0) + one bald body (0.3) → 1.3.
+    bodies = {"paste": "The deal is off.", "other": "X happened."}  # both bald by body-scan
+    sources = {"paste": "outlet.com", "other": "wire.com"}
+    eff = effective_originators([["paste"], ["other"]], bodies, sources,
+                                attribution={"paste": 1.0})
+    assert eff == 1.3  # paste forced to 1.0, other body-scanned to 0.3
+
+
 def test_confidence_read_rises_with_corroboration_and_primary():
     from maat.pipeline.corroborate import confidence_read
 

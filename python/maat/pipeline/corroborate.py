@@ -289,8 +289,18 @@ _ANONYMOUS_MARKERS = (
     "insiders", "an insider", "a senior official", "people with knowledge",
 )
 _W_NAMED = 1.0      # primary source, or a named person / organisation / document
+_W_OWN = 0.7        # the outlet's OWN-voice reporting (a real originator, but unattributed to an
+                    # external source) in a piece that IS otherwise sourced — weaker than a named
+                    # source, stronger than an anonymous one or a wholly-unsourced assertion (S2)
 _W_ANONYMOUS = 0.6  # attributed, but to an unnamed source
-_W_BALD = 0.3       # no attribution at all — stated in the outlet's own voice
+_W_BALD = 0.3       # no attribution at all — an own-voice assertion in a provenance-free piece
+
+# Collective / role speakers that name no actual source — "officials said", "sources familiar".
+# An attribution to one of these is anonymous, not named (S2 #400).
+_GENERIC_SPEAKERS = (
+    "source", "official", "spokesperson", "spokesman", "spokeswoman", "insider", "analyst",
+    "expert", "authorities", "witness", "people", "person", "someone", "observer", "aide",
+)
 
 
 def has_provenance(body: str) -> bool:
@@ -312,12 +322,39 @@ def attribution_weight(body: str, source: str) -> float:
     """How much one article counts as an independent originator, by sourcing quality (§5.2):
     a primary or NAMED source counts fully; an ANONYMOUS but stated source counts less; a BALD
     assertion with no attribution counts least. (cauri: good outlets say where it came from;
-    the more specific the attribution, the more it corroborates.) DRAFT tiers + weights."""
+    the more specific the attribution, the more it corroborates.) DRAFT tiers + weights.
+
+    Body-scan form — used for OUTSIDE corroborating articles, whose per-claim voice we don't have.
+    For the analysed article's OWN claim, use ``claim_attribution_weight`` (the claim's voice/speaker
+    is a far better signal than a whole-body scan, which reads every claim at 1.0)."""
     if is_primary_source(source):
         return _W_NAMED
     if not has_provenance(body):
         return _W_BALD
     return _W_ANONYMOUS if _is_anonymous(body) else _W_NAMED
+
+
+def _named_speaker(speaker: str | None) -> bool:
+    """Is the attributed speaker an actual named source (a person / organisation), not a collective
+    role like "officials" / "sources"?"""
+    if not speaker or not speaker.strip():
+        return False
+    low = speaker.strip().lower()
+    return not any(g in low for g in _GENERIC_SPEAKERS)
+
+
+def claim_attribution_weight(voice: str, speaker: str | None, body: str, source: str) -> float:
+    """The analysed claim's attribution weight from ITS OWN voice/speaker (S2 #400), not a whole-body
+    scan — every article body has SOME provenance marker, so the scan read every claim at 1.0 and
+    made lone claims indistinguishable (the flat 55/65). A claim ATTRIBUTED to a NAMED source counts
+    fully, to an unnamed one less; an OWN-voice claim is the outlet's own reporting — a real
+    originator (``_W_OWN``), weaker than a named external source, and only laundered-weak (``_W_BALD``)
+    when the whole piece states no provenance at all."""
+    if is_primary_source(source):
+        return _W_NAMED
+    if voice == "attributed":
+        return _W_NAMED if _named_speaker(speaker) else _W_ANONYMOUS
+    return _W_OWN if has_provenance(body) else _W_BALD
 
 
 # §S1 (#399) — reputation of the corroborating outlet also scales its contribution: a proven-strong
@@ -356,7 +393,7 @@ def reputation_weight(source: str, reputation: dict[str, float] | None) -> float
 
 def effective_originators(
     groups: list[list[str]], bodies: dict[str, str], sources: dict[str, str],
-    *, reputation: dict[str, float] | None = None,
+    *, reputation: dict[str, float] | None = None, attribution: dict[str, float] | None = None,
 ) -> float:
     """Independent-originator count weighted by sourcing quality (§5.2) AND, when a ``reputation``
     map is supplied, by each originator's track record (S1 #399). Each originator counts by its
@@ -364,12 +401,19 @@ def effective_originators(
     assertion least — then that is scaled by the originator's reputation weight (a proven outlet
     counts more than an unknown, floored so unknowns still count). So spread behind weak sourcing
     OR unproven outlets adds little corroboration. ``reputation=None`` → attribution-only (unchanged
-    for every existing caller)."""
+    for every existing caller).
+
+    ``attribution`` (S2 #400) overrides the body-scan for specific article_ids with a precomputed
+    weight — the analyse path passes the pasted article's CLAIM-aware weight (its voice/speaker),
+    which the whole-body scan cannot see. Articles absent from the map fall back to the body scan."""
+    def _attrib(a: str) -> float:
+        if attribution is not None and a in attribution:
+            return attribution[a]
+        return attribution_weight(bodies.get(a, ""), sources.get(a, ""))
+
     total = 0.0
     for g in groups:
-        attrib = max(
-            (attribution_weight(bodies.get(a, ""), sources.get(a, "")) for a in g), default=_W_BALD
-        )
+        attrib = max((_attrib(a) for a in g), default=_W_BALD)
         rep = max(
             (reputation_weight(sources.get(a, ""), reputation) for a in g), default=1.0
         )
@@ -532,6 +576,7 @@ def corroborate_fixed(
     duplicate_source_threshold: float = 0.40,
     ownership: dict[str, str] | None = None,
     reputation: dict[str, float] | None = None,
+    attribution: dict[str, float] | None = None,
     decay: dict[str, float] | None = None,
     primary_lift: float | None = None,
     cap: float | None = None,
@@ -546,6 +591,8 @@ def corroborate_fixed(
     ``confidence_read`` — the Analyse surface (P14) folds a pasted article into a cluster's read.
     ``reputation`` (S1 #399): when supplied, each originator's contribution is scaled by its track
     record — corroboration by established outlets weighs more than by unknowns. None → unchanged.
+    ``attribution`` (S2 #400): per-article_id weight overrides for the sourcing scan — the analyse
+    path passes the pasted article's CLAIM-aware attribution (voice/speaker). None → body-scan.
     """
     if not claims:
         raise ValueError("corroborate_fixed needs at least one claim")
@@ -556,7 +603,9 @@ def corroborate_fixed(
     )
     originators = [[article_ids[i] for i in g] for g in groups_idx]
     ind = len(originators)
-    eff = effective_originators(originators, bodies, art_source, reputation=reputation)
+    eff = effective_originators(
+        originators, bodies, art_source, reputation=reputation, attribution=attribution
+    )
     primary = any(is_primary_source(s) for s in {c.source for c in claims})
     return Corroboration(
         fact=claims[0].text,

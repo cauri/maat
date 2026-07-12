@@ -205,6 +205,35 @@ def test_lone_claim_confidence_scales_with_publisher_reputation():
     assert strong.independent_originators == 1  # still one originator — reputation weights, not counts
 
 
+def test_lone_claims_differentiate_by_attribution_voice():
+    # S2 #400: two lone claims in ONE article no longer read identically — a claim attributed to a
+    # NAMED source outscores the outlet's OWN-voice assertion of the same extremity (the flat 55/65
+    # wall came from a whole-body provenance scan reading every claim at 1.0).
+    from maat.pipeline.analyse import analyse_article
+
+    named = "The president signed the treaty on Tuesday"
+    own = "The national economy grew last quarter"
+    body = f"The ministry briefed reporters. {named}. {own}."
+
+    res = analyse_article(
+        "https://outlet.example/story",
+        reputation={},
+        corpus_lookup=lambda texts: [None] * len(texts),  # all novel
+        fetch=lambda _u: FetchedPage(body=body, title="T", image=None, date=None),
+        extract=lambda _b, **_k: [
+            Claim(text=named, voice="attributed", speaker="President Vega", evidence_span=named),
+            Claim(text=own, voice="own", evidence_span=own),
+        ],
+        classify=lambda claims, **_k: claims,  # both facts (kind None ≠ projection)
+        extremity_of=lambda _t: "ordinary",  # hold extremity constant so only attribution varies
+        embed=fake_embed,
+        language_of=lambda _t: "en",
+    )
+    by = {r.claim.text: r for r in res.facts}
+    assert by[named].independent_originators == by[own].independent_originators == 1
+    assert by[named].confidence > by[own].confidence  # named attribution reads stronger
+
+
 def test_projections_split_out_and_never_scored():
     res = analyse()
     assert [r.claim.text for r in res.projections] == [_FORECAST]
