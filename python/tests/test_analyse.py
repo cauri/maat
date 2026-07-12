@@ -214,6 +214,7 @@ def test_lone_claims_differentiate_by_attribution_voice():
     named = "The president signed the treaty on Tuesday"
     own = "The national economy grew last quarter"
     body = f"The ministry briefed reporters. {named}. {own}."
+    vecs = {named: [1.0, 0.0, 0.0], own: [0.0, 1.0, 0.0]}  # distinct facts — must not consolidate
 
     res = analyse_article(
         "https://outlet.example/story",
@@ -226,12 +227,88 @@ def test_lone_claims_differentiate_by_attribution_voice():
         ],
         classify=lambda claims, **_k: claims,  # both facts (kind None ≠ projection)
         extremity_of=lambda _t: "ordinary",  # hold extremity constant so only attribution varies
-        embed=fake_embed,
+        embed=lambda texts: [vecs[t] for t in texts],
         language_of=lambda _t: "en",
     )
     by = {r.claim.text: r for r in res.facts}
     assert by[named].independent_originators == by[own].independent_originators == 1
     assert by[named].confidence > by[own].confidence  # named attribution reads stronger
+
+
+def test_consolidate_claims_merges_near_duplicates():
+    # #411 — the Kyiv Post 45-vs-95 bug: near-identical extractions must become ONE claim before
+    # extremity rating and search, so one fact can't earn two ratings or split one search budget.
+    from maat.pipeline.analyse import consolidate_claims
+
+    dated = "Lindsey Graham died on July 11 at the age of 71"
+    undated = "Senator Lindsey Graham dies at 71"
+    other = "Graham visited Ukraine 10 times during the war"
+    vecs = {dated: [1.0, 0.0, 0.0], undated: [0.99, 0.14, 0.0], other: [0.0, 1.0, 0.0]}
+    claims = [
+        Claim(text=undated, voice="own", evidence_span=undated, in_headline=True),
+        Claim(text=dated, voice="attributed", speaker="Graham's office", evidence_span=dated),
+        Claim(text=other, voice="own", evidence_span=other),
+    ]
+    out, merged = consolidate_claims(claims, lambda ts: [vecs[t] for t in ts])
+    assert merged == 1
+    assert [c.text for c in out] == [dated, other]  # named-attributed member wins the merge…
+    assert out[0].speaker == "Graham's office"
+    assert out[0].in_headline is True               # …and centrality survives from EITHER member
+    assert out[0].voice == "attributed"
+
+
+def test_consolidate_claims_keeps_distinct_facts_and_survives_embed_failure():
+    from maat.pipeline.analyse import consolidate_claims
+
+    a = Claim(text="The dam was breached on Monday", voice="own", evidence_span="a")
+    b = Claim(text="The president resigned on Friday", voice="own", evidence_span="b")
+    vecs = {a.text: [1.0, 0.0], b.text: [0.0, 1.0]}
+    out, merged = consolidate_claims([a, b], lambda ts: [vecs[t] for t in ts])
+    assert (out, merged) == ([a, b], 0)  # distinct facts untouched, order preserved
+
+    def boom(_ts):
+        raise RuntimeError("embed down")
+
+    out2, merged2 = consolidate_claims([a, b], boom)
+    assert (out2, merged2) == ([a, b], 0)  # embed failure → consolidation skipped, never fatal
+
+
+def test_duplicate_fact_is_rated_and_searched_once():
+    # End-to-end (#411): the duplicated fact reaches extremity rating and the search exactly once.
+    from maat.pipeline.analyse import analyse_article
+
+    dated = "The dam was breached on Monday July 7"
+    undated = "The dam was breached on Monday"
+    body = f"{dated}. {undated}. More reporting follows, officials said."
+    vecs = {dated: [1.0, 0.0], undated: [1.0, 0.0]}
+    rated: list[str] = []
+    searched: list[str] = []
+
+    def web_search(texts, own_domain, deep=False):
+        searched.extend(texts)
+        return [[] for _ in texts]
+
+    res = analyse_article(
+        "https://outlet.example/dam",
+        reputation={},
+        corpus_lookup=lambda t: [None] * len(t),
+        fetch=lambda _u: FetchedPage(body=body, title="T", image=None, date=None),
+        extract=lambda _b, **_k: [
+            Claim(text=dated, voice="own", evidence_span=dated),
+            Claim(text=undated, voice="own", evidence_span=undated),
+        ],
+        classify=lambda c, **_k: c,
+        extremity_of=lambda t: rated.append(t) or "notable",
+        embed=lambda ts: [vecs[t] for t in ts],
+        language_of=lambda _t: "en",
+        web_search=web_search,
+        nli=lambda _p, _h: ("neutral", 0.9),
+    )
+    assert len(res.facts) == 1
+    assert res.facts[0].claim.text == dated       # the more detailed text represents the fact
+    assert rated == [dated]                       # ONE extremity rating
+    assert searched == [dated, dated]             # ONE claim searched (shallow, then the S3 deep
+    assert res.merged_claims == 1                 # pass on the still-lone claim) — never the dup
 
 
 def test_deep_search_rescues_a_shallow_lone_claim():

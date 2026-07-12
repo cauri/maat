@@ -347,7 +347,7 @@ def test_ops_meta_carries_coverage_never_the_public_payload(monkeypatch):
 
 def test_ops_meta_pure_shapes():
     a = _analysis([_reading()], StoryScore(50, "developing", "Developing", [], False, False))
-    assert sa.ops_meta(a) == {"dropped_claims": 0}  # no live pass → no live block, no secs
+    assert sa.ops_meta(a) == {"dropped_claims": 0, "merged_claims": 0}  # no live pass → no live block
     from maat.pipeline.analyse import LiveMeta
 
     a2 = _analysis([_reading()], StoryScore(50, "developing", "Developing", [], False, False),

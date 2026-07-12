@@ -822,7 +822,8 @@ def ops_meta(analysis: ArticleAnalysis, *, secs: float | None = None) -> dict[st
     pass actually covered and HOW corroboration was reached (web vs Apify fallback, contradictions,
     NLI availability, injection-guard drops, wall-clock). NEVER merged into the public payload —
     the served cache reads only the ``analysis`` key, so this stays off the wire ("what, not how")."""
-    out: dict[str, Any] = {"dropped_claims": analysis.dropped_claims}
+    out: dict[str, Any] = {"dropped_claims": analysis.dropped_claims,
+                           "merged_claims": analysis.merged_claims}
     if secs is not None:
         out["secs"] = secs
     if analysis.live is not None:
