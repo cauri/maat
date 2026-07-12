@@ -346,7 +346,11 @@ export default function Analyser() {
             setActivity("");
           } else if (event === "searching") {
             const n = (d.claims as number) ?? 0;
-            setActivity(`Checking ${n} claim${n === 1 ? "" : "s"} against independent reporting — this can take a minute…`);
+            setActivity(
+              d.deep
+                ? `Digging deeper on ${n} claim${n === 1 ? "" : "s"} that came back uncorroborated…`
+                : `Checking ${n} claim${n === 1 ? "" : "s"} against independent reporting — this can take a minute…`,
+            );
           } else if (event === "checking") {
             const idx = d.index as number;
             setChipStates((prev) => {

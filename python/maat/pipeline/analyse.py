@@ -116,6 +116,10 @@ class LiveMeta:
                                  # recall-drift signal — distinguishes "no coverage" from "rejected")
     apify_fallbacks: int = 0     # claims where web-search found nothing → fell back to Apify
     nli_available: bool = True   # False → NLI model down; web-search corroboration degraded
+    deep_searched: int = 0       # S3 #401: claims that came back uncorroborated and got a DEEPER
+                                 # second search before being concluded single-source
+    deep_rescued: int = 0        # …of those, how many the deeper search actually corroborated —
+                                 # the "was one shallow pass enough?" signal (low → recall is fine)
 
 
 @dataclass(frozen=True)
@@ -185,7 +189,9 @@ ProgressFn = Callable[[str, dict[str, Any]], None]
 # the Anthropic web_search tool; ``own_domain`` is passed so the provider can block the analysed
 # publisher's own pages. ``NliFn`` is the entailment judge (premise, hypothesis) → (label, prob) —
 # an NLI MODEL, not an LLM (cauri's call, #229/#381); None when the model is unavailable.
-WebSearchFn = Callable[[Sequence[str], str], Sequence[Sequence[Citation]]]
+# ``deep`` (S3 #401, optional kwarg): a larger-budget second pass for claims a first pass left
+# uncorroborated — same prompt, more searches, so recall improves without an in-app prompt change.
+WebSearchFn = Callable[..., Sequence[Sequence[Citation]]]
 NliFn = Callable[[str, str], tuple[str, float] | None]
 
 
@@ -917,12 +923,64 @@ def analyse_article(
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             list(ex.map(live_one, selected))
+
+        # S3 #401 — coverage-aware corroboration: the originator COUNT is a floor gated by search
+        # recall, so a claim that came back with NO outside corroboration gets a DEEPER second search
+        # (fresh pass, larger budget) before we conclude it is genuinely single-source. This is the
+        # honest answer to "we're not exhaustive": at the low end — where each originator swings the
+        # score most and a shallow miss reads as 'lone' — we look harder rather than stop at one pass.
+        # Bounded: only the still-lone claims, one extra pass. ``deep_rescued`` records whether the
+        # deeper look actually changes anything (the "was one pass enough?" signal).
+        deep_searched = deep_rescued = 0
+        still_lone = [
+            i for i in selected
+            if readings[i] is not None and readings[i].independent_originators <= 1
+            and not readings[i].disputed
+        ]
+        if web_search is not None and still_lone:
+            deep_searched = len(still_lone)
+            emit("searching", {"claims": deep_searched, "deep": True})
+            try:
+                deeper = web_search([fact_claims[i].text for i in still_lone], source, deep=True)
+            except Exception as e:  # noqa: BLE001 - a failed deep pass just leaves the pass-1 read
+                log.warning("deep web-search pass failed (%s)", type(e).__name__)
+                deeper = []
+
+            def deepen(pair: tuple[int, int]) -> None:
+                nonlocal deep_rescued
+                k, i = pair
+                extra = deeper[k] if k < len(deeper) else ()
+                if not extra:
+                    return
+                merged = [*(citations.get(i) or ()), *extra]
+                rows, bodies2, _contra = _websearch_rows(
+                    i, fact_claims[i], merged, url=url, own_canon=own_canon,
+                    accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
+                    nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                )
+                if not rows:
+                    return
+                reading, rated = _live_reading(
+                    fact_claims[i], body, source, extremities[i], rows, bodies2, reputation,
+                    disputed=False, ownership=ownership,
+                )
+                if reading.independent_originators > readings[i].independent_originators:
+                    with tally_lock:
+                        deep_rescued += 1
+                        tally["web"] += 1
+                        if citations.get(i):  # was counted neutral in pass 1 (had cites, no rows)
+                            tally["neutral"] = max(0, tally["neutral"] - 1)
+                    resolve(i, (reading, rated))
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                list(ex.map(deepen, list(enumerate(still_lone))))
+
         live = LiveMeta(
             searched_claims=len(selected), skipped_claims=len(skipped),
             candidates_considered=shared.considered, candidates_used=len(shared.bodies),
             web_corroborated=tally["web"], web_contradicted=tally["contra"],
             web_neutral=tally["neutral"], apify_fallbacks=tally["fallback"],
-            nli_available=nli is not None,
+            nli_available=nli is not None, deep_searched=deep_searched, deep_rescued=deep_rescued,
         )
 
     done = [r for r in readings if r is not None]
