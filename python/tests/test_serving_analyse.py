@@ -213,6 +213,24 @@ def test_make_web_search_blocks_own_and_denied_and_parses(monkeypatch):
     assert "1. The bank sold gold" in seen["prompt"]
 
 
+def test_make_web_search_deep_raises_budget_not_prompt(monkeypatch):
+    # S3 #401: the deep second pass gives the model a BIGGER search budget (max_uses), never a
+    # different prompt — deepening recall without touching an in-app agent prompt.
+    seen: dict = {}
+
+    def fake_search(prompt, *, tools, model, **kw):
+        seen.setdefault("prompts", []).append(prompt)
+        seen.setdefault("max_uses", []).append(tools[0]["max_uses"])
+        return [{"type": "text", "text": '{"1": []}'}]
+
+    monkeypatch.setattr(sa, "claude_web_search", fake_search)
+    ws = sa.make_web_search(set())
+    ws(["The bank sold gold"], "chronicle.example")           # shallow
+    ws(["The bank sold gold"], "chronicle.example", deep=True)  # deep
+    assert seen["max_uses"][1] > seen["max_uses"][0]           # deeper budget
+    assert seen["prompts"][0] == seen["prompts"][1]            # identical prompt
+
+
 def test_make_web_search_empty_claims_and_failure(monkeypatch):
     ws = sa.make_web_search(set())
     assert ws([], "x") == []
@@ -319,6 +337,7 @@ def test_ops_meta_carries_coverage_never_the_public_payload(monkeypatch):
         "searched_claims": 5, "skipped_claims": 1, "candidates_considered": 9,
         "candidates_used": 4, "web_corroborated": 3, "web_contradicted": 1,
         "web_neutral": 2, "apify_fallbacks": 2, "nli_available": True,
+        "deep_searched": 0, "deep_rescued": 0,
     }
     # the public payload (served + cached) carries no ops block and no coverage numbers
     assert "ops" not in payload

@@ -578,15 +578,23 @@ def parse_citations(text: str, n: int) -> list[list[Citation]]:
 _SEARCH_BATCH = int(os.environ.get("MAAT_ANALYSE_SEARCH_BATCH", "4"))
 
 
-def _search_batch(claim_texts: Sequence[str], own_domain: str, blocked: list[str]) -> list[list[Citation]]:
-    """One web-search call over a small batch of claims → per-claim citations (aligned)."""
+def _search_batch(
+    claim_texts: Sequence[str], own_domain: str, blocked: list[str], *, deep: bool = False,
+) -> list[list[Citation]]:
+    """One web-search call over a small batch of claims → per-claim citations (aligned).
+
+    ``deep`` (S3 #401) is the second-pass budget for claims that came back uncorroborated: it raises
+    the search allowance so the model can try more angles before we conclude a claim is lone. The
+    PROMPT is unchanged — only the tool's ``max_uses`` grows (a fresh, larger-budget pass), so this
+    needs no in-app prompt change."""
     n = len(claim_texts)
     claims_block = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(claim_texts))
     prompt = SEARCH_PROMPT.replace("{own_domain}", own_domain or "unknown").replace(
         "{claims}", claims_block
     )
+    per_claim, base = (6, 4) if deep else (3, 2)
     tool: dict = {
-        "type": _WEB_SEARCH_TOOL_TYPE, "name": "web_search", "max_uses": 3 * n + 2,
+        "type": _WEB_SEARCH_TOOL_TYPE, "name": "web_search", "max_uses": per_claim * n + base,
     }
     if blocked:
         tool["blocked_domains"] = blocked
@@ -604,7 +612,7 @@ def make_web_search(denied: set[str]):
     concurrently. Blocks the article's own outlet + denied sources at the tool level; the pipeline
     re-verifies domain, quote, and entailment regardless."""
 
-    def web_search(claim_texts: Sequence[str], own_domain: str) -> list[list[Citation]]:
+    def web_search(claim_texts: Sequence[str], own_domain: str, deep: bool = False) -> list[list[Citation]]:
         n = len(claim_texts)
         if not n:
             return []
@@ -614,7 +622,7 @@ def make_web_search(denied: set[str]):
         ]
         with ThreadPoolExecutor(max_workers=len(batches)) as ex:
             results = list(ex.map(
-                lambda b: _search_batch(b, own_domain, blocked), batches
+                lambda b: _search_batch(b, own_domain, blocked, deep=deep), batches
             ))
         out: list[list[Citation]] = []
         for r in results:
@@ -829,6 +837,8 @@ def ops_meta(analysis: ArticleAnalysis, *, secs: float | None = None) -> dict[st
             "web_neutral": lv.web_neutral,
             "apify_fallbacks": lv.apify_fallbacks,
             "nli_available": lv.nli_available,
+            "deep_searched": lv.deep_searched,
+            "deep_rescued": lv.deep_rescued,
         }
     return out
 

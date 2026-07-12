@@ -234,6 +234,46 @@ def test_lone_claims_differentiate_by_attribution_voice():
     assert by[named].confidence > by[own].confidence  # named attribution reads stronger
 
 
+def test_deep_search_rescues_a_shallow_lone_claim():
+    # S3 #401: a claim the FIRST web-search pass left uncorroborated gets a DEEPER second pass before
+    # being concluded single-source — the count is a floor gated by recall, so we look harder at the
+    # low end rather than stop at one shallow look. Here pass 1 finds nothing; the deep pass does.
+    from maat.pipeline.analyse import Citation, analyse_article
+
+    claim_text = "The dam was breached on Monday"
+    quote = "The dam was breached on Monday, officials confirmed."
+    calls = {"shallow": 0, "deep": 0}
+
+    def web_search(texts, own_domain, deep=False):
+        if deep:
+            calls["deep"] += 1
+            return [[Citation(url="https://other.example/x", domain="other.example", quote=quote)]]
+        calls["shallow"] += 1
+        return [[]]  # the shallow pass finds nothing
+
+    res = analyse_article(
+        "https://outlet.example/story",
+        reputation={},
+        corpus_lookup=lambda t: [None] * len(t),
+        fetch=lambda u: FetchedPage(
+            body=(f"{claim_text}. Reported by our correspondent." if "outlet.example" in u else quote),
+            title="T", image=None, date=None,
+        ),
+        extract=lambda _b, **_k: [Claim(text=claim_text, voice="own", evidence_span=claim_text)],
+        classify=lambda c, **_k: c,
+        extremity_of=lambda _t: "notable",
+        embed=fake_embed,
+        language_of=lambda _t: "en",
+        web_search=web_search,
+        nli=lambda _p, _h: ("entailment", 0.9),
+    )
+    r = next(x for x in res.facts if x.claim.text == claim_text)
+    assert calls["shallow"] == 1 and calls["deep"] == 1  # deep pass ran BECAUSE pass 1 was lone
+    assert r.independent_originators == 2  # rescued: pasted article + the deep-found outside source
+    assert res.live is not None
+    assert res.live.deep_searched == 1 and res.live.deep_rescued == 1
+
+
 def test_projections_split_out_and_never_scored():
     res = analyse()
     assert [r.claim.text for r in res.projections] == [_FORECAST]
