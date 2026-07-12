@@ -436,6 +436,39 @@ def test_judge_entailment_is_bidirectional():
     assert judge_entailment(entails_only_forward, "quote", "claim") == "entails"
 
 
+def test_judge_entailment_scored_carries_strength():
+    from maat.pipeline.analyse import judge_entailment_scored
+
+    verdict, strength = judge_entailment_scored(_nli, _GOLD_QUOTE_BBC, _GOLD)
+    assert verdict == "entails" and strength >= 0.5
+    # non-entailing verdicts carry zero strength — grading applies within the accepted only
+    assert judge_entailment_scored(_nli, _ANKLE_QUOTE, _GOLD)[1] == 0.0
+    assert judge_entailment_scored(None, _GOLD_QUOTE_BBC, _GOLD) == ("unknown", 0.0)
+
+
+def test_entailment_weight_grades_within_the_gate():
+    from maat.pipeline.analyse import _ENTAIL_FLOOR, entailment_weight
+
+    # floor at the gate threshold, ~full at certainty, monotone between (S5 #403)
+    assert entailment_weight(0.5, 0.5) == _ENTAIL_FLOOR
+    assert entailment_weight(1.0, 0.5) == 1.0
+    assert entailment_weight(0.6, 0.5) < entailment_weight(0.9, 0.5)
+
+
+def test_strong_entailment_corroborates_more_than_barely(monkeypatch):
+    # S5 #403: the SAME citation counts more when the source asserts the fact head-on than when it
+    # barely clears the entailment gate — graded strength, not a binary yes/no.
+    cits = [Citation("https://walled.example/gold", "walled.example",
+                     "The central bank has sold about half of its gold reserves")]
+
+    def gold_conf(prob):
+        nli = lambda p, h: ("entailment", prob)  # noqa: E731
+        res = _analyse_ws(cits, nli=nli, search=None)
+        return next(r for r in res.facts if r.claim.text == _GOLD).confidence
+
+    assert gold_conf(0.98) > gold_conf(0.55)
+
+
 def test_websearch_entailed_quotes_corroborate():
     res = _analyse_ws([
         Citation("https://bbc.co.uk/gold", "bbc.co.uk", _GOLD_QUOTE_BBC),
