@@ -46,7 +46,12 @@ from maat.learning.article_credibility import ArticleClaim, score_article
 from maat.learning.story_credibility import StoryScore
 from maat.pipeline.claim import Claim
 from maat.pipeline.classify import classify_claims
-from maat.pipeline.corroborate import ClaimRow, confidence_label, corroborate_fixed
+from maat.pipeline.corroborate import (
+    ClaimRow,
+    claim_attribution_weight,
+    confidence_label,
+    corroborate_fixed,
+)
 from maat.pipeline.extract import extract_claims
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
@@ -361,6 +366,7 @@ def _corpus_reading(
         grounding=match.grounding,
         ownership=ownership,
         reputation=dict(reputation),  # S1 #399: established originators corroborate more
+        attribution={_ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source)},  # S2 #400
     )
     rated = _rep(reputation, source) is not None or any(
         _rep(reputation, s) is not None for grp in match.originator_sources for s in grp
@@ -384,7 +390,10 @@ def _lone_reading(
     """A claim with no outside evidence: a single originator, weighted by its own attribution
     quality (§5.2) — honest, never inflated."""
     row = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
-    cor = corroborate_fixed([row], {_ANALYSED: body}, extremity, reputation=dict(reputation))
+    cor = corroborate_fixed(
+        [row], {_ANALYSED: body}, extremity, reputation=dict(reputation),
+        attribution={_ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source)},
+    )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity
     )
@@ -430,6 +439,7 @@ def _live_reading(
     cor = corroborate_fixed(
         [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding,
         ownership=ownership, reputation=dict(reputation),  # S1 #399
+        attribution={_ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source)},  # S2 #400
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity,
