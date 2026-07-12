@@ -37,8 +37,28 @@ _STRONG_SUPPORT = 0.70       # a supporting fact counts as "strong" at/above thi
 _SUPPORT_BONUS = 0.03        # … and nudges the score up this much each …
 _SUPPORT_BONUS_CAP = 0.09    # … capped here (a solid supporting cast lifts, never rescues).
 _COLD_START_CAP = 0.70       # only-unproven carriers can't reach "strongly established".
+_PUB_CEILING_FLOOR = 0.5     # S4 #402: a PROVEN-WEAK publisher's article is bounded here — its own
+#                              track record caps how far to trust it on uncorroborated say-so.
 _DISQUALIFIED_CEILING = 20   # a disqualified article floors into the bottom band (cauri: disqualifying).
 _BIG = ("significant", "extraordinary")
+
+
+def _ceiling(any_rated_originator: bool, publisher_reputation: float | None) -> tuple[float, str]:
+    """How high the article can score, and why (S4 #402). Corroboration by a proven OUTSIDE
+    originator lifts the cold-start cap entirely; otherwise the PUBLISHER's own record bounds it —
+    a proven-strong outlet up to the top, an unrated one at the cold-start cap, a proven-weak one
+    below it (its record limits how far to trust its uncorroborated claims). This is a CEILING
+    (bounds the top); the per-claim reputation weighting (S1) moves the base — different axes, so
+    the two never double-count."""
+    if any_rated_originator:
+        return 1.0, ""
+    if publisher_reputation is not None:
+        rep = max(0.0, min(1.0, publisher_reputation))
+        ceiling = round(_PUB_CEILING_FLOOR + (1.0 - _PUB_CEILING_FLOOR) * rep, 2)
+        why = ("publisher has a strong track record" if ceiling >= _COLD_START_CAP
+               else "publisher's own track record is weak — capped")
+        return ceiling, why
+    return _COLD_START_CAP, "carriers not yet proven — capped"
 
 
 @dataclass(frozen=True)
@@ -73,11 +93,16 @@ def _disqualifiers(central: list[ArticleClaim]) -> list[str]:
     return list(dict.fromkeys(reasons))
 
 
-def score_article(claims: list[ArticleClaim]) -> StoryScore:
+def score_article(
+    claims: list[ArticleClaim], *, publisher_reputation: float | None = None
+) -> StoryScore:
     """Roll an article's FACTUAL claims into one 0..100 credibility score (see module docstring).
 
     Projections are excluded by the caller; an article with no checkable fact is a forecast, not a
-    truth score."""
+    truth score. ``publisher_reputation`` (S4 #402, the analysed outlet's own track record in [0,1],
+    None = unrated) sets the article's ceiling when its claims aren't corroborated by a proven
+    outside originator — a CEILING, distinct from the per-claim reputation weighting (S1) that moves
+    the base, so the two never double-count."""
     facts = list(claims)
     if not facts:
         return StoryScore(0, "forecast", "No checkable factual claims",
@@ -114,11 +139,14 @@ def score_article(claims: list[ArticleClaim]) -> StoryScore:
     if weakest.extremity in _BIG:
         why.append(f"{weakest.extremity} central claim — bar raised")
 
-    # Cold-start cap: an article carried only by unproven sourcing can't reach the top band.
+    # S4 #402 — the article's ceiling: corroboration by a proven OUTSIDE originator lifts it,
+    # otherwise the publisher's own track record bounds it (see ``_ceiling``).
+    ceiling, cap_why = _ceiling(any(c.rated_originator for c in facts), publisher_reputation)
     capped = False
-    if all(not c.rated_originator for c in facts) and base > _COLD_START_CAP:
-        base, capped = _COLD_START_CAP, True
-        why.append("carriers not yet proven — capped")
+    if base > ceiling:
+        base, capped = ceiling, True
+        if cap_why:
+            why.append(cap_why)
 
     score = round(max(0.0, min(1.0, base)) * 100)
     key, label = band_for(score)
