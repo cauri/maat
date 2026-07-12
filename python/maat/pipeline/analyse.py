@@ -48,6 +48,7 @@ from maat.pipeline.claim import Claim
 from maat.pipeline.classify import classify_claims
 from maat.pipeline.corroborate import (
     ClaimRow,
+    attribution_weight,
     claim_attribution_weight,
     confidence_label,
     corroborate_fixed,
@@ -432,6 +433,7 @@ def _live_reading(
     matched_rows: list[ClaimRow], bodies: dict[str, str],
     reputation: Mapping[str, float],
     *, disputed: bool = False, ownership: dict[str, str] | None = None,
+    cite_weights: dict[str, float] | None = None,
 ) -> tuple[ClaimReading, bool]:
     """Fold live-found corroborating claims with the pasted article's own assertion — the same
     §5.5 collapse and §5.6 read the feed uses, over evidence found minutes ago.
@@ -448,7 +450,12 @@ def _live_reading(
     cor = corroborate_fixed(
         [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding,
         ownership=ownership, reputation=dict(reputation),  # S1 #399
-        attribution={_ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source)},  # S2 #400
+        attribution={
+            # S5 #403: each cited source graded by attribution × entailment strength…
+            **(cite_weights or {}),
+            # …and the pasted article's own claim by its voice/speaker (S2 #400).
+            _ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source),
+        },
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity,
@@ -543,12 +550,12 @@ _NLI_ENTAIL = "entailment"
 _NLI_CONTRADICT = "contradiction"
 
 
-def judge_entailment(
+def judge_entailment_scored(
     nli: NliFn | None, quote: str, claim_text: str,
     *, min_entail: float = 0.5, min_contradict: float = 0.6,
-) -> str:
-    """An NLI MODEL's ruling on whether the cited passage supports the claim: 'entails' |
-    'contradicts' | 'neutral' | 'unknown'.
+) -> tuple[str, float]:
+    """An NLI MODEL's ruling on whether the cited passage supports the claim, WITH its strength:
+    ('entails' | 'contradicts' | 'neutral' | 'unknown', entailment probability).
 
     Only 'entails' counts as corroboration — this is the gate that stops a topically-similar but
     unrelated passage (an Australian ankle-monitor ruling vs a French politician's sentence) from
@@ -562,19 +569,53 @@ def judge_entailment(
     recall from 4/6 to 6/7 including cross-language French support, while every unrelated /
     contradicting pair is still rejected). Contradiction is judged passage→claim only (the natural
     'does the evidence dispute the claim'). 'unknown' when the model is unavailable — the caller
-    then does NOT count the source (it never trusts the search model's own claim→source mapping)."""
+    then does NOT count the source (it never trusts the search model's own claim→source mapping).
+
+    The strength (S5 #403) is the best entailment probability across the two directions — 0.0
+    whenever the verdict is not 'entails' — so a source that asserts the fact head-on can count
+    more than one that barely clears the gate (``entailment_weight`` maps it to a fold weight)."""
     if nli is None:
-        return "unknown"
+        return "unknown", 0.0
     forward = nli(quote, claim_text)
     reverse = nli(claim_text, quote)
     if forward is None and reverse is None:
-        return "unknown"
-    for res in (forward, reverse):
-        if res is not None and res[0] == _NLI_ENTAIL and res[1] >= min_entail:
-            return "entails"
+        return "unknown", 0.0
+    strength = max(
+        (res[1] for res in (forward, reverse)
+         if res is not None and res[0] == _NLI_ENTAIL and res[1] >= min_entail),
+        default=0.0,
+    )
+    if strength > 0.0:
+        return "entails", strength
     if forward is not None and forward[0] == _NLI_CONTRADICT and forward[1] >= min_contradict:
-        return "contradicts"
-    return "neutral"
+        return "contradicts", 0.0
+    return "neutral", 0.0
+
+
+def judge_entailment(
+    nli: NliFn | None, quote: str, claim_text: str,
+    *, min_entail: float = 0.5, min_contradict: float = 0.6,
+) -> str:
+    """The verdict alone — see ``judge_entailment_scored`` (the gate is identical)."""
+    return judge_entailment_scored(
+        nli, quote, claim_text, min_entail=min_entail, min_contradict=min_contradict
+    )[0]
+
+
+# S5 #403 — graded corroboration strength: within the accepted (the gate already dropped junk), a
+# source that asserts the fact head-on counts more than one that barely clears the entailment bar.
+# A citation's fold weight scales linearly from the floor (at the gate threshold) to 1.0 (at
+# certainty). Gentle by design — grading, not a second gate. DRAFT knob.
+_ENTAIL_FLOOR = 0.7
+
+
+def entailment_weight(strength: float, min_entail: float = 0.5) -> float:
+    """Map an accepted citation's entailment strength to its fold weight in [_ENTAIL_FLOOR, 1.0]."""
+    if strength <= min_entail:
+        return _ENTAIL_FLOOR
+    span = 1.0 - min_entail
+    frac = (min(1.0, strength) - min_entail) / span if span > 0 else 1.0
+    return round(_ENTAIL_FLOOR + (1.0 - _ENTAIL_FLOOR) * frac, 2)
 
 
 class _CiteFetch:
@@ -607,16 +648,23 @@ def _websearch_rows(
     i: int, claim: Claim, citations: Sequence[Citation], *,
     url: str, own_canon: str, accept_candidate: Callable[[LiveCandidate], bool] | None,
     cite_fetch: _CiteFetch, nli: NliFn | None, nli_min: float, contradict_min: float,
-) -> tuple[list[ClaimRow], dict[str, str], bool]:
+) -> tuple[list[ClaimRow], dict[str, str], bool, dict[str, float]]:
     """One claim's web-search corroboration. For each offered citation: exclude the pasted outlet /
     denied domains, then NLI-JUDGE the quote against the claim (the hard gate — entailment counts,
     contradiction disputes, everything else drops). An NLI-entailed source is then re-fetched
     best-effort (FAST rungs only) and dropped ONLY if we got a body the quote is wholly absent from
     (``quote_grounded``); a page we cannot fetch is kept on the NLI judgement — real corroboration
     is never lost just because a publisher is hard to fetch. Returns (rows, their bodies,
-    contradicted?). The fold body is the fetched page when available, else the quote itself."""
+    contradicted?, per-URL fold weights). The fold body is the fetched page when available, else the
+    quote itself.
+
+    The weights (S5 #403) grade each accepted source by HOW STRONGLY it asserts the fact: its
+    sourcing quality (the same §5.2 attribution scan the fold would run) × its entailment strength
+    (``entailment_weight``) — so a head-on assertion counts more than one that barely clears the
+    gate. Fed to ``corroborate_fixed`` as ``attribution`` overrides for exactly these URLs."""
     rows: list[ClaimRow] = []
     bodies: dict[str, str] = {}
+    weights: dict[str, float] = {}
     contradicted = False
     seen: set[str] = set()
     for n, cit in enumerate(citations):
@@ -629,7 +677,7 @@ def _websearch_rows(
         ):
             continue  # denied source / non-news (prefiltered_reject drops wikis, social, …)
         seen.add(cit.url)
-        verdict = judge_entailment(
+        verdict, strength = judge_entailment_scored(
             nli, cit.quote, claim.text, min_entail=nli_min, min_contradict=contradict_min
         )
         if verdict == "contradicts":
@@ -647,11 +695,19 @@ def _websearch_rows(
             if sentence is None:
                 continue
             quote = sentence
+            _v, strength = judge_entailment_scored(  # the accepted sentence's own strength (S5)
+                nli, sentence, claim.text, min_entail=nli_min, min_contradict=contradict_min
+            )
         else:
             continue  # neutral / unknown and unfetchable — never trust the model's own mapping
         rows.append(ClaimRow(id=f"cite-{i}-{n}", text=quote, article_id=cit.url, source=cit.domain))
         bodies[cit.url] = body or quote
-    return rows, bodies, contradicted
+        weights[cit.url] = round(
+            attribution_weight(bodies[cit.url], cit.domain)
+            * entailment_weight(strength, nli_min),
+            2,
+        )
+    return rows, bodies, contradicted, weights
 
 
 def _safe_search(search: SearchFn, query: str) -> list[LiveCandidate]:
@@ -890,10 +946,11 @@ def analyse_article(
             emit("checking", {"index": i})
             matched_rows: list[ClaimRow] = []
             bodies: dict[str, str] = {}
+            weights: dict[str, float] = {}
             contradicted = False
             cits = citations.get(i)
             if cits:
-                matched_rows, bodies, contradicted = _websearch_rows(
+                matched_rows, bodies, contradicted, weights = _websearch_rows(
                     i, claim, cits, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
@@ -921,7 +978,7 @@ def analyse_article(
                     tally["contra"] += 1
             resolve(i, _live_reading(
                 claim, body, source, extremities[i], matched_rows, bodies, reputation,
-                disputed=dispute, ownership=ownership,
+                disputed=dispute, ownership=ownership, cite_weights=weights,
             ))
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -956,7 +1013,7 @@ def analyse_article(
                 if not extra:
                     return
                 merged = [*(citations.get(i) or ()), *extra]
-                rows, bodies2, _contra = _websearch_rows(
+                rows, bodies2, _contra, weights2 = _websearch_rows(
                     i, fact_claims[i], merged, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
@@ -965,7 +1022,7 @@ def analyse_article(
                     return
                 reading, rated = _live_reading(
                     fact_claims[i], body, source, extremities[i], rows, bodies2, reputation,
-                    disputed=False, ownership=ownership,
+                    disputed=False, ownership=ownership, cite_weights=weights2,
                 )
                 if reading.independent_originators > readings[i].independent_originators:
                     with tally_lock:
@@ -1059,6 +1116,7 @@ def check_one_claim(
     cite_fetch = _CiteFetch(fetch)
     matched_rows: list[ClaimRow] = []
     bodies: dict[str, str] = {}
+    weights: dict[str, float] = {}
     contradicted = False
 
     if web_search is not None:
@@ -1069,7 +1127,7 @@ def check_one_claim(
             results = []
         cits = results[0] if results else []
         if cits:
-            matched_rows, bodies, contradicted = _websearch_rows(
+            matched_rows, bodies, contradicted, weights = _websearch_rows(
                 0, claim, cits, url=url, own_canon=own_canon,
                 accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                 nli_min=nli_entail_min, contradict_min=nli_contradict_min,
@@ -1083,5 +1141,5 @@ def check_one_claim(
     dispute = contradicted and not matched_rows
     return _live_reading(
         claim, body, source, extremity, matched_rows, bodies, reputation,
-        disputed=dispute, ownership=ownership,
+        disputed=dispute, ownership=ownership, cite_weights=weights,
     )
