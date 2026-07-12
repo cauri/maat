@@ -320,17 +320,60 @@ def attribution_weight(body: str, source: str) -> float:
     return _W_ANONYMOUS if _is_anonymous(body) else _W_NAMED
 
 
+# §S1 (#399) — reputation of the corroborating outlet also scales its contribution: a proven-strong
+# outlet is worth more than an unknown, an unknown more than a proven-weak one, WITH A FLOOR (cauri:
+# continuous with a floor). Kept modest and cold-start-neutral: most sources on a young system are
+# not yet rated, so an unrated source counts NEARLY-full — reputation is a bonus for a proven track
+# record and a penalty for a proven-bad one, never a cliff that tanks the whole (young) corpus.
+# DRAFT weights, tune on real data.
+_REP_FLOOR = 0.5      # a PROVEN-unreliable outlet still counts this much (never zero)
+_REP_UNRATED = 0.85   # no track record yet — cold-start neutral, a hair below a proven-strong outlet
+#                       (gentle: most sources are unrated; only a PROVEN record earns full 1.0 or
+#                       the floor). _REP_UNRATED / _REP_FLOOR are the two calibration knobs.
+
+
+def _rep_score(reputation: dict[str, float], source: str) -> float | None:
+    """Reputation lookup that survives source-string variants (§6.7): raw, then canonical — so
+    bbc.co.uk finds a record stored under bbc.com / 'BBC News'. None → not yet rated."""
+    hit = reputation.get(source)
+    if hit is not None:
+        return hit
+    return reputation.get(canonical_source(source))
+
+
+def reputation_weight(source: str, reputation: dict[str, float] | None) -> float:
+    """Continuous reputation multiplier on an originator's contribution (S1 #399), in
+    [``_REP_FLOOR``, 1.0]. A proven-strong outlet → ~1.0; an unrated one → ``_REP_UNRATED``
+    (cold-start neutral); a proven-weak one → the floor. ``None`` reputation map → 1.0 (feature
+    off; existing callers unaffected)."""
+    if reputation is None:
+        return 1.0
+    score = _rep_score(reputation, source)
+    if score is None:
+        return _REP_UNRATED
+    return round(_REP_FLOOR + (1.0 - _REP_FLOOR) * max(0.0, min(1.0, score)), 2)
+
+
 def effective_originators(
-    groups: list[list[str]], bodies: dict[str, str], sources: dict[str, str]
+    groups: list[list[str]], bodies: dict[str, str], sources: dict[str, str],
+    *, reputation: dict[str, float] | None = None,
 ) -> float:
-    """Independent-originator count weighted by sourcing quality (§5.2). Each originator counts
-    by its best-attributed article — a named/primary source fully, an anonymous source less, a
-    bald assertion least — so spread behind weak sourcing adds little corroboration."""
+    """Independent-originator count weighted by sourcing quality (§5.2) AND, when a ``reputation``
+    map is supplied, by each originator's track record (S1 #399). Each originator counts by its
+    best-attributed article — a named/primary source fully, an anonymous source less, a bald
+    assertion least — then that is scaled by the originator's reputation weight (a proven outlet
+    counts more than an unknown, floored so unknowns still count). So spread behind weak sourcing
+    OR unproven outlets adds little corroboration. ``reputation=None`` → attribution-only (unchanged
+    for every existing caller)."""
     total = 0.0
     for g in groups:
-        total += max(
+        attrib = max(
             (attribution_weight(bodies.get(a, ""), sources.get(a, "")) for a in g), default=_W_BALD
         )
+        rep = max(
+            (reputation_weight(sources.get(a, ""), reputation) for a in g), default=1.0
+        )
+        total += attrib * rep
     return round(total, 2)
 
 
@@ -488,6 +531,7 @@ def corroborate_fixed(
     *,
     duplicate_source_threshold: float = 0.40,
     ownership: dict[str, str] | None = None,
+    reputation: dict[str, float] | None = None,
     decay: dict[str, float] | None = None,
     primary_lift: float | None = None,
     cap: float | None = None,
@@ -500,6 +544,8 @@ def corroborate_fixed(
     over from the original cluster rather than re-rated — deterministic, free, testable.
     ``grounding`` (#228) likewise carries a cluster's existing grounding verdict through to
     ``confidence_read`` — the Analyse surface (P14) folds a pasted article into a cluster's read.
+    ``reputation`` (S1 #399): when supplied, each originator's contribution is scaled by its track
+    record — corroboration by established outlets weighs more than by unknowns. None → unchanged.
     """
     if not claims:
         raise ValueError("corroborate_fixed needs at least one claim")
@@ -510,7 +556,7 @@ def corroborate_fixed(
     )
     originators = [[article_ids[i] for i in g] for g in groups_idx]
     ind = len(originators)
-    eff = effective_originators(originators, bodies, art_source)
+    eff = effective_originators(originators, bodies, art_source, reputation=reputation)
     primary = any(is_primary_source(s) for s in {c.source for c in claims})
     return Corroboration(
         fact=claims[0].text,

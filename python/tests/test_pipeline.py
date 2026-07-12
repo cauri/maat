@@ -233,6 +233,42 @@ def test_effective_originators_weights_by_sourcing():
     assert effective_originators([["named"], ["primary"]], bodies, sources) == 2.0
 
 
+def test_reputation_weight_continuous_with_floor():
+    from maat.pipeline.corroborate import reputation_weight
+
+    # feature off (no map) → 1.0, unchanged for every existing caller
+    assert reputation_weight("x.com", None) == 1.0
+    # unrated (not in the map) → cold-start neutral, a hair below a proven-strong outlet
+    assert reputation_weight("x.com", {}) == 0.85
+    # continuous in [floor, 1]: proven-strong → ~1.0, proven-weak → the floor, and monotone between
+    assert reputation_weight("x.com", {"x.com": 1.0}) == 1.0
+    assert reputation_weight("x.com", {"x.com": 0.0}) == 0.5
+    assert reputation_weight("x.com", {"x.com": 0.2}) < reputation_weight("x.com", {"x.com": 0.8})
+    # canonical-aware: a raw-key miss falls back to the source's canonical id (§6.7), so a record
+    # stored canonically is still found when the pasted source-string differs in form
+    from maat.pipeline.identity import canonical_source
+    assert reputation_weight("bbc.co.uk", {canonical_source("bbc.co.uk"): 0.9}) > 0.85
+
+
+def test_effective_originators_scales_by_reputation():
+    from maat.pipeline.corroborate import effective_originators
+
+    bodies = {"a": "X happened, the ministry said in a statement."}  # fully attributed → 1.0
+    sources = {"a": "outlet.com"}
+    g = [["a"]]
+    # a lone fully-attributed originator: established outlet counts MORE than unknown counts MORE
+    # than a proven-weak one — the S1 gradient (#399), with the unknown floored (still counts).
+    strong = effective_originators(g, bodies, sources, reputation={"outlet.com": 0.95})
+    unrated = effective_originators(g, bodies, sources, reputation={})
+    weak = effective_originators(g, bodies, sources, reputation={"outlet.com": 0.05})
+    assert strong > unrated > weak > 0
+    # reputation never lifts ABOVE the attribution ceiling (a top outlet with a bald claim still
+    # counts less than a named one) — the two weightings compose, neither overrides the other.
+    bald = effective_originators([["b"]], {"b": "X happened."}, {"b": "outlet.com"},
+                                 reputation={"outlet.com": 1.0})
+    assert bald == 0.3  # bald attribution (0.3) × top reputation (1.0)
+
+
 def test_confidence_read_rises_with_corroboration_and_primary():
     from maat.pipeline.corroborate import confidence_read
 

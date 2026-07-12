@@ -192,6 +192,19 @@ def test_novel_extraordinary_headline_claim_disqualifies_article_without_live():
     assert res.score.score <= 20
 
 
+def test_lone_claim_confidence_scales_with_publisher_reputation():
+    # S1 #399: the SAME lone claim reads more confident from a proven-strong outlet than from an
+    # unrated one — reputation now moves the per-claim number, not just the binary cold-start cap.
+    def _gold(res):
+        return next(r for r in res.facts if r.claim.text == _GOLD)
+
+    strong = _gold(analyse(reputation={"chronicle.example": 0.95}))
+    unrated = _gold(analyse())  # empty reputation map
+    weak = _gold(analyse(reputation={"chronicle.example": 0.05}))
+    assert strong.confidence > unrated.confidence > weak.confidence
+    assert strong.independent_originators == 1  # still one originator — reputation weights, not counts
+
+
 def test_projections_split_out_and_never_scored():
     res = analyse()
     assert [r.claim.text for r in res.projections] == [_FORECAST]
