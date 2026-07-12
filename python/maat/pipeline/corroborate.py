@@ -197,12 +197,72 @@ def _cites(body: str, source: str) -> bool:
     return any(re.search(rf"\b{re.escape(t)}\b", low) for t in _significant_tokens(source))
 
 
+# ── shared-wire syndication (S6 #404) ─────────────────────────────────────────────────────────────
+# Two outlets carrying the SAME agency copy are one originator, even when the rewrite falls under
+# the lexical threshold and neither cites the OTHER outlet (the cascade check compares each body
+# against the other article's SOURCE, so a shared third-party wire slips through pairwise).
+# Detection is deliberately conservative — a bare mention ("the Reuters building") never collapses:
+#   * an EXPLICIT credit: an agency dateline "(AP) —", a byline "By Jane Doe, Associated Press",
+#     or a contribution line "The Associated Press contributed…"; or
+#   * a citation-cascade attribution — a cascade marker plus the agency named as a whole word —
+#     the SAME bar ``_cites`` applies to source names.
+# Short, collision-prone aliases (AP, PA, AFP, …: "PA" is also Pennsylvania) count ONLY in the
+# explicit-credit shapes; distinctive names (reuters, bloomberg, …) may also match the cascade
+# shape. Aliases fold to one wire id so "AP" and "Associated Press" are the same agency.
+_WIRE_ALIASES: dict[str, str] = {
+    "associated press": "ap", "ap": "ap",
+    "reuters": "reuters",
+    "agence france-presse": "afp", "agence france presse": "afp", "afp": "afp",
+    "bloomberg": "bloomberg",
+    "deutsche presse-agentur": "dpa", "dpa": "dpa",
+    "press association": "pa", "pa media": "pa", "pa": "pa",
+    "canadian press": "cp",
+    "united press international": "upi", "upi": "upi",
+    "kyodo": "kyodo", "xinhua": "xinhua", "interfax": "interfax",
+    "tass": "tass", "ansa": "ansa", "efe": "efe",
+}
+# Aliases distinctive enough to count via the cascade shape ("according to Reuters …").
+_WIRE_CASCADE_OK = frozenset(
+    {"associated press", "reuters", "agence france-presse", "agence france presse", "bloomberg",
+     "deutsche presse-agentur", "press association", "pa media", "canadian press",
+     "united press international", "kyodo", "xinhua", "interfax"}
+)
+_WIRE_ALIAS_RX = "|".join(sorted((re.escape(a) for a in _WIRE_ALIASES), key=len, reverse=True))
+_WIRE_EXPLICIT = re.compile(
+    rf"\((?:{_WIRE_ALIAS_RX})\)"                                  # dateline "(AP)" / "(Reuters)"
+    rf"|\bby [^.\n]{{0,80}}?,\s*(?:the\s+)?(?:{_WIRE_ALIAS_RX})\b"  # byline "By Jane Doe, AP"
+    rf"|\b(?:the\s+)?(?:{_WIRE_ALIAS_RX})\s+contributed\b",         # "The AP contributed…"
+    re.IGNORECASE,
+)
+_WIRE_NAME_RX = {alias: re.compile(rf"\b{re.escape(alias)}\b", re.IGNORECASE)
+                 for alias in _WIRE_ALIASES}
+
+
+def wire_credit(body: str) -> str | None:
+    """The wire agency this article credits its copy to (a canonical wire id), or None."""
+    if not body:
+        return None
+    low = body.lower()
+    m = _WIRE_EXPLICIT.search(body)
+    if m:
+        hit = m.group(0).lower()
+        for alias in sorted(_WIRE_ALIASES, key=len, reverse=True):
+            if alias in hit:
+                return _WIRE_ALIASES[alias]
+    if any(mk in low for mk in _CASCADE_MARKERS):
+        for alias in sorted(_WIRE_CASCADE_OK, key=len, reverse=True):
+            if _WIRE_NAME_RX[alias].search(body):
+                return _WIRE_ALIASES[alias]
+    return None
+
+
 def collapse_originators(
     article_ids: list[str], bodies: dict[str, str], sources: dict[str, str],
     lex_threshold: float = 0.40, *, ownership: dict[str, str] | None = None,
 ) -> list[list[int]]:
-    """Collapse near-verbatim reprints (lexical) and citation cascades (explicit attribution)
-    into single originator nodes. Independent articles on one event stay separate.
+    """Collapse near-verbatim reprints (lexical), citation cascades (explicit attribution), and
+    shared-wire pickups (both credit the same agency, S6 #404) into single originator nodes.
+    Independent articles on one event stay separate.
 
     Source identity (§6.7, #36): two articles whose sources resolve to the SAME canonical
     originator (Reuters / reuters.com / Thomson Reuters → "reuters") are one originator, not
@@ -219,6 +279,8 @@ def collapse_originators(
     # label (keyed by canonical source). Articles in the same ownership group are ONE originator
     # — a conglomerate's outlets must not count as several independent corroborators.
     owner = {a: ownership.get(canon[a]) for a in canon} if ownership else {}
+    # Shared wire (S6 #404): articles crediting the SAME agency carry one originator's copy.
+    wires = {a: wire_credit(bodies.get(a, "")) for a in article_ids}
     edges: list[tuple[int, int]] = []
     for i in range(n):
         for j in range(i + 1, n):
@@ -233,7 +295,9 @@ def collapse_originators(
             same_source = c_i is not None and c_i == canon.get(article_ids[j])
             o_i = owner.get(article_ids[i])
             same_owner = o_i is not None and o_i == owner.get(article_ids[j])
-            if lexical or cascade or same_source or same_owner:
+            w_i = wires.get(article_ids[i])
+            same_wire = w_i is not None and w_i == wires.get(article_ids[j])
+            if lexical or cascade or same_source or same_owner or same_wire:
                 edges.append((i, j))
     return _components(n, edges)
 

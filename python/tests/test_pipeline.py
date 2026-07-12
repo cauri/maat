@@ -169,6 +169,42 @@ def test_collapse_co_owned_outlets_to_one_originator():
     assert len(collapse_originators(["a1", "a2"], bodies, sources, ownership=ownership)) == 1
 
 
+def test_wire_credit_detects_credits_not_mentions():
+    from maat.pipeline.corroborate import wire_credit
+
+    # explicit credits: dateline, byline, contribution line — aliases fold to one wire id
+    assert wire_credit("KYIV (AP) — The senator toured a drone facility on Sunday.") == "ap"
+    assert wire_credit("By Jane Doe, The Associated Press. The senator visited.") == "ap"
+    assert wire_credit("He toured the plant. The Associated Press contributed to this report.") == "ap"
+    assert wire_credit("(Reuters) - The central bank cut rates on Thursday.") == "reuters"
+    # cascade attribution (same bar as _cites): marker + a distinctive agency name
+    assert wire_credit("The senator visited the facility, according to Reuters.") == "reuters"
+    # a bare mention is NOT a credit; short collision-prone aliases need an explicit shape
+    assert wire_credit("The Reuters building in London was renovated last year.") is None
+    assert wire_credit("Officials in PA reported record turnout, the county said.") is None
+    assert wire_credit("") is None
+
+
+def test_collapse_shared_wire_pickups_to_one_originator():
+    # S6 #404: two outlets carrying the SAME agency copy are one originator — even rewritten below
+    # the lexical threshold, with neither citing the OTHER outlet. A third, independent report
+    # stays separate; so do two DIFFERENT wires.
+    from maat.pipeline.corroborate import collapse_originators
+
+    bodies = {
+        "x1": "KYIV (AP) — Senator Graham toured the SkyFall drone plant and praised its output.",
+        "x2": "By Sam Roe, Associated Press. Graham inspected a Ukrainian drone factory during his trip.",
+        "x3": "Our correspondent watched Senator Graham arrive at the facility, the embassy said.",
+    }
+    sources = {"x1": "outlet-a.com", "x2": "outlet-b.com", "x3": "outlet-c.com"}
+    groups = collapse_originators(["x1", "x2", "x3"], bodies, sources)
+    assert len(groups) == 2  # the two AP carriers collapse; the independent report stands alone
+    assert sorted(len(g) for g in groups) == [1, 2]
+
+    bodies["x2"] = "(Reuters) - Graham inspected a Ukrainian drone factory during his trip."
+    assert len(collapse_originators(["x1", "x2", "x3"], bodies, sources)) == 3  # AP ≠ Reuters
+
+
 def test_is_primary_source():
     from maat.pipeline.corroborate import is_primary_source
 
