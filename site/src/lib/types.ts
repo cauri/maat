@@ -6,9 +6,12 @@ export type PublicClaim = {
   speaker: string | null;
   central: boolean;
   extremity: string;
-  score: number;
+  // null when `checked` is false: an over-cap claim we never searched (#397) — no score, because a
+  // number would imply we weighed it. The reader can force a check to fill it in.
+  score: number | null;
   verdict: string;
-  tier: "hi" | "mid" | "lo" | "floor" | "none";
+  tier: "hi" | "mid" | "lo" | "floor" | "none" | "unchecked";
+  checked: boolean;
 };
 
 export type PublicProjection = { text: string; speaker: string | null; verdict: string };
@@ -38,6 +41,7 @@ export type Analysis = {
     reasons: string[];
     capped: boolean;
     forecast_only: boolean;
+    unchecked?: number; // claims skipped over the live cap, shown as "Not checked" (#397)
   };
   claims: PublicClaim[];
   projections: PublicProjection[];

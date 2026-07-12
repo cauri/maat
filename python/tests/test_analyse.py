@@ -245,10 +245,14 @@ def test_live_excludes_own_outlet_and_filtered_domains():
 def test_live_search_cap_is_honest_not_silent():
     res = analyse(search=live_candidates, accept_candidate=_accept, live_max_searches=0)
     gold = next(r for r in res.facts if r.claim.text == _GOLD)
-    assert gold.independent_originators == 1  # resolved lone — over the cap
+    # Over the cap → NEVER searched → shown honestly as "Not checked" (#397), NOT silently scored as
+    # a lone single-source claim. The reader can force a check; we don't invent a verdict we didn't earn.
+    assert gold.checked is False
+    assert gold.independent_originators == 0
+    assert gold.verdict == "Not checked yet"
+    assert gold.tier == "unchecked"
     assert res.live is not None
     assert res.live.skipped_claims == 1
-    assert res.score.band == "disqualified"  # unrescued, the central claim still fails
 
 
 def test_progress_events_stream_in_order():

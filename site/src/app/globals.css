@@ -168,6 +168,21 @@ h3.section { font: 600 19px/1.3 var(--serif); margin: 26px 0 12px; }
 .tier-lo { color: var(--amber); }
 .tier-floor { color: var(--red); }
 .tier-none { color: var(--mut); }
+.tier-unchecked { color: var(--mut); font-weight: 600; }
+
+/* "Not checked" (#397): an over-cap claim we never searched — muted, no score, force-checkable */
+.claim.unchecked .not-checked-mark { opacity: 0.45; }
+.unchecked-note { color: var(--mut); font-size: 13.5px; margin: -6px 0 12px; }
+.check-row { display: flex; align-items: center; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
+.check-btn {
+  font-size: 13.5px; font-weight: 600; color: var(--gold);
+  border: 1px solid var(--gold-wash); background: var(--gold-wash);
+  border-radius: 999px; padding: 4px 13px; cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.check-btn:hover:not(:disabled) { background: var(--gold); color: #fff; }
+.check-btn:disabled { opacity: 0.6; cursor: default; }
+.check-err { color: var(--red); font-size: 13px; }
 
 /* ── the reading stage: a miniature representative page with claims highlighting in ── */
 .stage { position: relative; margin: 6px 0 8px; }

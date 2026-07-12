@@ -59,6 +59,7 @@ def _reading(**kw):
         verdict=kw.pop("verdict", "Corroborated"),
         tier=kw.pop("tier", "mid"),
         matched_cluster_id=kw.pop("matched_cluster_id", "cl-secret"),
+        checked=kw.pop("checked", True),
     )
 
 
@@ -74,10 +75,42 @@ def _analysis(facts, score, **kw):
 
 def test_public_claim_never_leaks_mechanism():
     p = sa.public_claim(_reading())
+    # ``checked`` (#397) is a STATE, not mechanism — it says whether we looked, never how we
+    # corroborate — so it's public; the corroboration internals still never are.
     assert set(p) == {"text", "voice", "speaker", "central", "extremity", "score",
-                      "verdict", "tier"}
+                      "verdict", "tier", "checked"}
     flat = str(p)
     assert "cl-secret" not in flat and "originator" not in flat and "cluster" not in flat
+
+
+def test_public_claim_unchecked_has_no_score(monkeypatch):
+    # A "Not checked" claim (#397) NEVER carries a score — a number implies we weighed it.
+    p = sa.public_claim(_reading(checked=False, confidence=0.0, verdict="Not checked yet",
+                                 tier="unchecked", originators=0))
+    assert p["checked"] is False
+    assert p["score"] is None
+    assert p["verdict"] == "Not checked yet"
+
+
+def test_public_payload_reports_unchecked_count():
+    score = StoryScore(70, "corroborated", "Corroborated", ["x"], False, False)
+    facts = [_reading(central=True), _reading(checked=False, verdict="Not checked yet"),
+             _reading(checked=False, verdict="Not checked yet")]
+    payload = sa.public_payload(_analysis(facts, score), "an-1")
+    assert payload["overall"]["unchecked"] == 2
+    # The two unchecked claims cross the wire with a null score, ready for the force-check button.
+    assert [c["score"] for c in payload["claims"]] == [76, None, None]
+
+
+def test_public_reasons_ignore_unchecked_central(monkeypatch):
+    # An unchecked central claim (confidence 0) must NOT be read as the weakest central claim — the
+    # reasons anchor on the CHECKED central claim only (#397).
+    score = StoryScore(70, "corroborated", "Corroborated", ["x"], False, False)
+    strong = _reading(central=True, confidence=0.82, verdict="Well corroborated", originators=4)
+    skipped = _reading(central=True, checked=False, confidence=0.0, verdict="Not checked yet")
+    reasons = sa.public_reasons(_analysis([strong, skipped], score))
+    assert not any("only this source" in r for r in reasons)
+    assert any("central claim" in r.lower() for r in reasons)
 
 
 def test_public_payload_shape_and_publisher():
@@ -591,6 +624,47 @@ def test_post_analyse_streams_claims_then_done(monkeypatch):
     got = client.get(f"/api/v2/analyse/{aid}")
     assert got.status_code == 200
     assert got.json()["analysis"]["overall"]["band"] == "corroborated"
+
+
+def test_check_claim_endpoint_forces_a_single_check(monkeypatch):
+    """#397: the force-check endpoint runs one claim through the live path and returns its public
+    shape — now checked, with a real verdict — and never leaks mechanism."""
+    monkeypatch.setattr(sa, "_CHECK_LIMITER", PerIpRateLimiter(capacity=100, refill_per_sec=100))
+
+    async def host_ok(_h, _p):
+        return True
+
+    monkeypatch.setattr(sa, "_host_is_public", host_ok)
+    _patch_page(monkeypatch)
+    monkeypatch.setattr(sa, "make_nli", lambda: None)  # don't load the model in-test
+
+    async def fake_assets(_pool):
+        return sa._Assets(facts=[], claim_ids={}, embeds=None, reputation={},
+                          denied=set(), ownership={})
+
+    monkeypatch.setattr(sa, "_load_assets", fake_assets)
+
+    checked = _reading(matched_cluster_id=None, confidence=0.78, verdict="Corroborated",
+                       originators=3, checked=True)
+    seen: dict = {}
+
+    def fake_check(claim, **kw):
+        seen["text"], seen["source"] = claim.text, kw.get("source")
+        return checked, True
+
+    monkeypatch.setattr(sa, "check_one_claim", fake_check)
+
+    client = TestClient(_app())
+    r = client.post("/api/v2/analyse/check-claim",
+                    json={"url": "https://example.com/story",
+                          "text": "Graham represented South Carolina since 2003"})
+    assert r.status_code == 200
+    claim = r.json()["claim"]
+    assert claim["checked"] is True and claim["score"] == 78
+    assert claim["verdict"] == "Corroborated"
+    assert seen["text"] == "Graham represented South Carolina since 2003"
+    assert seen["source"] == "example.com"
+    assert "cl-secret" not in r.text  # mechanism never crosses the wire
 
 
 def test_disconnect_does_not_cancel_persistence(monkeypatch):
