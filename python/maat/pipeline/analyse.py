@@ -374,7 +374,10 @@ def _corpus_reading(
         reputation=dict(reputation),  # S1 #399: established originators corroborate more
         attribution={_ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source)},  # S2 #400
     )
-    rated = _rep(reputation, source) is not None or any(
+    # OUTSIDE-corroboration rating only (S4 #402): the pasted publisher's OWN rating is now the
+    # `publisher_reputation` ceiling, not this flag — this flag means "a proven OTHER originator
+    # corroborates", which lifts the cold-start cap.
+    rated = any(
         _rep(reputation, s) is not None for grp in match.originator_sources for s in grp
     )
     verdict, tier = claim_verdict(
@@ -408,7 +411,7 @@ def _lone_reading(
         independent_originators=cor.independent_originators, has_primary=cor.has_primary,
         disputed=False, grounding=None, verdict=verdict, tier=tier, matched_cluster_id=None,
     )
-    return reading, _rep(reputation, source) is not None
+    return reading, False  # lone → no OUTSIDE corroboration; publisher rating is the S4 ceiling now
 
 
 def _unchecked_reading(claim: Claim, extremity: str) -> tuple[ClaimReading, bool]:
@@ -456,7 +459,7 @@ def _live_reading(
         independent_originators=cor.independent_originators, has_primary=cor.has_primary,
         disputed=disputed, grounding=grounding, verdict=verdict, tier=tier, matched_cluster_id=None,
     )
-    rated = _rep(reputation, source) is not None or any(
+    rated = any(  # OUTSIDE corroboration only (S4 #402) — publisher rating is the ceiling
         _rep(reputation, r.source) is not None for r in matched_rows
     )
     return reading, rated
@@ -998,19 +1001,22 @@ def analyse_article(
     scored = [(r, rated) for r, rated in zip(done, rated_flags) if r.checked] or list(
         zip(done, rated_flags)
     )
-    score = score_article([
-        ArticleClaim(
-            confidence=r.confidence,
-            independent_originators=r.independent_originators,
-            has_primary=r.has_primary,
-            extremity=r.extremity,
-            central=r.claim.in_headline or r.claim.is_synthesis,
-            disputed=r.disputed,
-            grounding=r.grounding,
-            rated_originator=rated,
-        )
-        for r, rated in scored
-    ])
+    score = score_article(
+        [
+            ArticleClaim(
+                confidence=r.confidence,
+                independent_originators=r.independent_originators,
+                has_primary=r.has_primary,
+                extremity=r.extremity,
+                central=r.claim.in_headline or r.claim.is_synthesis,
+                disputed=r.disputed,
+                grounding=r.grounding,
+                rated_originator=rated,
+            )
+            for r, rated in scored
+        ],
+        publisher_reputation=_rep(reputation, source),  # S4 #402: the outlet's own record → ceiling
+    )
     emit("scored", {"score": score.score, "band": score.band, "label": score.label})
 
     return ArticleAnalysis(

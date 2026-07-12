@@ -92,3 +92,25 @@ def test_rated_carrier_is_not_capped():
     s = score_article([_claim(0.92, originators=3, central=True, rated=True)])
     assert s.capped is False
     assert s.score > 70
+
+
+def test_publisher_reputation_sets_the_ceiling():
+    # S4 #402: with no rated OUTSIDE originator, the publisher's OWN track record bounds the article.
+    high = _claim(0.92, originators=3, central=True, rated=False)  # high base, uncorroborated outside
+    unrated = score_article([high])                               # cold-start cap 70
+    strong = score_article([high], publisher_reputation=0.95)     # proven-strong → reaches the top
+    mid = score_article([high], publisher_reputation=0.6)         # proven-decent → above cold-start
+    weak = score_article([high], publisher_reputation=0.05)       # proven-weak → below cold-start
+    # a proven-decent record beats an unknown; only a proven-POOR one drops below the cold-start cap
+    assert strong.score > mid.score > unrated.score > weak.score
+    assert strong.capped is False and weak.capped is True
+    assert any("weak" in w for w in weak.why)
+
+
+def test_rated_outside_corroboration_overrides_a_weak_publisher():
+    # A proven OUTSIDE originator corroborating the claim lifts the ceiling regardless of a weak
+    # publisher — corroboration wins over the outlet's own record (S4 #402).
+    s = score_article([_claim(0.92, originators=3, central=True, rated=True)],
+                      publisher_reputation=0.05)
+    assert s.capped is False
+    assert s.score > 70
