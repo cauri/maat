@@ -48,10 +48,12 @@ from maat.pipeline.claim import Claim
 from maat.pipeline.classify import classify_claims
 from maat.pipeline.corroborate import (
     ClaimRow,
+    _named_speaker,
     attribution_weight,
     claim_attribution_weight,
     confidence_label,
     corroborate_fixed,
+    group_by_similarity,
 )
 from maat.pipeline.extract import extract_claims
 from maat.pipeline.extremity import rate_extremity
@@ -174,6 +176,7 @@ class ArticleAnalysis:
     publisher_score: float | None    # reputation lookup (canonical-aware); None = "not yet rated"
     live: LiveMeta | None = None     # live-corroboration coverage, when the pass ran
     dropped_claims: int = 0          # "claims" that failed the quote-the-page check (injection guard)
+    merged_claims: int = 0           # near-duplicate extractions consolidated into one claim (#411)
 
 
 # Seam types. ``CorpusLookup`` returns, per claim text, a HYDRATED CorpusFact or None — the
@@ -802,6 +805,53 @@ def _apify_rows(
     return matched_rows, bodies
 
 
+def consolidate_claims(
+    claims: list[Claim],
+    embed: Callable[[list[str]], list[list[float]]],
+    threshold: float = 0.82,
+) -> tuple[list[Claim], int]:
+    """Merge near-duplicate extracted claims into ONE claim each (#411) — one fact, one claim.
+
+    The extractor can assert the same fact twice in different words ("Senator Lindsey Graham dies
+    at 71" / "Lindsey Graham died on July 11 at the age of 71"). Left separate, each copy gets its
+    OWN extremity rating (LLM variance rated those significant vs notable) and its OWN search
+    budget (both landed in one batch, which piled its citations onto one variant) — the same fact
+    scored 45 and 95 in one analysis. Consolidating BEFORE rating and search kills both: one claim
+    → one rating → one search → one score.
+
+    Same-fact is the system's ONE definition (§5.4): embedding cosine at the ``threshold`` bar,
+    average-linkage — the exact machinery and bar the corpus match uses. Merge policy: the
+    representative is the best-evidenced member (a NAMED attributed voice first — it carries the
+    strongest §5.2 weight — then the most detailed text); centrality survives if ANY member was
+    central. Returns (consolidated claims in article order, how many were folded away). A failed
+    embed skips consolidation — never sinks the analysis."""
+    if len(claims) <= 1:
+        return claims, 0
+    try:
+        vecs = np.asarray(embed([c.text for c in claims]), dtype=np.float64)
+        groups = group_by_similarity([c.text for c in claims], threshold, embeddings=vecs)
+    except Exception as e:  # noqa: BLE001 - consolidation is an optimisation, never fatal
+        log.warning("claim consolidation skipped (%s)", type(e).__name__)
+        return claims, 0
+    picked: list[tuple[int, Claim]] = []  # (first member's article position, merged claim)
+    merged = 0
+    for g in groups:
+        members = [claims[i] for i in sorted(g)]
+        if len(members) == 1:
+            picked.append((min(g), members[0]))
+            continue
+        merged += len(members) - 1
+        rep = max(members, key=lambda c: (
+            c.voice == "attributed" and _named_speaker(c.speaker), len(c.text),
+        ))
+        picked.append((min(g), rep.model_copy(update={
+            "in_headline": any(c.in_headline for c in members),
+            "is_synthesis": any(c.is_synthesis for c in members),
+        })))
+    picked.sort(key=lambda p: p[0])
+    return [c for _pos, c in picked], merged
+
+
 def analyse_article(
     url: str,
     *,
@@ -864,6 +914,9 @@ def analyse_article(
     claims = classify(extracted, article_text=body)
     fact_claims = [c for c in claims if c.kind != "projection"]
     projections = [c for c in claims if c.kind == "projection"]
+    # One fact, one claim (#411): BEFORE the skeleton is emitted and before any rating/search, so
+    # a duplicated fact can never earn two extremity ratings or split one search budget in two.
+    fact_claims, merged = consolidate_claims(fact_claims, embed, same_fact_threshold)
     emit("extracted", {
         "facts": [
             {"text": c.text, "voice": c.voice, "speaker": c.speaker,
@@ -873,6 +926,7 @@ def analyse_article(
         ],
         "projections": [{"text": c.text, "speaker": c.speaker} for c in projections],
         "dropped": dropped,
+        "merged": merged,
     })
 
     matches: Sequence[CorpusFact | None]
@@ -1080,6 +1134,7 @@ def analyse_article(
         url=url, source=source, title=page.title, language=language, image=page.image,
         date=page.date, facts=done, projections=proj_readings, score=score,
         publisher_score=_rep(reputation, source), live=live, dropped_claims=dropped,
+        merged_claims=merged,
     )
 
 
