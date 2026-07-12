@@ -56,9 +56,30 @@
 # the page only POSTs /track + /notify back to its own origin, so no API is exposed here. The admin
 # /acquisition view lives on the private console, never on this host. Upstream is the marketing
 # service on the host loopback (host-net Caddy → 127.0.0.1:8080, NOT a compose service name).
+#
+# The Analyse surface (P14) is ALSO served here, not only on the apex: browsers force `www` back in,
+# so www.maat.press/analyse must work rather than 404 onto the marketing app. The analyse app's
+# routes (/analyse, /card, /_next assets) are routed to the analyse container BEFORE the marketing
+# catch-all — safe because the marketing page uses none of those paths (it has no /_next assets).
+# /favicon.ico + /robots.txt are deliberately NOT routed here, so marketing keeps its own.
 www.maat.press {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:8080
+
+	@analyse path /analyse /analyse/* /card /card/* /_next/*
+	handle @analyse {
+		reverse_proxy 127.0.0.1:3200
+	}
+
+	handle /api/analyse* {
+		uri replace /api/analyse /api/v2/analyse
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8080
+	}
 }
 
 # Apex: the Analyse surface (P14, #365) — Maat's public product page — plus its same-origin API;
