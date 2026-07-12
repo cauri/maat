@@ -142,6 +142,10 @@ class ClaimReading:
     verdict: str
     tier: str
     matched_cluster_id: str | None  # internal provenance — never exposed publicly (what, not how)
+    checked: bool = True            # False → novel claim we did NOT search (over the live cap):
+                                    # carried with NO score, excluded from the overall, and offered
+                                    # to the reader for an on-demand force-check (#397). Never
+                                    # conflate "checked, found alone" with "never checked".
 
 
 @dataclass(frozen=True)
@@ -389,6 +393,19 @@ def _lone_reading(
         disputed=False, grounding=None, verdict=verdict, tier=tier, matched_cluster_id=None,
     )
     return reading, _rep(reputation, source) is not None
+
+
+def _unchecked_reading(claim: Claim, extremity: str) -> tuple[ClaimReading, bool]:
+    """A novel claim we did NOT search — over the live cap (#397). It is NOT lone (we never looked),
+    so it carries no confidence, no score, and is excluded from the overall read; the reader can
+    force a check on it. Distinct from ``_lone_reading`` ("searched, genuinely single-source"),
+    which the identical old wording ("Only this source so far") dishonestly conflated it with."""
+    reading = ClaimReading(
+        claim=claim, extremity=extremity, confidence=0.0, independent_originators=0,
+        has_primary=False, disputed=False, grounding=None,
+        verdict="Not checked yet", tier="unchecked", matched_cluster_id=None, checked=False,
+    )
+    return reading, False
 
 
 def _live_reading(
@@ -821,8 +838,8 @@ def analyse_article(
             i,
         ))
         selected, skipped = ranked[:live_max_searches], ranked[live_max_searches:]
-        for i in skipped:  # over the search cap — resolved honestly as lone, and REPORTED (meta)
-            resolve(i, _lone_reading(fact_claims[i], body, source, extremities[i], reputation))
+        for i in skipped:  # over the search cap — honestly "Not checked" (never searched), scored
+            resolve(i, _unchecked_reading(fact_claims[i], extremities[i]))  # by neither us nor the overall (#397)
         emit("searching", {"claims": len(selected)})
 
         own_canon = canonical_source(source)
@@ -906,6 +923,12 @@ def analyse_article(
         )
         for c in projections
     ]
+    # Unchecked claims (#397) carry no evidence either way — they NEVER move the overall. Score over
+    # the checked facts only; fall back to all facts if (a misconfigured cap of 0) left none checked,
+    # so a real article is never mislabelled a "forecast".
+    scored = [(r, rated) for r, rated in zip(done, rated_flags) if r.checked] or list(
+        zip(done, rated_flags)
+    )
     score = score_article([
         ArticleClaim(
             confidence=r.confidence,
@@ -917,7 +940,7 @@ def analyse_article(
             grounding=r.grounding,
             rated_originator=rated,
         )
-        for r, rated in zip(done, rated_flags)
+        for r, rated in scored
     ])
     emit("scored", {"score": score.score, "band": score.band, "label": score.label})
 
@@ -925,4 +948,65 @@ def analyse_article(
         url=url, source=source, title=page.title, language=language, image=page.image,
         date=page.date, facts=done, projections=proj_readings, score=score,
         publisher_score=_rep(reputation, source), live=live, dropped_claims=dropped,
+    )
+
+
+def check_one_claim(
+    claim: Claim,
+    *,
+    body: str,
+    source: str,
+    url: str,
+    reputation: Mapping[str, float],
+    ownership: dict[str, str] | None = None,
+    web_search: WebSearchFn | None = None,
+    nli: NliFn | None = None,
+    search: SearchFn | None = None,
+    accept_candidate: Callable[[LiveCandidate], bool] | None = None,
+    fetch: Callable[[str], FetchedPage | None] = fetch_page,
+    extract: Callable[..., list[Claim]] = extract_claims,
+    extremity_of: Callable[[str], str] = rate_extremity,
+    embed: Callable[[list[str]], list[list[float]]] = mistral_embed,
+    same_fact_threshold: float = 0.82,
+    nli_entail_min: float = 0.5,
+    nli_contradict_min: float = 0.6,
+    live_max_candidates: int = 18,
+) -> tuple[ClaimReading, bool]:
+    """The reader's on-demand force-check of ONE claim (#397): the SAME web-search → verify → NLI →
+    fold journey a batch claim takes inside ``analyse_article``, run standalone for a single claim
+    whose search was skipped over the cap. Returns (reading, rated); the reading is ``checked=True``
+    (a real check happened) whatever it finds — "Only this source so far" now means we looked.
+
+    Reuses the batch helpers verbatim (``_websearch_rows``/``_apify_rows``/``_live_reading``) so the
+    forced path and the batch path can never drift apart in how they judge or fold evidence."""
+    own_canon = canonical_source(source)
+    extremity = extremity_of(claim.text)
+    cite_fetch = _CiteFetch(fetch)
+    matched_rows: list[ClaimRow] = []
+    bodies: dict[str, str] = {}
+    contradicted = False
+
+    if web_search is not None:
+        try:
+            results = web_search([claim.text], source)
+        except Exception as e:  # noqa: BLE001 - a failed pass falls back to Apify below
+            log.warning("force-check web-search failed: %s", type(e).__name__)
+            results = []
+        cits = results[0] if results else []
+        if cits:
+            matched_rows, bodies, contradicted = _websearch_rows(
+                0, claim, cits, url=url, own_canon=own_canon,
+                accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
+                nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+            )
+    if not matched_rows and search is not None:  # web-search found nothing usable → Apify fallback
+        matched_rows, bodies = _apify_rows(
+            0, claim, search=search, extract=extract, embed=embed,
+            shared=_LiveShared(live_max_candidates), accept_candidate=accept_candidate,
+            own_canon=own_canon, url=url, same_fact_threshold=same_fact_threshold,
+        )
+    dispute = contradicted and not matched_rows
+    return _live_reading(
+        claim, body, source, extremity, matched_rows, bodies, reputation,
+        disputed=dispute, ownership=ownership,
     )

@@ -58,8 +58,11 @@ from maat.pipeline.analyse import (
     CorpusFact,
     LiveCandidate,
     analyse_article,
+    check_one_claim,
     match_claims,
+    sanitise_body,
 )
+from maat.pipeline.claim import Claim
 from maat.pipeline.corroborate import ClaimRow
 from maat.pipeline.identity import canonical_source
 from maat.pipeline.ownership import fold_ownership
@@ -104,6 +107,13 @@ _BODY_CHARS = int(os.environ.get("MAAT_ANALYSE_BODY_CHARS", "60000"))
 _LIMITER = PerIpRateLimiter(
     capacity=float(os.environ.get("MAAT_ANALYSE_RATE_BURST", "3")),
     refill_per_sec=float(os.environ.get("MAAT_ANALYSE_RATE_RPS", str(1 / 300))),
+)
+# Force-checking one claim (#397) is a fraction of a full analysis (one web-search pass, no
+# extraction/classification), so its budget is looser — a reader clearing the "Not checked" rows on
+# a page shouldn't hit the whole-analysis wall after three.
+_CHECK_LIMITER = PerIpRateLimiter(
+    capacity=float(os.environ.get("MAAT_ANALYSE_CHECK_BURST", "12")),
+    refill_per_sec=float(os.environ.get("MAAT_ANALYSE_CHECK_RPS", str(1 / 30))),
 )
 _SEM = asyncio.Semaphore(max(1, _CONCURRENCY))
 
@@ -651,15 +661,18 @@ def make_gate():
 
 
 def public_claim(r: ClaimReading) -> dict[str, Any]:
+    # An unchecked claim (#397) was never searched — it carries NO score (a number would imply we
+    # weighed it). ``checked`` lets the page render the "Not checked" state + its force-check button.
     return {
         "text": r.claim.text,
         "voice": r.claim.voice,
         "speaker": r.claim.speaker,
         "central": bool(r.claim.in_headline or r.claim.is_synthesis),
         "extremity": r.extremity,
-        "score": round(r.confidence * 100),
+        "score": round(r.confidence * 100) if r.checked else None,
         "verdict": r.verdict,
         "tier": r.tier,
+        "checked": r.checked,
     }
 
 
@@ -672,7 +685,9 @@ def public_reasons(analysis: ArticleAnalysis) -> list[str]:
     A disqualified score's own reasons are already phrased for the reader."""
     if analysis.score.band == "disqualified":
         return list(analysis.score.why)
-    facts = analysis.facts
+    # Reason over CHECKED facts only (#397) — an unchecked claim carries no verdict to anchor on, and
+    # its confidence of 0 would falsely read as the weakest central claim.
+    facts = [r for r in analysis.facts if r.checked]
     if not facts:
         return ["no checkable factual claims yet"]
     reasons: list[str] = []
@@ -843,6 +858,9 @@ def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
             "reasons": reasons,
             "capped": analysis.score.capped,
             "forecast_only": analysis.score.forecast_only,
+            # Claims skipped over the live cap and never searched (#397): scored by no one, shown as
+            # "Not checked", each force-checkable. Surfaced so the page can say "N not checked".
+            "unchecked": sum(1 for r in analysis.facts if not r.checked),
         },
         "claims": [public_claim(r) for r in analysis.facts],
         "projections": [public_projection(r) for r in analysis.projections],
@@ -1007,6 +1025,52 @@ async def run_analysis(
     return payload
 
 
+async def run_check(
+    state: Any, url: str, text: str, *,
+    voice: str = "own", speaker: str | None = None, central: bool = False,
+) -> dict:
+    """Force-check ONE claim on demand (#397): run the live corroboration path for a single claim the
+    batch analysis skipped over the cap, and return its public claim shape — now with a real verdict
+    and (if corroborated) a score. Raises AnalyseError (user-facing) for a bad URL; other exceptions
+    are internal and masked at the wire. Bounded by the same LLM-work semaphore as full analyses so a
+    burst of checks can't overrun the box."""
+    norm = normalise_url(url)
+    err = await check_url(norm)
+    if err:
+        raise AnalyseError(err)
+    page = await asyncio.to_thread(fetch_page, norm)
+    if page is None or not page.body:
+        raise AnalyseError("could not extract an article from this URL")
+    source = urlparse(norm).netloc.removeprefix("www.")
+    body = sanitise_body(page.body, max_chars=_BODY_CHARS)
+    claim = Claim(
+        text=text, voice=("attributed" if voice == "attributed" else "own"),
+        speaker=speaker, evidence_span=text, in_headline=bool(central), kind="fact",
+    )
+    async with _SEM:
+        assets = await _load_assets(state.pool)
+        reading, _rated = await asyncio.to_thread(
+            check_one_claim,
+            claim,
+            body=body,
+            source=source,
+            url=norm,
+            reputation=assets.reputation,
+            ownership=assets.ownership,
+            web_search=make_web_search(assets.denied) if (_LIVE and _WEB_SEARCH) else None,
+            nli=make_nli(),
+            search=make_searcher() if _LIVE else None,
+            accept_candidate=make_accept(assets.denied),
+            # Cited pages verify on the FAST ladder only (no Apify/Zyte per cited URL) — same posture
+            # as the batch path; a walled citation falls back to the NLI judgement.
+            fetch=lambda u: fetch_page(u, fast=True),
+            nli_entail_min=_NLI_ENTAIL_MIN,
+            nli_contradict_min=_NLI_CONTRADICT_MIN,
+            live_max_candidates=_MAX_CANDIDATES,
+        )
+    return public_claim(reading)
+
+
 async def _registry_seen(pool: Any, source: str) -> bool:
     """Is this source already in the registry lifecycle (#241)? Unknown → True (don't spam)."""
     try:
@@ -1049,6 +1113,17 @@ if BaseModel is not None:
     class AnalyseReq(BaseModel):
         url: str = Field(min_length=8, max_length=2048)
         refresh: bool = False
+
+    class CheckReq(BaseModel):
+        # Force-check one "Not checked" claim (#397). The client echoes the claim back from its own
+        # public shape; the server re-rates extremity and re-runs corroboration (never trusts the
+        # client for the verdict). ``evidence_span`` isn't needed — this claim already passed the
+        # span/injection guard when the article was analysed.
+        url: str = Field(min_length=8, max_length=2048)
+        text: str = Field(min_length=1, max_length=2000)
+        voice: str = "own"
+        speaker: str | None = Field(default=None, max_length=200)
+        central: bool = False
 
 
 def _make_router():
@@ -1115,6 +1190,28 @@ def _make_router():
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
+
+    @router.post("/analyse/check-claim")
+    async def check_claim_endpoint(req: CheckReq, request: Request):
+        # On-demand force-check of ONE skipped claim (#397). Looser budget than a full analysis (one
+        # web-search pass, no extraction), but still real spend — its own per-IP limiter.
+        if not _CHECK_LIMITER.allow(client_ip(request.scope)):
+            return JSONResponse(
+                {"detail": "check rate limit exceeded — try again shortly"},
+                status_code=429,
+                headers={"Retry-After": str(_CHECK_LIMITER.retry_after())},
+            )
+        try:
+            claim = await run_check(
+                request.app.state, req.url, req.text,
+                voice=req.voice, speaker=req.speaker, central=req.central,
+            )
+            return JSONResponse({"claim": claim})
+        except AnalyseError as e:  # user-facing by contract
+            return JSONResponse({"detail": str(e)}, status_code=400)
+        except Exception:  # noqa: BLE001 - internal: log to the container, mask on the wire
+            traceback.print_exc()
+            return JSONResponse({"detail": "check failed — try again shortly"}, status_code=500)
 
     @router.get("/analyse/{aid}")
     async def analysis_by_id(aid: str, request: Request):

@@ -17,21 +17,25 @@ const EXTREMITY_LEVELS = ["routine", "ordinary", "notable", "significant", "extr
 const EX_RANK: Record<string, number> = { routine: 0, ordinary: 1, notable: 2, significant: 3, extraordinary: 4 };
 
 // Display order (cauri): most significant first, and within a significance tier the least-supported
-// (lowest score) first. Resolved claims sort; still-weighing claims trail in document order — so
-// each claim rises into its place as it resolves.
+// (lowest score) first. Checked claims sort first; UNCHECKED claims (#397, never searched, no score)
+// sink below them — they carry no verdict, so leading with them read as "corroboration is broken";
+// still-weighing claims trail in document order — so each claim rises into its place as it resolves.
 function orderedIndices(claims: (PublicClaim | undefined)[]): number[] {
   const idx = claims.map((_, i) => i);
-  const resolved = idx.filter((i) => claims[i]);
+  const checked = idx.filter((i) => claims[i] && claims[i]!.checked);
+  const unchecked = idx.filter((i) => claims[i] && !claims[i]!.checked);
   const pending = idx.filter((i) => !claims[i]);
-  resolved.sort((a, b) => {
-    const ca = claims[a]!;
-    const cb = claims[b]!;
-    const byExtremity = (EX_RANK[cb.extremity] ?? 2) - (EX_RANK[ca.extremity] ?? 2);
-    if (byExtremity !== 0) return byExtremity;
-    if (ca.score !== cb.score) return ca.score - cb.score; // least supported first
+  const byExtremity = (a: number, b: number) => (EX_RANK[claims[b]!.extremity] ?? 2) - (EX_RANK[claims[a]!.extremity] ?? 2);
+  checked.sort((a, b) => {
+    const e = byExtremity(a, b);
+    if (e !== 0) return e;
+    const sa = claims[a]!.score ?? 0;
+    const sb = claims[b]!.score ?? 0;
+    if (sa !== sb) return sa - sb; // least supported first
     return a - b; // stable
   });
-  return [...resolved, ...pending];
+  unchecked.sort((a, b) => byExtremity(a, b) || a - b);
+  return [...checked, ...unchecked, ...pending];
 }
 
 async function* sseEvents(res: Response): AsyncGenerator<{ event: string; data: unknown }> {
@@ -87,16 +91,37 @@ function ClaimRow({
   claim,
   state,
   rowRef,
+  onCheck,
+  forcing,
+  checkError,
 }: {
   skeleton: Skeleton;
   claim?: PublicClaim;
   state: ChipState;
   rowRef: (el: HTMLElement | null) => void;
+  onCheck: () => void;
+  forcing: boolean;
+  checkError?: string;
 }) {
-  const smelly = claim && (claim.tier === "floor" || claim.verdict.startsWith("Disputed"));
+  // Three states: still weighing (no claim), NOT CHECKED (#397 — skipped over the cap, no score),
+  // and resolved (a real verdict). "Not checked" is never dressed up as a lone single-source claim.
+  const notChecked = claim && !claim.checked;
+  const smelly = claim && claim.checked && (claim.tier === "floor" || claim.verdict.startsWith("Disputed"));
   return (
-    <div ref={rowRef} className={`claim ${claim ? "resolved" : "unresolved"}`}>
-      {claim ? (
+    <div ref={rowRef} className={`claim ${claim ? "resolved" : "unresolved"} ${notChecked ? "unchecked" : ""}`}>
+      {!claim ? (
+        <div className="score-col pending" aria-hidden="true">
+          <span className={`weigh-glyph ${state === "checking" ? "busy" : ""}`}>⚖</span>
+        </div>
+      ) : notChecked ? (
+        <div className="score-col" aria-hidden="true">
+          {forcing ? (
+            <span className="weigh-glyph busy">⚖</span>
+          ) : (
+            <span className="big-score muted not-checked-mark">–</span>
+          )}
+        </div>
+      ) : (
         <div className="score-col">
           <span className={`big-score tier-${claim.tier}`}>{claim.score}</span>
           <span className="denom">/100</span>
@@ -106,10 +131,6 @@ function ClaimRow({
             </span>
           )}
         </div>
-      ) : (
-        <div className="score-col pending" aria-hidden="true">
-          <span className={`weigh-glyph ${state === "checking" ? "busy" : ""}`}>⚖</span>
-        </div>
       )}
       <div className="main-col">
         <p className="text">
@@ -117,16 +138,27 @@ function ClaimRow({
           {skeleton.central && <span className="central-tag">central claim</span>}
         </p>
         {skeleton.speaker && <span className="speaker">— attributed to {skeleton.speaker}</span>}
-        {claim ? (
-          <>
-            <span className={`verdict tier-${claim.tier}`}>{claim.verdict}</span>
-            <Significance level={claim.extremity} />
-          </>
-        ) : (
+        {!claim ? (
           <span className="weighing">
             {state === "checking" ? "checking against independent reporting…" : "queued for weighing…"}
             <span className="shimmer" aria-hidden="true" />
           </span>
+        ) : notChecked ? (
+          <>
+            <span className="verdict tier-unchecked">Not checked yet</span>
+            <Significance level={claim.extremity} />
+            <div className="check-row">
+              <button type="button" className="check-btn" onClick={onCheck} disabled={forcing}>
+                {forcing ? "Checking against independent reporting…" : "Check this claim"}
+              </button>
+              {checkError && <span className="check-err">{checkError}</span>}
+            </div>
+          </>
+        ) : (
+          <>
+            <span className={`verdict tier-${claim.tier}`}>{claim.verdict}</span>
+            <Significance level={claim.extremity} />
+          </>
         )}
       </div>
     </div>
@@ -146,6 +178,8 @@ export default function Analyser() {
   const [dropped, setDropped] = useState(0);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [morphComplete, setMorphComplete] = useState(false);
+  const [forcing, setForcing] = useState<Set<number>>(new Set()); // #397 force-checks in flight
+  const [checkErrors, setCheckErrors] = useState<Record<number, string>>({});
   const running = useRef(false);
   const morphed = useRef(false);
   const highlightRefs = useRef<Map<number, HTMLElement>>(new Map());
@@ -350,6 +384,53 @@ export default function Analyser() {
     [url],
   );
 
+  // Force-check ONE "Not checked" claim on demand (#397): run the live path for it and swap the row
+  // in place (the overall hero is the batch read and doesn't move — over-cap claims are non-central).
+  const forceCheck = useCallback(
+    async (i: number, claim: PublicClaim) => {
+      const target = analysis?.url ?? url;
+      if (!target || claim.checked) return;
+      setForcing((prev) => new Set(prev).add(i));
+      setCheckErrors((prev) => {
+        const n = { ...prev };
+        delete n[i];
+        return n;
+      });
+      try {
+        const res = await fetch("/api/analyse/check-claim", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: target, text: claim.text, voice: claim.voice, speaker: claim.speaker, central: claim.central }),
+        });
+        if (res.status === 429) throw new Error("Too many checks just now — try again in a moment.");
+        if (!res.ok) throw new Error("Couldn't check this claim — try again shortly.");
+        const updated = ((await res.json()) as { claim: PublicClaim }).claim;
+        setAnalysis((a) => {
+          if (!a) return a;
+          const claims = a.claims.slice();
+          claims[i] = updated;
+          const unchecked = Math.max(0, (a.overall.unchecked ?? 0) - 1);
+          return { ...a, claims, overall: { ...a.overall, unchecked } };
+        });
+        setClaims((prev) => {
+          if (!prev.length) return prev;
+          const n = prev.slice();
+          n[i] = updated;
+          return n;
+        });
+      } catch (e) {
+        setCheckErrors((prev) => ({ ...prev, [i]: e instanceof Error ? e.message : "Check failed — try again shortly." }));
+      } finally {
+        setForcing((prev) => {
+          const n = new Set(prev);
+          n.delete(i);
+          return n;
+        });
+      }
+    },
+    [analysis, url],
+  );
+
   const busy = phase === "reading" || phase === "weighing";
   // Show the mini-page from the moment we start reading (a scanning shell during the fetch wait),
   // through the morph; it collapses out (CSS) once weighing begins so it never leaves a gap.
@@ -360,6 +441,7 @@ export default function Analyser() {
     : skeletons;
   const listClaims: (PublicClaim | undefined)[] = analysis ? analysis.claims : claims;
   const order = useMemo(() => orderedIndices(listClaims), [listClaims]);
+  const uncheckedCount = listClaims.filter((c) => c && !c.checked).length;
   const miniFacts: MiniFact[] = skeletons.map((s) => ({ text: s.text, central: s.central, position: s.position }));
 
   return (
@@ -455,6 +537,13 @@ export default function Analyser() {
               {dropped} snippet{dropped === 1 ? "" : "s"} discarded — could not be verified against the page text.
             </p>
           )}
+          {phase === "done" && uncheckedCount > 0 && (
+            <p className="unchecked-note">
+              {uncheckedCount === 1
+                ? "1 claim wasn’t checked — it fell below the depth this analysis reached. Check it individually below."
+                : `${uncheckedCount} claims weren’t checked — they fell below the depth this analysis reached. Check any individually below.`}
+            </p>
+          )}
           <div className="card" style={{ opacity: phase === "weighing" && !morphComplete ? 0 : 1, transition: "opacity .45s ease" }}>
             {order.map((i) => (
               <ClaimRow
@@ -466,6 +555,12 @@ export default function Analyser() {
                   if (el) rowRefs.current.set(i, el);
                   else rowRefs.current.delete(i);
                 }}
+                onCheck={() => {
+                  const c = listClaims[i];
+                  if (c) forceCheck(i, c);
+                }}
+                forcing={forcing.has(i)}
+                checkError={checkErrors[i]}
               />
             ))}
           </div>
