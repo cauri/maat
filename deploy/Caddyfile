@@ -58,6 +58,15 @@
 # service on the host loopback (host-net Caddy → 127.0.0.1:8080, NOT a compose service name).
 www.maat.press {
 	encode zstd gzip
+
+	# The Analyse surface (P14 #365) is canonical on the APEX (maat.press/analyse) — its OG tags,
+	# share card, and metadataBase all say maat.press. Someone who reaches for www out of habit
+	# would otherwise hit the marketing app (:8080), which has no /analyse|/card route and 404s.
+	# Redirect those product paths to the apex so the one public product URL resolves whichever host
+	# is typed (301; {uri} preserves the sub-path + query). Everything else stays the marketing site.
+	@analyse path /analyse /analyse/* /card /card/*
+	redir @analyse https://maat.press{uri} permanent
+
 	reverse_proxy 127.0.0.1:8080
 }
 
