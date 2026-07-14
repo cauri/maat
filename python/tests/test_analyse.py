@@ -18,8 +18,10 @@ from maat.pipeline.analyse import (
     claim_verdict,
     match_claims,
 )
+from maat.learning.reputation import SourceReputation
 from maat.pipeline.claim import Claim
 from maat.pipeline.corroborate import ClaimRow
+from maat.serving.analyse import build_reputation_map
 
 # --- offline seams -------------------------------------------------------------------------
 
@@ -203,6 +205,40 @@ def test_publisher_reputation_lookup():
     assert analyse().publisher_score is None  # not yet rated
     res = analyse(reputation={"chronicle.example": 0.81})
     assert res.publisher_score == 0.81
+
+
+def _rep_rec(source: str, outcome_n: int, *, confirmation_rate=1.0, independent_rate=1.0):
+    """A minimal SourceReputation carrying the fields build_reputation_map reads."""
+    return SourceReputation(
+        source=source,
+        appearances=outcome_n,
+        independent_appearances=outcome_n,
+        independent_rate=independent_rate,
+        primary_appearances=0,
+        mean_attribution_weight=1.0,
+        solo_extraordinary=0,
+        facts_confirmed=outcome_n,
+        facts_refuted=0,
+        facts_unresolved=0,
+        outcome_n=outcome_n,
+        confirmation_rate=confirmation_rate if outcome_n else None,
+        _reliability_rank=0.0,
+    )
+
+
+def test_reputation_floor_excludes_thin_records():
+    # A source is only rated once its track record rests on enough resolved outcomes — Maat never
+    # rests a reputation on too little info (cauri).
+    recs = [_rep_rec("solid.example", 12), _rep_rec("thin.example", 3)]
+    rep = build_reputation_map(recs, floor=10)
+    assert "solid.example" in rep and rep["solid.example"] > 0
+    assert "thin.example" not in rep  # 3 outcomes < floor → unproven everywhere
+
+
+def test_reputation_floor_is_inclusive_at_the_boundary():
+    recs = [_rep_rec("edge.example", 10)]
+    assert "edge.example" in build_reputation_map(recs, floor=10)
+    assert build_reputation_map(recs, floor=11) == {}
 
 
 def test_unfetchable_url_raises_clearly():
