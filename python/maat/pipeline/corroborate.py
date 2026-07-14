@@ -204,8 +204,8 @@ def _cites(body: str, source: str) -> bool:
 # Detection is deliberately conservative — a bare mention ("the Reuters building") never collapses:
 #   * an EXPLICIT credit: an agency dateline "(AP) —", a byline "By Jane Doe, Associated Press",
 #     or a contribution line "The Associated Press contributed…"; or
-#   * a citation-cascade attribution — a cascade marker plus the agency named as a whole word —
-#     the SAME bar ``_cites`` applies to source names.
+#   * a citation-cascade ATTRIBUTION — the agency name sitting next to an attribution verb
+#     ("according to Reuters" / "Reuters reported"), NOT a cascade marker merely present elsewhere.
 # Short, collision-prone aliases (AP, PA, AFP, …: "PA" is also Pennsylvania) count ONLY in the
 # explicit-credit shapes; distinctive names (reuters, bloomberg, …) may also match the cascade
 # shape. Aliases fold to one wire id so "AP" and "Associated Press" are the same agency.
@@ -234,25 +234,35 @@ _WIRE_EXPLICIT = re.compile(
     rf"|\b(?:the\s+)?(?:{_WIRE_ALIAS_RX})\s+contributed\b",         # "The AP contributed…"
     re.IGNORECASE,
 )
-_WIRE_NAME_RX = {alias: re.compile(rf"\b{re.escape(alias)}\b", re.IGNORECASE)
-                 for alias in _WIRE_ALIASES}
+# A citation-cascade CREDIT — the wire name ADJACENT to an attribution verb, in either order:
+# "according to Reuters", "cited by AFP", "Reuters reported/said/wrote". The name and the verb must
+# be next to each other; a bare mention where a cascade marker merely appears ELSEWHERE in the body
+# ("the Reuters building … police reported three dead") must NOT match — the loose "marker anywhere
+# AND name anywhere" gate collapsed independent originators on the shared feed path (review #1).
+_WIRE_CASCADE_NAMES = "|".join(sorted((re.escape(a) for a in _WIRE_CASCADE_OK), key=len, reverse=True))
+_WIRE_CASCADE_RX = re.compile(
+    rf"(?:according to|cited by|reported by|citing|per)\s+(?:the\s+)?({_WIRE_CASCADE_NAMES})\b"
+    rf"|\b({_WIRE_CASCADE_NAMES})\s+(?:reported|reports|said|says|wrote|writes|noted|notes|confirmed)\b",
+    re.IGNORECASE,
+)
 
 
 def wire_credit(body: str) -> str | None:
-    """The wire agency this article credits its copy to (a canonical wire id), or None."""
+    """The wire agency this article credits its copy to (a canonical wire id), or None. A credit is
+    an EXPLICIT shape (dateline / byline / "X contributed") or a cascade ATTRIBUTION where the wire
+    name sits next to an attribution verb ("according to Reuters" / "Reuters reported"). A bare
+    mention of the agency is never a credit."""
     if not body:
         return None
-    low = body.lower()
     m = _WIRE_EXPLICIT.search(body)
     if m:
         hit = m.group(0).lower()
         for alias in sorted(_WIRE_ALIASES, key=len, reverse=True):
             if alias in hit:
                 return _WIRE_ALIASES[alias]
-    if any(mk in low for mk in _CASCADE_MARKERS):
-        for alias in sorted(_WIRE_CASCADE_OK, key=len, reverse=True):
-            if _WIRE_NAME_RX[alias].search(body):
-                return _WIRE_ALIASES[alias]
+    c = _WIRE_CASCADE_RX.search(body)
+    if c:
+        return _WIRE_ALIASES[(c.group(1) or c.group(2)).lower()]
     return None
 
 
@@ -483,15 +493,17 @@ def effective_originators(
             return attribution[a]
         return attribution_weight(bodies.get(a, ""), sources.get(a, ""))
 
+    def _joint(a: str) -> float:  # one article's (attribution × reputation) — the two weights
+        return _attrib(a) * reputation_weight(  # of the SAME article, never mixed across the group
+            sources.get(a, ""), reputation, unrated=rep_unrated, floor=rep_floor
+        )
+
     total = 0.0
     for g in groups:
-        attrib = max((_attrib(a) for a in g), default=_W_BALD)
-        rep = max(
-            (reputation_weight(sources.get(a, ""), reputation,
-                               unrated=rep_unrated, floor=rep_floor) for a in g),
-            default=1.0,
-        )
-        total += attrib * rep
+        # A collapsed originator counts by its BEST single article's joint weight — not max
+        # attribution × max reputation independently (which could credit one member's attribution
+        # with another member's reputation, over-crediting the group; review #3).
+        total += max((_joint(a) for a in g), default=_W_BALD)
     return round(total, 2)
 
 

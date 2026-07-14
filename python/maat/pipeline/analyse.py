@@ -874,6 +874,13 @@ def consolidate_claims(
         return claims, 0
     try:
         vecs = np.asarray(embed([c.text for c in claims]), dtype=np.float64)
+        # Validate the embed CONTRACT before clustering (review #2): a wrong-length or non-finite
+        # return is not an exception, but it would make group_by_similarity index off the matrix
+        # rows (silently dropping trailing claims / IndexError in the merge loop) or make every NaN
+        # comparison force an all-merge (collapsing distinct facts). Any violation → skip, don't
+        # sink or corrupt — the documented guarantee.
+        if vecs.ndim != 2 or vecs.shape[0] != len(claims) or not np.isfinite(vecs).all():
+            raise ValueError(f"embed returned {vecs.shape} for {len(claims)} claims")
         groups = group_by_similarity([c.text for c in claims], threshold, embeddings=vecs)
     except Exception as e:  # noqa: BLE001 - consolidation is an optimisation, never fatal
         log.warning("claim consolidation skipped (%s)", type(e).__name__)
@@ -1037,6 +1044,12 @@ def analyse_article(
                     citations[i] = results[k]
 
         tally = {"web": 0, "contra": 0, "fallback": 0, "neutral": 0}
+        # Which claims each ops counter has ALREADY counted, so the deep pass adjusts precisely
+        # rather than blind-incrementing (a pass-1 web claim can still be independent_originators<=1
+        # when its only outside source collapsed with the pasted outlet, and would double-count on
+        # rescue; review #4). ops-meta only — never the score.
+        web_counted: set[int] = set()
+        neutral_counted: set[int] = set()
         tally_lock = threading.Lock()
 
         def live_one(i: int) -> None:
@@ -1059,10 +1072,12 @@ def analyse_article(
             if matched_rows:
                 with tally_lock:
                     tally["web"] += 1
+                    web_counted.add(i)
             else:
                 if cits:  # web-search returned sources but NLI entailed none (#389 recall signal)
                     with tally_lock:
                         tally["neutral"] += 1
+                        neutral_counted.add(i)
                 if search is not None:  # web-search found nothing usable → Apify fallback
                     matched_rows, bodies = _apify_rows(
                         i, claim, search=search, extract=extract, embed=embed, shared=shared,
@@ -1129,9 +1144,12 @@ def analyse_article(
                 if reading.independent_originators > readings[i].independent_originators:
                     with tally_lock:
                         deep_rescued += 1
-                        tally["web"] += 1
-                        if citations.get(i):  # was counted neutral in pass 1 (had cites, no rows)
+                        if i not in web_counted:      # count this claim as web-corroborated once
+                            tally["web"] += 1
+                            web_counted.add(i)
+                        if i in neutral_counted:       # …and it's no longer merely neutral
                             tally["neutral"] = max(0, tally["neutral"] - 1)
+                            neutral_counted.discard(i)
                     resolve(i, (reading, rated))
 
             with ThreadPoolExecutor(max_workers=max_workers) as ex:

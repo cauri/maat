@@ -183,6 +183,24 @@ def test_wire_credit_detects_credits_not_mentions():
     assert wire_credit("The Reuters building in London was renovated last year.") is None
     assert wire_credit("Officials in PA reported record turnout, the county said.") is None
     assert wire_credit("") is None
+    # review #1 — a cascade marker ELSEWHERE in the body must not turn a bare mention into a credit:
+    # the agency name must sit NEXT TO an attribution verb, not merely co-occur with "reported"
+    assert wire_credit("The blast near the Reuters building shook downtown. Police reported three dead.") is None
+    assert wire_credit("Officials reported the toll; the old Reuters office was evacuated.") is None
+    assert wire_credit("Bloomberg terminals went dark; traders said the outage cost millions.") is None
+
+
+def test_wire_collapse_does_not_merge_independent_bare_mentions():
+    # review #1 (feed-safety) — two INDEPENDENT reports that merely mention an agency (with a
+    # cascade marker somewhere) must stay two originators. The loose gate collapsed them to one,
+    # silently deflating feed corroboration on the shared collapse path.
+    from maat.pipeline.corroborate import collapse_originators
+
+    bodies = {
+        "a": "The blast near the Reuters building shook downtown. Police reported three dead.",
+        "b": "Officials reported the toll; the old Reuters office was evacuated overnight.",
+    }
+    assert len(collapse_originators(["a", "b"], bodies, {"a": "cnn.com", "b": "bbc.com"})) == 2
 
 
 def test_collapse_shared_wire_pickups_to_one_originator():
@@ -267,6 +285,18 @@ def test_effective_originators_weights_by_sourcing():
     assert effective_originators([["named"], ["anon"]], bodies, sources) == 1.6
     # two fully-attributed originators -> 2.0
     assert effective_originators([["named"], ["primary"]], bodies, sources) == 2.0
+
+
+def test_effective_originators_group_takes_per_article_joint_max():
+    from maat.pipeline.corroborate import effective_originators
+
+    # review #3 — a collapsed group counts by its BEST single article's (attribution × reputation),
+    # never max(attribution) × max(reputation) from DIFFERENT members. Member A is named-but-unrated
+    # (1.0 × 0.85), member B is bald-but-proven-strong (0.3 × 1.0). Joint max = 0.85, not 1.0.
+    bodies = {"A": "The minister, Jane Doe, said the deal failed.", "B": "The deal failed."}
+    sources = {"A": "a.com", "B": "b.com"}
+    eff = effective_originators([["A", "B"]], bodies, sources, reputation={"b.com": 1.0})
+    assert eff == 0.85
 
 
 def test_reputation_weight_continuous_with_floor():
