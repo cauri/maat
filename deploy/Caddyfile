@@ -41,7 +41,11 @@
 		# FastAPI app (127.0.0.1:8000) keeps the OIDC login dance, the command/query API the
 		# console + Sia call, the public read API, health, and static assets. Both verify the same
 		# `maat_admin` cookie, so routing splits cleanly by path and the cookie rides along.
-		@fastapi path /admin/* /admin /api/* /console/api/* /healthz /favicon.ico /static/*
+		# NB: /favicon.ico is deliberately NOT routed here — the reader has no such route (it would
+		# 404), so it falls through to the Next.js console below, which serves the Maat brand favicon.
+		# The console's App Router icon files (favicon.ico + icon.svg + apple-icon.png) all reach
+		# :3100 via the catch-all `handle`, giving admin.maat.press the Feather-of-Maat tab icon.
+		@fastapi path /admin/* /admin /api/* /console/api/* /healthz /static/*
 		handle @fastapi {
 			reverse_proxy 127.0.0.1:8000
 		}
