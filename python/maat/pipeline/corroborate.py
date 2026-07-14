@@ -407,7 +407,9 @@ def _named_speaker(speaker: str | None) -> bool:
     return not any(g in low for g in _GENERIC_SPEAKERS)
 
 
-def claim_attribution_weight(voice: str, speaker: str | None, body: str, source: str) -> float:
+def claim_attribution_weight(
+    voice: str, speaker: str | None, body: str, source: str, *, w_own: float | None = None,
+) -> float:
     """The analysed claim's attribution weight from ITS OWN voice/speaker (S2 #400), not a whole-body
     scan — every article body has SOME provenance marker, so the scan read every claim at 1.0 and
     made lone claims indistinguishable (the flat 55/65). A claim ATTRIBUTED to a NAMED source counts
@@ -418,7 +420,7 @@ def claim_attribution_weight(voice: str, speaker: str | None, body: str, source:
         return _W_NAMED
     if voice == "attributed":
         return _W_NAMED if _named_speaker(speaker) else _W_ANONYMOUS
-    return _W_OWN if has_provenance(body) else _W_BALD
+    return (_W_OWN if w_own is None else w_own) if has_provenance(body) else _W_BALD
 
 
 # §S1 (#399) — reputation of the corroborating outlet also scales its contribution: a proven-strong
@@ -442,22 +444,28 @@ def _rep_score(reputation: dict[str, float], source: str) -> float | None:
     return reputation.get(canonical_source(source))
 
 
-def reputation_weight(source: str, reputation: dict[str, float] | None) -> float:
+def reputation_weight(
+    source: str, reputation: dict[str, float] | None,
+    *, unrated: float | None = None, floor: float | None = None,
+) -> float:
     """Continuous reputation multiplier on an originator's contribution (S1 #399), in
     [``_REP_FLOOR``, 1.0]. A proven-strong outlet → ~1.0; an unrated one → ``_REP_UNRATED``
     (cold-start neutral); a proven-weak one → the floor. ``None`` reputation map → 1.0 (feature
-    off; existing callers unaffected)."""
+    off; existing callers unaffected). ``unrated``/``floor`` override the constants — the
+    operator-promoted knob seam (#412), same pattern as ``confidence_read``'s decay/cap."""
     if reputation is None:
         return 1.0
+    lo = _REP_FLOOR if floor is None else floor
     score = _rep_score(reputation, source)
     if score is None:
-        return _REP_UNRATED
-    return round(_REP_FLOOR + (1.0 - _REP_FLOOR) * max(0.0, min(1.0, score)), 2)
+        return _REP_UNRATED if unrated is None else unrated
+    return round(lo + (1.0 - lo) * max(0.0, min(1.0, score)), 2)
 
 
 def effective_originators(
     groups: list[list[str]], bodies: dict[str, str], sources: dict[str, str],
     *, reputation: dict[str, float] | None = None, attribution: dict[str, float] | None = None,
+    rep_unrated: float | None = None, rep_floor: float | None = None,
 ) -> float:
     """Independent-originator count weighted by sourcing quality (§5.2) AND, when a ``reputation``
     map is supplied, by each originator's track record (S1 #399). Each originator counts by its
@@ -479,7 +487,9 @@ def effective_originators(
     for g in groups:
         attrib = max((_attrib(a) for a in g), default=_W_BALD)
         rep = max(
-            (reputation_weight(sources.get(a, ""), reputation) for a in g), default=1.0
+            (reputation_weight(sources.get(a, ""), reputation,
+                               unrated=rep_unrated, floor=rep_floor) for a in g),
+            default=1.0,
         )
         total += attrib * rep
     return round(total, 2)
@@ -641,6 +651,8 @@ def corroborate_fixed(
     ownership: dict[str, str] | None = None,
     reputation: dict[str, float] | None = None,
     attribution: dict[str, float] | None = None,
+    rep_unrated: float | None = None,
+    rep_floor: float | None = None,
     decay: dict[str, float] | None = None,
     primary_lift: float | None = None,
     cap: float | None = None,
@@ -668,7 +680,8 @@ def corroborate_fixed(
     originators = [[article_ids[i] for i in g] for g in groups_idx]
     ind = len(originators)
     eff = effective_originators(
-        originators, bodies, art_source, reputation=reputation, attribution=attribution
+        originators, bodies, art_source, reputation=reputation, attribution=attribution,
+        rep_unrated=rep_unrated, rep_floor=rep_floor,
     )
     primary = any(is_primary_source(s) for s in {c.source for c in claims})
     return Corroboration(

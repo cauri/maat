@@ -235,6 +235,21 @@ def test_lone_claims_differentiate_by_attribution_voice():
     assert by[named].confidence > by[own].confidence  # named attribution reads stronger
 
 
+def test_promoted_knobs_change_the_score():
+    # #412 — a promoted scoring knob must actually enact on the analyse path (S1/S2/S4/S5 were code
+    # constants; now ScoringKnobs threads a promoted override end-to-end through the reading).
+    from maat.pipeline.analyse import ScoringKnobs, _lone_reading
+
+    claim = Claim(text="The economy grew", voice="own", evidence_span="x")
+    body = "The economy grew, officials said in a briefing."  # own-voice, has provenance
+    base = _lone_reading(claim, body, "x.com", "ordinary", {})[0].confidence
+    lifted = _lone_reading(claim, body, "x.com", "ordinary", {}, ScoringKnobs(w_own=1.0))[0].confidence
+    dropped = _lone_reading(claim, body, "x.com", "ordinary", {}, ScoringKnobs(w_own=0.3))[0].confidence
+    assert lifted > base > dropped  # the promoted own-voice weight moves the number
+    # None knobs / default ScoringKnobs() == the unconfigured pipeline exactly
+    assert _lone_reading(claim, body, "x.com", "ordinary", {}, ScoringKnobs())[0].confidence == base
+
+
 def test_consolidate_claims_merges_near_duplicates():
     # #411 — the Kyiv Post 45-vs-95 bug: near-identical extractions must become ONE claim before
     # extremity rating and search, so one fact can't earn two ratings or split one search budget.

@@ -196,6 +196,36 @@ ProgressFn = Callable[[str, dict[str, Any]], None]
 # ``deep`` (S3 #401, optional kwarg): a larger-budget second pass for claims a first pass left
 # uncorroborated — same prompt, more searches, so recall improves without an in-app prompt change.
 WebSearchFn = Callable[..., Sequence[Sequence[Citation]]]
+
+
+@dataclass(frozen=True)
+class ScoringKnobs:
+    """Operator-promoted scoring overrides (#412), threaded as ONE object through the analyse
+    readings into ``corroborate_fixed`` / ``score_article`` / the weight functions. Every field
+    ``None`` → the code constant, so a default ``ScoringKnobs()`` (or ``knobs=None``) is exactly the
+    unconfigured pipeline. The serving layer builds this from the promoted ``admin.config.promoted``
+    events (``maat.config.analyse_overrides``) — the same sign-off-gated flow the feed's corroborate
+    agent honours, so a promoted knob now applies to BOTH surfaces."""
+
+    decay: dict[str, float] | None = None            # extremity decay curve (§5.6)
+    primary_lift: float | None = None                # primary-source bonus (§5.7)
+    cap: float | None = None                         # maximum confidence (§5.7)
+    duplicate_source_threshold: float | None = None  # originator-collapse lexical bar (§5.5)
+    rep_unrated: float | None = None                 # S1: unrated-outlet reputation weight
+    rep_floor: float | None = None                   # S1: proven-weak outlet floor
+    w_own: float | None = None                       # S2: own-voice claim attribution weight
+    entail_floor: float | None = None                # S5: barely-entailing citation floor
+    publisher_floor: float | None = None             # S4: proven-weak publisher ceiling floor
+
+    def fixed_kwargs(self) -> dict[str, Any]:
+        """The ``corroborate_fixed`` kwargs this carries (None means 'code default' there too)."""
+        out: dict[str, Any] = {
+            "rep_unrated": self.rep_unrated, "rep_floor": self.rep_floor,
+            "decay": self.decay, "primary_lift": self.primary_lift, "cap": self.cap,
+        }
+        if self.duplicate_source_threshold is not None:
+            out["duplicate_source_threshold"] = self.duplicate_source_threshold
+        return out
 NliFn = Callable[[str, str], tuple[str, float] | None]
 
 
@@ -365,9 +395,11 @@ def claim_verdict(
 def _corpus_reading(
     claim: Claim, body: str, source: str, match: CorpusFact,
     reputation: Mapping[str, float], ownership: dict[str, str] | None = None,
+    knobs: ScoringKnobs | None = None,
 ) -> tuple[ClaimReading, bool]:
     """Fold the pasted article into an existing cluster's read (reprints collapse, an independent
     report counts) and inherit the cluster's extremity/grounding/disputed standing."""
+    kn = knobs or ScoringKnobs()
     row = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
     cor = corroborate_fixed(
         [*match.member_claims, row],
@@ -376,7 +408,9 @@ def _corpus_reading(
         grounding=match.grounding,
         ownership=ownership,
         reputation=dict(reputation),  # S1 #399: established originators corroborate more
-        attribution={_ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source)},  # S2 #400
+        attribution={_ANALYSED: claim_attribution_weight(
+            claim.voice, claim.speaker, body, source, w_own=kn.w_own)},  # S2 #400
+        **kn.fixed_kwargs(),
     )
     # OUTSIDE-corroboration rating only (S4 #402): the pasted publisher's OWN rating is now the
     # `publisher_reputation` ceiling, not this flag — this flag means "a proven OTHER originator
@@ -398,14 +432,18 @@ def _corpus_reading(
 
 
 def _lone_reading(
-    claim: Claim, body: str, source: str, extremity: str, reputation: Mapping[str, float]
+    claim: Claim, body: str, source: str, extremity: str, reputation: Mapping[str, float],
+    knobs: ScoringKnobs | None = None,
 ) -> tuple[ClaimReading, bool]:
     """A claim with no outside evidence: a single originator, weighted by its own attribution
     quality (§5.2) — honest, never inflated."""
+    kn = knobs or ScoringKnobs()
     row = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
     cor = corroborate_fixed(
         [row], {_ANALYSED: body}, extremity, reputation=dict(reputation),
-        attribution={_ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source)},
+        attribution={_ANALYSED: claim_attribution_weight(
+            claim.voice, claim.speaker, body, source, w_own=kn.w_own)},
+        **kn.fixed_kwargs(),
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity
@@ -437,6 +475,7 @@ def _live_reading(
     reputation: Mapping[str, float],
     *, disputed: bool = False, ownership: dict[str, str] | None = None,
     cite_weights: dict[str, float] | None = None,
+    knobs: ScoringKnobs | None = None,
 ) -> tuple[ClaimReading, bool]:
     """Fold live-found corroborating claims with the pasted article's own assertion — the same
     §5.5 collapse and §5.6 read the feed uses, over evidence found minutes ago.
@@ -448,6 +487,7 @@ def _live_reading(
     ``ownership`` (#41/#254): co-owned outlets found live collapse to ONE independent originator —
     the same anti-laundering rollup the feed applies, so web search surfacing several sister
     outlets of one group cannot inflate the count."""
+    kn = knobs or ScoringKnobs()
     grounding = "contradicted" if disputed else None
     own = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
     cor = corroborate_fixed(
@@ -457,8 +497,10 @@ def _live_reading(
             # S5 #403: each cited source graded by attribution × entailment strength…
             **(cite_weights or {}),
             # …and the pasted article's own claim by its voice/speaker (S2 #400).
-            _ANALYSED: claim_attribution_weight(claim.voice, claim.speaker, body, source),
+            _ANALYSED: claim_attribution_weight(
+                claim.voice, claim.speaker, body, source, w_own=kn.w_own),
         },
+        **kn.fixed_kwargs(),
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity,
@@ -612,13 +654,15 @@ def judge_entailment(
 _ENTAIL_FLOOR = 0.7
 
 
-def entailment_weight(strength: float, min_entail: float = 0.5) -> float:
-    """Map an accepted citation's entailment strength to its fold weight in [_ENTAIL_FLOOR, 1.0]."""
+def entailment_weight(strength: float, min_entail: float = 0.5, *, floor: float | None = None) -> float:
+    """Map an accepted citation's entailment strength to its fold weight in [_ENTAIL_FLOOR, 1.0].
+    ``floor`` overrides the constant — the operator-promoted knob seam (#412)."""
+    lo = _ENTAIL_FLOOR if floor is None else floor
     if strength <= min_entail:
-        return _ENTAIL_FLOOR
+        return lo
     span = 1.0 - min_entail
     frac = (min(1.0, strength) - min_entail) / span if span > 0 else 1.0
-    return round(_ENTAIL_FLOOR + (1.0 - _ENTAIL_FLOOR) * frac, 2)
+    return round(lo + (1.0 - lo) * frac, 2)
 
 
 class _CiteFetch:
@@ -651,6 +695,7 @@ def _websearch_rows(
     i: int, claim: Claim, citations: Sequence[Citation], *,
     url: str, own_canon: str, accept_candidate: Callable[[LiveCandidate], bool] | None,
     cite_fetch: _CiteFetch, nli: NliFn | None, nli_min: float, contradict_min: float,
+    entail_floor: float | None = None,
 ) -> tuple[list[ClaimRow], dict[str, str], bool, dict[str, float]]:
     """One claim's web-search corroboration. For each offered citation: exclude the pasted outlet /
     denied domains, then NLI-JUDGE the quote against the claim (the hard gate — entailment counts,
@@ -707,7 +752,7 @@ def _websearch_rows(
         bodies[cit.url] = body or quote
         weights[cit.url] = round(
             attribution_weight(bodies[cit.url], cit.domain)
-            * entailment_weight(strength, nli_min),
+            * entailment_weight(strength, nli_min, floor=entail_floor),
             2,
         )
     return rows, bodies, contradicted, weights
@@ -876,6 +921,7 @@ def analyse_article(
     live_max_candidates: int = 18,
     body_max_chars: int = 60_000,
     max_workers: int = 4,
+    knobs: ScoringKnobs | None = None,
     progress: ProgressFn | None = None,
 ) -> ArticleAnalysis:
     """Analyse one pasted URL end-to-end. ``corpus_lookup`` inherits existing corroboration.
@@ -944,7 +990,7 @@ def analyse_article(
     # Corpus-matched claims resolve instantly.
     for i, m in enumerate(matches):
         if m is not None:
-            resolve(i, _corpus_reading(fact_claims[i], body, source, m, reputation, ownership))
+            resolve(i, _corpus_reading(fact_claims[i], body, source, m, reputation, ownership, knobs))
 
     # Novel claims: rate extremity (needed for both the lone read and search priority)…
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -956,7 +1002,7 @@ def analyse_article(
     have_live = web_search is not None or search is not None
     if not have_live or not novel_idx:
         for i in novel_idx:
-            resolve(i, _lone_reading(fact_claims[i], body, source, extremities[i], reputation))
+            resolve(i, _lone_reading(fact_claims[i], body, source, extremities[i], reputation, knobs))
         if have_live:
             live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None)
     else:
@@ -1008,6 +1054,7 @@ def analyse_article(
                     i, claim, cits, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    entail_floor=(knobs.entail_floor if knobs else None),
                 )
             if matched_rows:
                 with tally_lock:
@@ -1032,7 +1079,7 @@ def analyse_article(
                     tally["contra"] += 1
             resolve(i, _live_reading(
                 claim, body, source, extremities[i], matched_rows, bodies, reputation,
-                disputed=dispute, ownership=ownership, cite_weights=weights,
+                disputed=dispute, ownership=ownership, cite_weights=weights, knobs=knobs,
             ))
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -1071,12 +1118,13 @@ def analyse_article(
                     i, fact_claims[i], merged, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    entail_floor=(knobs.entail_floor if knobs else None),
                 )
                 if not rows:
                     return
                 reading, rated = _live_reading(
                     fact_claims[i], body, source, extremities[i], rows, bodies2, reputation,
-                    disputed=False, ownership=ownership, cite_weights=weights2,
+                    disputed=False, ownership=ownership, cite_weights=weights2, knobs=knobs,
                 )
                 if reading.independent_originators > readings[i].independent_originators:
                     with tally_lock:
@@ -1127,6 +1175,7 @@ def analyse_article(
             for r, rated in scored
         ],
         publisher_reputation=_rep(reputation, source),  # S4 #402: the outlet's own record → ceiling
+        publisher_floor=(knobs.publisher_floor if knobs else None),
     )
     emit("scored", {"score": score.score, "band": score.band, "label": score.label})
 
@@ -1158,6 +1207,7 @@ def check_one_claim(
     nli_entail_min: float = 0.5,
     nli_contradict_min: float = 0.6,
     live_max_candidates: int = 18,
+    knobs: ScoringKnobs | None = None,
 ) -> tuple[ClaimReading, bool]:
     """The reader's on-demand force-check of ONE claim (#397): the SAME web-search → verify → NLI →
     fold journey a batch claim takes inside ``analyse_article``, run standalone for a single claim
@@ -1165,7 +1215,8 @@ def check_one_claim(
     (a real check happened) whatever it finds — "Only this source so far" now means we looked.
 
     Reuses the batch helpers verbatim (``_websearch_rows``/``_apify_rows``/``_live_reading``) so the
-    forced path and the batch path can never drift apart in how they judge or fold evidence."""
+    forced path and the batch path can never drift apart in how they judge or fold evidence —
+    including the promoted scoring ``knobs`` (#412)."""
     own_canon = canonical_source(source)
     extremity = extremity_of(claim.text)
     cite_fetch = _CiteFetch(fetch)
@@ -1186,6 +1237,7 @@ def check_one_claim(
                 0, claim, cits, url=url, own_canon=own_canon,
                 accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                 nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                entail_floor=(knobs.entail_floor if knobs else None),
             )
     if not matched_rows and search is not None:  # web-search found nothing usable → Apify fallback
         matched_rows, bodies = _apify_rows(
@@ -1196,5 +1248,5 @@ def check_one_claim(
     dispute = contradicted and not matched_rows
     return _live_reading(
         claim, body, source, extremity, matched_rows, bodies, reputation,
-        disputed=dispute, ownership=ownership, cite_weights=weights,
+        disputed=dispute, ownership=ownership, cite_weights=weights, knobs=knobs,
     )
