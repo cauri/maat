@@ -20,6 +20,9 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>Maat — know which news to trust</title>
 <meta name="description" content="Maat scores how reliable each news source is — built from how accurate their reporting proves over time — and puts that signal on every story, so you can read the news knowing what stands up.">
 <meta property="og:title" content="Maat — know which news to trust">
