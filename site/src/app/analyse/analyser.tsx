@@ -431,7 +431,7 @@ export default function Analyser() {
             ) : (
               <div className="pub-badge">
                 {analysis.publisher.review_started ? (
-                  <>No track record yet — Maat has started reviewing this publisher&rsquo;s past reporting.</>
+                  <>No track record yet. Maat has started reviewing this publisher&rsquo;s past reporting for accuracy.</>
                 ) : (
                   <>Publisher not yet rated.</>
                 )}
