@@ -1,0 +1,6 @@
+<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Maat">
+  <rect width="32" height="32" rx="7.5" fill="#a8792e"/>
+  <g transform="translate(16 16) scale(1.09) translate(-12 -12)">
+    <path d="M20 4C11 5 6 10 5 18c5 1 9-1 12-5M9 14c2-3 5-5 9-6M5 18l-2 2" fill="none" stroke="#f6f4ee" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

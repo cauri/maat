@@ -75,7 +75,7 @@ www.maat.press {
 maat.press {
 	encode zstd gzip
 
-	@site path /analyse /analyse/* /card /card/* /_next/* /healthz /favicon.ico /robots.txt
+	@site path /analyse /analyse/* /card /card/* /_next/* /healthz /favicon.ico /icon.svg /apple-touch-icon.png /robots.txt
 	handle @site {
 		reverse_proxy 127.0.0.1:3200
 	}
