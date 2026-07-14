@@ -542,7 +542,7 @@ def _build_share(*, title: str | None, source: str, label: str, score: int, fore
     disp = _trim(title or "this article", 90)
     headline = label if forecast_only else f"{label} · {score}/100"
     top = _cap(top_reason) if top_reason else ""
-    pub_rec = f" (track record {pub_score_100}/100)" if pub_score_100 is not None else ""
+    pub_rec = f" (track record {pub_score_100}%)" if pub_score_100 is not None else ""
     og_description = _trim(
         f"{headline}. " + (f"{top}. " if top else "")
         + "Maat weighs each factual claim against independent reporting — not tone or bias.",

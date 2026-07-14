@@ -419,7 +419,7 @@ export default function Analyser() {
               <div className="pub-rating">
                 <div className="pub-score">
                   <span className="pub-num">{analysis.publisher.score}</span>
-                  <span className="pub-denom">/100</span>
+                  <span className="pub-denom">%</span>
                 </div>
                 <div className="pub-meta">
                   <span className="pub-label">Publisher track record</span>
