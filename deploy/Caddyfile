@@ -2,8 +2,11 @@
 #   • $MAAT_HOST        — PUBLIC. Serves ONLY the read API (/api/*). (api.maat.press)
 #   • $MAAT_ADMIN_HOST  — the operator/admin console. Public *name* + real cert, but served
 #                          ONLY to WireGuard source IPs (D31/D32). (admin.maat.press)
-#   • www.maat.press    — PUBLIC. The marketing landing page + acquisition funnel (a separate
-#                          loopback service); apex maat.press redirects here. No API here.
+#   • maat.press        — PUBLIC + CANONICAL. Serves the WHOLE public property: the Analyse surface
+#                          (P14 #365) at /analyse* + /card*, and the marketing landing page +
+#                          acquisition funnel at everything else. Both surfaces, one host.
+#   • www.maat.press    — PUBLIC. A pure alias: 301-redirects every path to the bare apex, so both
+#                          surfaces resolve on either host but canonicalise to maat.press.
 #
 # Caddy runs on the HOST network (see docker-compose.prod.yml) so the `remote_ip` matcher sees
 # the real client address — a WireGuard peer arrives as 10.8.0.x; the public internet does not.
@@ -52,28 +55,23 @@
 	}
 }
 
-# Marketing site (www.maat.press): the public landing page + acquisition funnel. Self-contained —
-# the page only POSTs /track + /notify back to its own origin, so no API is exposed here. The admin
-# /acquisition view lives on the private console, never on this host. Upstream is the marketing
-# service on the host loopback (host-net Caddy → 127.0.0.1:8080, NOT a compose service name).
+# www.maat.press — a pure alias for the canonical apex. Redirect the WHOLE host (every path,
+# both surfaces) to maat.press, preserving the sub-path + query. No content is served here: the
+# marketing page and the Analyse surface both live on the apex (below), so www.maat.press/ →
+# maat.press/ (marketing) and www.maat.press/analyse → maat.press/analyse (Analyse) — nothing is
+# special-cased. This replaces the old split where www served marketing while the apex redirected
+# here; the two surfaces disagreed on the canonical host, which is why /analyse only worked on one.
 www.maat.press {
-	encode zstd gzip
-
-	# The Analyse surface (P14 #365) is canonical on the APEX (maat.press/analyse) — its OG tags,
-	# share card, and metadataBase all say maat.press. Someone who reaches for www out of habit
-	# would otherwise hit the marketing app (:8080), which has no /analyse|/card route and 404s.
-	# Redirect those product paths to the apex so the one public product URL resolves whichever host
-	# is typed (301; {uri} preserves the sub-path + query). Everything else stays the marketing site.
-	@analyse path /analyse /analyse/* /card /card/*
-	redir @analyse https://maat.press{uri} permanent
-
-	reverse_proxy 127.0.0.1:8080
+	redir https://maat.press{uri} permanent
 }
 
-# Apex: the Analyse surface (P14, #365) — Maat's public product page — plus its same-origin API;
-# everything else still redirects to the landing site until the apex cutover. The page and API
-# share maat.press so the browser needs no CORS; /api/analyse* is rewritten onto the reader's
-# /api/v2/analyse* routes. SSE must stream unbuffered (flush_interval -1).
+# Apex maat.press — the CANONICAL host for the whole public property, serving both surfaces:
+#   • the Analyse surface (P14 #365) at /analyse* + /card* (+ its Next assets and same-origin API)
+#   • the marketing landing page + acquisition funnel at everything else (the catch-all handle)
+# The Analyse page and its API share this origin so the browser needs no CORS; /api/analyse* is
+# rewritten onto the reader's /api/v2/analyse* routes, and SSE must stream unbuffered
+# (flush_interval -1). www.maat.press redirects here (above). Caddy is host-networked, so both
+# upstreams are reached over the host loopback: the Analyse site on :3200, marketing on :8080.
 maat.press {
 	encode zstd gzip
 
@@ -89,7 +87,9 @@ maat.press {
 		}
 	}
 
+	# Everything else is the marketing landing page + acquisition funnel (the loopback marketing app).
+	# It POSTs /track + /notify back to this same origin, so no cross-origin config is needed.
 	handle {
-		redir https://www.maat.press{uri} permanent
+		reverse_proxy 127.0.0.1:8080
 	}
 }
