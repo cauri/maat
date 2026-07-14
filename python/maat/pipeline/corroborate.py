@@ -204,8 +204,8 @@ def _cites(body: str, source: str) -> bool:
 # Detection is deliberately conservative — a bare mention ("the Reuters building") never collapses:
 #   * an EXPLICIT credit: an agency dateline "(AP) —", a byline "By Jane Doe, Associated Press",
 #     or a contribution line "The Associated Press contributed…"; or
-#   * a citation-cascade attribution — a cascade marker plus the agency named as a whole word —
-#     the SAME bar ``_cites`` applies to source names.
+#   * a citation-cascade ATTRIBUTION — the agency name sitting next to an attribution verb
+#     ("according to Reuters" / "Reuters reported"), NOT a cascade marker merely present elsewhere.
 # Short, collision-prone aliases (AP, PA, AFP, …: "PA" is also Pennsylvania) count ONLY in the
 # explicit-credit shapes; distinctive names (reuters, bloomberg, …) may also match the cascade
 # shape. Aliases fold to one wire id so "AP" and "Associated Press" are the same agency.
@@ -234,25 +234,35 @@ _WIRE_EXPLICIT = re.compile(
     rf"|\b(?:the\s+)?(?:{_WIRE_ALIAS_RX})\s+contributed\b",         # "The AP contributed…"
     re.IGNORECASE,
 )
-_WIRE_NAME_RX = {alias: re.compile(rf"\b{re.escape(alias)}\b", re.IGNORECASE)
-                 for alias in _WIRE_ALIASES}
+# A citation-cascade CREDIT — the wire name ADJACENT to an attribution verb, in either order:
+# "according to Reuters", "cited by AFP", "Reuters reported/said/wrote". The name and the verb must
+# be next to each other; a bare mention where a cascade marker merely appears ELSEWHERE in the body
+# ("the Reuters building … police reported three dead") must NOT match — the loose "marker anywhere
+# AND name anywhere" gate collapsed independent originators on the shared feed path (review #1).
+_WIRE_CASCADE_NAMES = "|".join(sorted((re.escape(a) for a in _WIRE_CASCADE_OK), key=len, reverse=True))
+_WIRE_CASCADE_RX = re.compile(
+    rf"(?:according to|cited by|reported by|citing|per)\s+(?:the\s+)?({_WIRE_CASCADE_NAMES})\b"
+    rf"|\b({_WIRE_CASCADE_NAMES})\s+(?:reported|reports|said|says|wrote|writes|noted|notes|confirmed)\b",
+    re.IGNORECASE,
+)
 
 
 def wire_credit(body: str) -> str | None:
-    """The wire agency this article credits its copy to (a canonical wire id), or None."""
+    """The wire agency this article credits its copy to (a canonical wire id), or None. A credit is
+    an EXPLICIT shape (dateline / byline / "X contributed") or a cascade ATTRIBUTION where the wire
+    name sits next to an attribution verb ("according to Reuters" / "Reuters reported"). A bare
+    mention of the agency is never a credit."""
     if not body:
         return None
-    low = body.lower()
     m = _WIRE_EXPLICIT.search(body)
     if m:
         hit = m.group(0).lower()
         for alias in sorted(_WIRE_ALIASES, key=len, reverse=True):
             if alias in hit:
                 return _WIRE_ALIASES[alias]
-    if any(mk in low for mk in _CASCADE_MARKERS):
-        for alias in sorted(_WIRE_CASCADE_OK, key=len, reverse=True):
-            if _WIRE_NAME_RX[alias].search(body):
-                return _WIRE_ALIASES[alias]
+    c = _WIRE_CASCADE_RX.search(body)
+    if c:
+        return _WIRE_ALIASES[(c.group(1) or c.group(2)).lower()]
     return None
 
 
@@ -407,7 +417,9 @@ def _named_speaker(speaker: str | None) -> bool:
     return not any(g in low for g in _GENERIC_SPEAKERS)
 
 
-def claim_attribution_weight(voice: str, speaker: str | None, body: str, source: str) -> float:
+def claim_attribution_weight(
+    voice: str, speaker: str | None, body: str, source: str, *, w_own: float | None = None,
+) -> float:
     """The analysed claim's attribution weight from ITS OWN voice/speaker (S2 #400), not a whole-body
     scan — every article body has SOME provenance marker, so the scan read every claim at 1.0 and
     made lone claims indistinguishable (the flat 55/65). A claim ATTRIBUTED to a NAMED source counts
@@ -418,7 +430,7 @@ def claim_attribution_weight(voice: str, speaker: str | None, body: str, source:
         return _W_NAMED
     if voice == "attributed":
         return _W_NAMED if _named_speaker(speaker) else _W_ANONYMOUS
-    return _W_OWN if has_provenance(body) else _W_BALD
+    return (_W_OWN if w_own is None else w_own) if has_provenance(body) else _W_BALD
 
 
 # §S1 (#399) — reputation of the corroborating outlet also scales its contribution: a proven-strong
@@ -442,22 +454,28 @@ def _rep_score(reputation: dict[str, float], source: str) -> float | None:
     return reputation.get(canonical_source(source))
 
 
-def reputation_weight(source: str, reputation: dict[str, float] | None) -> float:
+def reputation_weight(
+    source: str, reputation: dict[str, float] | None,
+    *, unrated: float | None = None, floor: float | None = None,
+) -> float:
     """Continuous reputation multiplier on an originator's contribution (S1 #399), in
     [``_REP_FLOOR``, 1.0]. A proven-strong outlet → ~1.0; an unrated one → ``_REP_UNRATED``
     (cold-start neutral); a proven-weak one → the floor. ``None`` reputation map → 1.0 (feature
-    off; existing callers unaffected)."""
+    off; existing callers unaffected). ``unrated``/``floor`` override the constants — the
+    operator-promoted knob seam (#412), same pattern as ``confidence_read``'s decay/cap."""
     if reputation is None:
         return 1.0
+    lo = _REP_FLOOR if floor is None else floor
     score = _rep_score(reputation, source)
     if score is None:
-        return _REP_UNRATED
-    return round(_REP_FLOOR + (1.0 - _REP_FLOOR) * max(0.0, min(1.0, score)), 2)
+        return _REP_UNRATED if unrated is None else unrated
+    return round(lo + (1.0 - lo) * max(0.0, min(1.0, score)), 2)
 
 
 def effective_originators(
     groups: list[list[str]], bodies: dict[str, str], sources: dict[str, str],
     *, reputation: dict[str, float] | None = None, attribution: dict[str, float] | None = None,
+    rep_unrated: float | None = None, rep_floor: float | None = None,
 ) -> float:
     """Independent-originator count weighted by sourcing quality (§5.2) AND, when a ``reputation``
     map is supplied, by each originator's track record (S1 #399). Each originator counts by its
@@ -475,13 +493,17 @@ def effective_originators(
             return attribution[a]
         return attribution_weight(bodies.get(a, ""), sources.get(a, ""))
 
+    def _joint(a: str) -> float:  # one article's (attribution × reputation) — the two weights
+        return _attrib(a) * reputation_weight(  # of the SAME article, never mixed across the group
+            sources.get(a, ""), reputation, unrated=rep_unrated, floor=rep_floor
+        )
+
     total = 0.0
     for g in groups:
-        attrib = max((_attrib(a) for a in g), default=_W_BALD)
-        rep = max(
-            (reputation_weight(sources.get(a, ""), reputation) for a in g), default=1.0
-        )
-        total += attrib * rep
+        # A collapsed originator counts by its BEST single article's joint weight — not max
+        # attribution × max reputation independently (which could credit one member's attribution
+        # with another member's reputation, over-crediting the group; review #3).
+        total += max((_joint(a) for a in g), default=_W_BALD)
     return round(total, 2)
 
 
@@ -641,6 +663,8 @@ def corroborate_fixed(
     ownership: dict[str, str] | None = None,
     reputation: dict[str, float] | None = None,
     attribution: dict[str, float] | None = None,
+    rep_unrated: float | None = None,
+    rep_floor: float | None = None,
     decay: dict[str, float] | None = None,
     primary_lift: float | None = None,
     cap: float | None = None,
@@ -668,7 +692,8 @@ def corroborate_fixed(
     originators = [[article_ids[i] for i in g] for g in groups_idx]
     ind = len(originators)
     eff = effective_originators(
-        originators, bodies, art_source, reputation=reputation, attribution=attribution
+        originators, bodies, art_source, reputation=reputation, attribution=attribution,
+        rep_unrated=rep_unrated, rep_floor=rep_floor,
     )
     primary = any(is_primary_source(s) for s in {c.source for c in claims})
     return Corroboration(

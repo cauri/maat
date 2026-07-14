@@ -15,14 +15,19 @@ from __future__ import annotations
 
 import json
 
+from maat.learning.article_credibility import _PUB_CEILING_FLOOR
+from maat.pipeline.analyse import _ENTAIL_FLOOR
 from maat.pipeline.classify import CLASSIFY_MODEL
 from maat.pipeline.corroborate import (
     _CONFIDENCE_CAP,
     _DECAY,
     _PRIMARY_LIFT,
+    _REP_FLOOR,
+    _REP_UNRATED,
     _W_ANONYMOUS,
     _W_BALD,
     _W_NAMED,
+    _W_OWN,
 )
 from maat.pipeline.extremity import EXTREMITY_MODEL
 from maat.providers.seam import CLAUDE_JUDGE, MISTRAL_BULK, MISTRAL_EMBED
@@ -91,9 +96,28 @@ KNOBS: list[dict] = [
     {"key": "weight.anonymous", "label": "Trust · anonymous source", "group": "Attribution (§5.2)",
      "type": "float", "default": str(_W_ANONYMOUS), "core": True, "source": "corroborate.py:_W_ANONYMOUS",
      "help": "How much a claim counts when the source is anonymous (less than a named source)."},
+    {"key": "weight.own", "label": "Trust · outlet's own voice", "group": "Attribution (§5.2)",
+     "type": "float", "default": str(_W_OWN), "core": True, "source": "corroborate.py:_W_OWN",
+     "help": "How much an analysed claim counts when the outlet asserts it in its OWN voice (in an otherwise-sourced piece) — between a named and an anonymous source."},
     {"key": "weight.bald", "label": "Trust · no attribution", "group": "Attribution (§5.2)",
      "type": "float", "default": str(_W_BALD), "core": True, "source": "corroborate.py:_W_BALD",
      "help": "How much a claim counts when there is no attribution at all (the least)."},
+    {"key": "reputation.unrated", "label": "Corroborator weight · unrated outlet",
+     "group": "Reputation weighting (S1)", "type": "float", "default": str(_REP_UNRATED),
+     "core": True, "source": "corroborate.py:_REP_UNRATED",
+     "help": "How much a corroborating outlet WITHOUT a track record counts, relative to a proven-strong one. Keep close to 1 while most sources are unrated."},
+    {"key": "reputation.floor", "label": "Corroborator weight · proven-weak floor",
+     "group": "Reputation weighting (S1)", "type": "float", "default": str(_REP_FLOOR),
+     "core": True, "source": "corroborate.py:_REP_FLOOR",
+     "help": "The least a corroborating outlet can count, however poor its track record — never zero, so corroboration is dampened, not erased."},
+    {"key": "entailment.floor", "label": "Citation weight · barely-entailing floor",
+     "group": "Corroboration strength (S5)", "type": "float", "default": str(_ENTAIL_FLOOR),
+     "core": True, "source": "pipeline/analyse.py:_ENTAIL_FLOOR",
+     "help": "How much a citation that only just clears the entailment bar counts, vs one that asserts the fact head-on (which counts fully)."},
+    {"key": "publisher.ceiling_floor", "label": "Publisher ceiling · proven-weak floor",
+     "group": "Publisher ceiling (S4)", "type": "float", "default": str(_PUB_CEILING_FLOOR),
+     "core": True, "source": "learning/article_credibility.py:_PUB_CEILING_FLOOR",
+     "help": "The lowest an article's ceiling can drop when its publisher has a PROVEN-poor track record and no proven outside outlet corroborates it. Corroboration by a proven outlet always lifts the ceiling fully."},
     {"key": "confidence.primary_lift", "label": "Primary-source bonus", "group": "Confidence (§5.7)",
      "type": "float", "default": str(_PRIMARY_LIFT), "core": True, "source": "corroborate.py:_PRIMARY_LIFT",
      "help": "Reaching the original/primary source closes this fraction of the remaining gap to certainty."},
@@ -126,14 +150,18 @@ def groups() -> list[str]:
 
 
 # --- Enactment (#183/#184) ----------------------------------------------------------------
-# The knobs that map to corroborate()/confidence_read() parameters TODAY. The rest — model
-# routing, the attribution weights (weight.*), and the confidence_label tier cut-points
+# The knobs that map to pipeline parameters TODAY. The rest — model routing, the body-scan
+# attribution weights (weight.named/anonymous/bald), and the confidence_label tier cut-points
 # (gate.floor / tier.*) — aren't parameterised in the pipeline yet; promoting those is a follow-up.
+# The S1/S2/S4/S5 scoring knobs (#412) enact on the ANALYSE path via `analyse_overrides` →
+# ScoringKnobs; weight.own is the analysed claim's own-voice weight (claim_attribution_weight).
 _ENACTABLE = frozenset(
     {
         "decay.routine", "decay.ordinary", "decay.notable", "decay.significant", "decay.extraordinary",
         "confidence.primary_lift", "confidence.cap",
         "cluster.same_fact", "cluster.duplicate_source", "cluster.min_corroboration",
+        "weight.own", "reputation.unrated", "reputation.floor",
+        "entailment.floor", "publisher.ceiling_floor",
     }
 )
 
@@ -169,4 +197,28 @@ def pipeline_overrides(cfg: dict[str, float]) -> dict:
         "same_fact_threshold": g("cluster.same_fact"),
         "duplicate_source_threshold": g("cluster.duplicate_source"),
         "min_corroboration": int(g("cluster.min_corroboration")),
+    }
+
+
+def analyse_overrides(cfg: dict[str, float]) -> dict:
+    """Map a flat active-config dict to the Analyse path's knobs (#412): the ``ScoringKnobs``
+    fields plus the same-fact bar. The analyse surface previously ignored ALL promoted knobs —
+    now a promoted decay/weight applies to BOTH the feed (``pipeline_overrides``) and analyse."""
+    def g(key: str) -> float:
+        return cfg.get(key, float(KNOBS_BY_KEY[key]["default"]))
+
+    extremities = ("routine", "ordinary", "notable", "significant", "extraordinary")
+    return {
+        "same_fact_threshold": g("cluster.same_fact"),
+        "knobs": {
+            "decay": {ex: g(f"decay.{ex}") for ex in extremities},
+            "primary_lift": g("confidence.primary_lift"),
+            "cap": g("confidence.cap"),
+            "duplicate_source_threshold": g("cluster.duplicate_source"),
+            "rep_unrated": g("reputation.unrated"),
+            "rep_floor": g("reputation.floor"),
+            "w_own": g("weight.own"),
+            "entail_floor": g("entailment.floor"),
+            "publisher_floor": g("publisher.ceiling_floor"),
+        },
     }

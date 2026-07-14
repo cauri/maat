@@ -43,7 +43,10 @@ _DISQUALIFIED_CEILING = 20   # a disqualified article floors into the bottom ban
 _BIG = ("significant", "extraordinary")
 
 
-def _ceiling(any_rated_originator: bool, publisher_reputation: float | None) -> tuple[float, str]:
+def _ceiling(
+    any_rated_originator: bool, publisher_reputation: float | None,
+    *, floor: float | None = None,
+) -> tuple[float, str]:
     """How high the article can score, and why (S4 #402). Corroboration by a proven OUTSIDE
     originator lifts the cold-start cap entirely; otherwise the PUBLISHER's own record bounds it —
     a proven-strong outlet up to the top, an unrated one at the cold-start cap, a proven-weak one
@@ -52,9 +55,10 @@ def _ceiling(any_rated_originator: bool, publisher_reputation: float | None) -> 
     the two never double-count."""
     if any_rated_originator:
         return 1.0, ""
+    lo = _PUB_CEILING_FLOOR if floor is None else floor
     if publisher_reputation is not None:
         rep = max(0.0, min(1.0, publisher_reputation))
-        ceiling = round(_PUB_CEILING_FLOOR + (1.0 - _PUB_CEILING_FLOOR) * rep, 2)
+        ceiling = round(lo + (1.0 - lo) * rep, 2)
         why = ("publisher has a strong track record" if ceiling >= _COLD_START_CAP
                else "publisher's own track record is weak — capped")
         return ceiling, why
@@ -94,7 +98,8 @@ def _disqualifiers(central: list[ArticleClaim]) -> list[str]:
 
 
 def score_article(
-    claims: list[ArticleClaim], *, publisher_reputation: float | None = None
+    claims: list[ArticleClaim], *, publisher_reputation: float | None = None,
+    publisher_floor: float | None = None,
 ) -> StoryScore:
     """Roll an article's FACTUAL claims into one 0..100 credibility score (see module docstring).
 
@@ -141,7 +146,9 @@ def score_article(
 
     # S4 #402 — the article's ceiling: corroboration by a proven OUTSIDE originator lifts it,
     # otherwise the publisher's own track record bounds it (see ``_ceiling``).
-    ceiling, cap_why = _ceiling(any(c.rated_originator for c in facts), publisher_reputation)
+    ceiling, cap_why = _ceiling(
+        any(c.rated_originator for c in facts), publisher_reputation, floor=publisher_floor
+    )
     capped = False
     if base > ceiling:
         base, capped = ceiling, True

@@ -235,6 +235,21 @@ def test_lone_claims_differentiate_by_attribution_voice():
     assert by[named].confidence > by[own].confidence  # named attribution reads stronger
 
 
+def test_promoted_knobs_change_the_score():
+    # #412 — a promoted scoring knob must actually enact on the analyse path (S1/S2/S4/S5 were code
+    # constants; now ScoringKnobs threads a promoted override end-to-end through the reading).
+    from maat.pipeline.analyse import ScoringKnobs, _lone_reading
+
+    claim = Claim(text="The economy grew", voice="own", evidence_span="x")
+    body = "The economy grew, officials said in a briefing."  # own-voice, has provenance
+    base = _lone_reading(claim, body, "x.com", "ordinary", {})[0].confidence
+    lifted = _lone_reading(claim, body, "x.com", "ordinary", {}, ScoringKnobs(w_own=1.0))[0].confidence
+    dropped = _lone_reading(claim, body, "x.com", "ordinary", {}, ScoringKnobs(w_own=0.3))[0].confidence
+    assert lifted > base > dropped  # the promoted own-voice weight moves the number
+    # None knobs / default ScoringKnobs() == the unconfigured pipeline exactly
+    assert _lone_reading(claim, body, "x.com", "ordinary", {}, ScoringKnobs())[0].confidence == base
+
+
 def test_consolidate_claims_merges_near_duplicates():
     # #411 — the Kyiv Post 45-vs-95 bug: near-identical extractions must become ONE claim before
     # extremity rating and search, so one fact can't earn two ratings or split one search budget.
@@ -271,6 +286,14 @@ def test_consolidate_claims_keeps_distinct_facts_and_survives_embed_failure():
 
     out2, merged2 = consolidate_claims([a, b], boom)
     assert (out2, merged2) == ([a, b], 0)  # embed failure → consolidation skipped, never fatal
+
+    # review #2 — a wrong-length or non-finite embed RETURN (not an exception) must also skip
+    # cleanly, never drop a claim, crash the merge loop, or collapse distinct facts.
+    c = Claim(text="Rates were held on Thursday", voice="own", evidence_span="c")
+    assert consolidate_claims([a, b, c], lambda ts: [[1.0, 0.0], [0.0, 1.0]]) == ([a, b, c], 0)  # too few
+    assert consolidate_claims([a, b, c], lambda ts: [[1.0, 0.0]] * 5) == ([a, b, c], 0)          # too many
+    nan = float("nan")
+    assert consolidate_claims([a, b, c], lambda ts: [[nan, 0.0]] * 3) == ([a, b, c], 0)          # NaN
 
 
 def test_duplicate_fact_is_rated_and_searched_once():
@@ -349,6 +372,49 @@ def test_deep_search_rescues_a_shallow_lone_claim():
     assert r.independent_originators == 2  # rescued: pasted article + the deep-found outside source
     assert res.live is not None
     assert res.live.deep_searched == 1 and res.live.deep_rescued == 1
+
+
+def test_deep_pass_does_not_double_count_web_corroborated():
+    # review #4 — a pass-1 web claim whose only outside source COLLAPSED with the pasted outlet
+    # (co-owned) is already independent_originators<=1, so it enters the deep pass; its later rescue
+    # must count web_corroborated ONCE, not twice. ops-meta only, but must be accurate.
+    from maat.pipeline.analyse import Citation, analyse_article
+    from maat.pipeline.identity import canonical_source
+
+    claim = "The dam was breached on Monday"
+    # distinct wordings so the two outside sources don't lexically collapse into one another —
+    # they are genuinely independent reports (NLI is forced to entail both).
+    coowned = Citation("https://outlet-b.example/x", "outlet-b.example",
+                       "The dam was breached on Monday, officials confirmed.")
+    indep = Citation("https://outlet-c.example/y", "outlet-c.example",
+                     "Engineers reported the barrier gave way at dawn, a spokesperson stated.")
+
+    def web_search(texts, own_domain, deep=False):
+        return [[indep]] if deep else [[coowned]]
+
+    def fetch(u):  # only the pasted article has a body; cited pages are unfetchable → judged on NLI
+        return FetchedPage(body=f"{claim}. Officials briefed reporters.", title="T") if "outlet-a" in u else None
+
+    res = analyse_article(
+        "https://outlet-a.example/story",
+        reputation={},
+        # a & b are co-owned → b collapses into the pasted outlet's originator
+        ownership={canonical_source("outlet-a.example"): "grp", canonical_source("outlet-b.example"): "grp"},
+        corpus_lookup=lambda t: [None] * len(t),
+        fetch=fetch,
+        extract=lambda _b, **_k: [Claim(text=claim, voice="own", evidence_span=claim)],
+        classify=lambda c, **_k: c,
+        extremity_of=lambda _t: "notable",
+        embed=fake_embed,
+        language_of=lambda _t: "en",
+        web_search=web_search,
+        nli=lambda _p, _h: ("entailment", 0.9),
+    )
+    assert res.live is not None
+    assert res.live.deep_rescued == 1
+    assert res.live.web_corroborated == 1  # counted ONCE — not doubled by the rescue
+    r = next(x for x in res.facts if x.claim.text == claim)
+    assert r.independent_originators == 2  # pasted + independent outlet-c (co-owned b collapsed in)
 
 
 def test_projections_split_out_and_never_scored():

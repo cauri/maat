@@ -50,6 +50,7 @@ from maat.acquire.fetch import FetchedPage, fetch_article, fetch_page
 from maat.acquire.source_gate import prefiltered_reject
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.trajectory import load_trajectory
+from maat import config as config_mod
 from maat.pipeline.analyse import (
     AnalyseError,
     ArticleAnalysis,
@@ -57,6 +58,7 @@ from maat.pipeline.analyse import (
     ClaimReading,
     CorpusFact,
     LiveCandidate,
+    ScoringKnobs,
     analyse_article,
     check_one_claim,
     match_claims,
@@ -246,6 +248,10 @@ class _Assets:
     reputation: dict[str, float]            # rated sources only (truth-over-time)
     denied: set[str]                        # operator-denied sources (#187)
     ownership: dict[str, str]               # canonical source -> ownership group (#41/#254)
+    # Promoted scoring overrides (#412): the operator Config panel's sign-off-gated knobs, folded
+    # from admin.config.promoted — the same flow the feed's corroborate agent honours.
+    knobs: ScoringKnobs = ScoringKnobs()
+    same_fact: float = 0.82                 # cluster.same_fact — the §5.4 bar, also promotable
 
 
 _ASSETS_CACHE = VersionCache(maxsize=2)
@@ -280,6 +286,11 @@ async def _load_assets(pool: Any) -> _Assets:
     grouped_rows = await pool.fetch(
         "select distinct on (data->>'source') data->>'source' s, data->>'group' g "
         "from events where type = 'admin.source.grouped' order by data->>'source', id desc"
+    )
+    # Promoted scoring knobs (#412) — the sign-off-gated Config-panel overrides. Folded the same
+    # way the feed's corroborate agent folds them, so one promote governs both surfaces.
+    promoted_rows = await pool.fetch(
+        "select data from events where type = 'admin.config.promoted' order by id"
     )
     # Latest English pivot per claim (#240) — same bounded distinct-on read as stories (#283).
     pivot_rows = await pool.fetch(
@@ -347,6 +358,9 @@ async def _load_assets(pool: Any) -> _Assets:
     )
     manual_owner = {canonical_source(r["s"]): r["g"] for r in grouped_rows if r["s"] and r["g"]}
 
+    overrides = config_mod.analyse_overrides(
+        config_mod.active_config(r["data"] for r in promoted_rows)
+    )
     assets = _Assets(
         facts=facts,
         claim_ids=claim_ids,
@@ -354,6 +368,8 @@ async def _load_assets(pool: Any) -> _Assets:
         reputation=reputation,
         denied=denied_sources([r["data"] for r in flag_rows]),
         ownership={**auto_owner, **manual_owner},   # manual overrides auto
+        knobs=ScoringKnobs(**overrides["knobs"]),
+        same_fact=overrides["same_fact_threshold"],
     )
     _ASSETS_CACHE.put("assets", version, assets)
     return assets
@@ -396,7 +412,7 @@ def make_corpus_lookup(loop: asyncio.AbstractEventLoop, pool: Any, assets: _Asse
         if assets.embeds is None or not assets.facts:
             return [None] * len(texts)
         hits = match_claims(list(texts), assets.facts, embed=mistral_embed,
-                            corpus_embeddings=assets.embeds)
+                            corpus_embeddings=assets.embeds, threshold=assets.same_fact)
         matched = {assets.facts[m].cluster_id for m in hits if m is not None}
         if not matched:
             return [None] * len(texts)
@@ -995,6 +1011,8 @@ async def run_analysis(
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,
+            same_fact_threshold=assets.same_fact,
+            knobs=assets.knobs,   # promoted Config-panel overrides (#412)
             progress=progress,
         )
     payload = public_payload(analysis, canon_aid)
@@ -1078,6 +1096,8 @@ async def run_check(
             nli_entail_min=_NLI_ENTAIL_MIN,
             nli_contradict_min=_NLI_CONTRADICT_MIN,
             live_max_candidates=_MAX_CANDIDATES,
+            same_fact_threshold=assets.same_fact,
+            knobs=assets.knobs,   # the forced path honours the same promoted knobs (#412)
         )
     return public_claim(reading)
 
