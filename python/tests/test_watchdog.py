@@ -115,3 +115,98 @@ def test_stage_query_is_bounded_not_a_scan():
     assert "max(created_at)" in seen["sql"] and "group by type" in seen["sql"]
     assert "select *" not in seen["sql"].lower()
     assert set(seen["types"]) == set(watchdog.STAGE_EVENT_TYPES.values())
+
+
+# --- #419: an alarm that always fires is its own outage -----------------------------------------
+
+
+def test_intentionally_silent_stages_do_not_alert(monkeypatch):
+    """The watchdog must not fire on the state the box was ASKED to be in (#419).
+
+    Observed on the live box: cauri paused intake in 2026-06 (console-v2 work) and the engine is
+    gated off pending the corroborate fixes. The watchdog alerted CRITICAL on acquire, extract,
+    classify AND cluster — every 15 minutes, forever — while the box was in exactly its intended
+    state. An alarm that always fires trains you to ignore it, which is the same failure as the
+    27-day outage wearing the opposite mask: a signal nobody can act on and a signal nobody sends
+    are worth the same.
+    """
+    import asyncio
+
+    import scripts.watchdog as wd
+
+    monkeypatch.setenv("MAAT_INTAKE_PAUSED", "1")
+    monkeypatch.setenv("MAAT_CORROBORATE_ENABLED", "0")
+
+    async def fake_rows(_pool):
+        # every stage long dead — but all four are dead ON PURPOSE
+        return [
+            {"stage": "acquire", "last_seen": None},
+            {"stage": "extract", "last_seen": None},
+            {"stage": "classify", "last_seen": None},
+            {"stage": "cluster", "last_seen": None},
+        ]
+
+    monkeypatch.setattr(wd, "_stage_rows", fake_rows)
+    healthy, alerts, health = asyncio.run(wd.check(object()))
+
+    assert healthy is True, "the box is in its intended state — the dead-man's switch must stay fed"
+    assert alerts == [], f"must not alert on a deliberate pause, got: {alerts}"
+    assert {s["stage"] for s in health if s["freshness"] == "paused"} == {
+        "acquire", "extract", "classify", "cluster",
+    }
+    # and every paused stage must carry the reason — "paused" is never allowed to be unexplained
+    assert all(s.get("paused_because") for s in health if s["freshness"] == "paused")
+
+
+def test_a_stage_pages_the_moment_its_switch_is_turned_back_on(monkeypatch):
+    """The other half, and the one that actually matters (#419).
+
+    Suppressing an alert is only safe if the suppression lifts the instant the reason does. If the
+    engine is armed and `cluster` is STILL dead, that is the original outage — and it must page on
+    the very next check, not wait for anything to be noticed.
+    """
+    import asyncio
+
+    import scripts.watchdog as wd
+
+    monkeypatch.setenv("MAAT_INTAKE_PAUSED", "0")
+    monkeypatch.setenv("MAAT_CORROBORATE_ENABLED", "1")  # engine ARMED
+
+    async def fake_rows(_pool):
+        return [{"stage": "cluster", "last_seen": None}]  # …and cluster is still dead
+
+    monkeypatch.setattr(wd, "_stage_rows", fake_rows)
+    healthy, alerts, _ = asyncio.run(wd.check(object()))
+
+    assert healthy is False, "an armed engine with a dead cluster stage is THE outage — it must page"
+    assert any("cluster" in a for a in alerts)
+
+
+def test_suppression_requires_an_explicit_switch_never_a_default(monkeypatch):
+    """An ABSENT variable must alert, not suppress (#419).
+
+    The first cut of `_expected_silent` read `MAAT_CORROBORATE_ENABLED != "1"` → silent. That mutes
+    the cluster alarm whenever the variable is merely missing — a typo'd compose key, a dropped env
+    in a future deploy — permanently, and rebuilds the 27-day outage inside the thing built to catch
+    it. The existing outage tests caught it, which is exactly what they are for.
+    """
+    import asyncio
+
+    import scripts.watchdog as wd
+
+    monkeypatch.delenv("MAAT_CORROBORATE_ENABLED", raising=False)
+    monkeypatch.delenv("MAAT_INTAKE_PAUSED", raising=False)
+
+    async def fake_rows(_pool):
+        return [{"stage": "cluster", "last_seen": None}]
+
+    monkeypatch.setattr(wd, "_stage_rows", fake_rows)
+    healthy, alerts, _ = asyncio.run(wd.check(object()))
+
+    assert healthy is False, "an UNSET gate must alert — silence is only ever opt-in"
+    assert any("cluster" in a for a in alerts)
+
+    # a malformed value is not an off-switch either
+    monkeypatch.setenv("MAAT_CORROBORATE_ENABLED", "false")
+    healthy, _, _ = asyncio.run(wd.check(object()))
+    assert healthy is False, "only the exact string '0' suppresses; anything else alerts"

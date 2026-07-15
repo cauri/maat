@@ -50,6 +50,40 @@ ALERT_WEBHOOK = os.environ.get("MAAT_ALERT_WEBHOOK", "").strip()
 CRITICAL_STAGES = {"cluster", "extract", "classify"}
 
 
+def _expected_silent() -> dict[str, str]:
+    """Stages that are stale BY DESIGN right now → {stage: why} (#419).
+
+    A watchdog that fires on the intended state is worse than no watchdog. Two switches are off on
+    purpose — cauri paused intake in 2026-06 for the console-v2 work, and the engine is gated off
+    pending the corroborate fixes — and every stage downstream of them is *correctly* silent. Left
+    as-is this service alerts CRITICAL on all four, every 15 minutes, forever, while the box is in
+    exactly the state it was asked to be in.
+
+    That is not a cosmetic problem. It is the SAME failure as the outage, wearing the opposite mask.
+    The 27 days were lost because liveness was inferred from the absence of a complaint; an alarm
+    that always fires teaches you to infer the absence of a complaint from noise. A signal nobody
+    can act on and a signal nobody sends are worth the same. So: report these as PAUSED — visible,
+    never alerting — and keep the dead-man's switch fed, because the system IS healthy. The moment a
+    switch flips back on, the stage leaves this map and a real stall pages immediately.
+
+    **Suppression requires an EXPLICIT off-switch — never a default.** Both checks below test for the
+    exact string, so an unset or malformed variable alerts rather than suppresses. That asymmetry is
+    deliberate and load-bearing: read the other way (``!= "1"`` → silent), a variable that was merely
+    absent — a typo'd compose key, a dropped env in some future deploy — would mute the cluster alarm
+    permanently, and we would have rebuilt the 27-day outage inside the very thing built to catch it.
+    Suppression is only ever safe when someone actually asked for it, and it lifts the instant they
+    stop asking.
+    """
+    silent: dict[str, str] = {}
+    if os.environ.get("MAAT_INTAKE_PAUSED") == "1":
+        # No new articles → nothing for these to chew. Their silence is the pause working.
+        for stage in ("acquire", "extract", "classify"):
+            silent[stage] = "intake paused (MAAT_INTAKE_PAUSED=1)"
+    if os.environ.get("MAAT_CORROBORATE_ENABLED") == "0":
+        silent["cluster"] = "engine gated off (MAAT_CORROBORATE_ENABLED=0)"
+    return silent
+
+
 def _fmt_age(age_s: float | None) -> str:
     if age_s is None:
         return "never"
@@ -79,9 +113,16 @@ async def _stage_rows(pool) -> list[dict]:
 async def check(pool) -> tuple[bool, list[str], list[dict]]:
     """(healthy, alert lines, per-stage detail). Healthy = no CRITICAL stage stalled or never-run."""
     health = stage_health(await _stage_rows(pool))
+    silent = _expected_silent()
     alerts: list[str] = []
     healthy = True
     for s in health:
+        if s["stage"] in silent:
+            # Stale on purpose. Shown in the status line, never alerted, never unhealthy — see
+            # _expected_silent for why an always-firing alarm is its own kind of outage.
+            s["freshness"] = "paused"
+            s["paused_because"] = silent[s["stage"]]
+            continue
         bad = s["freshness"] in ("stalled", "never")
         if bad and s["stage"] in CRITICAL_STAGES:
             healthy = False
@@ -120,6 +161,13 @@ async def once() -> bool:
     stamp = datetime.now(timezone.utc).isoformat()
     detail = " | ".join(f"{s['stage']}={s['freshness']}({_fmt_age(s['age_s'])})" for s in health)
     print(f"[watchdog] {stamp} healthy={healthy} :: {detail}", flush=True)
+    # Name every paused stage and the switch that paused it, every tick. "paused" must never be a
+    # place a real death can hide: if the reason isn't true any more, this line is how you see it.
+    for s in health:
+        if s["freshness"] == "paused":
+            print(
+                f"[watchdog]   ↳ {s['stage']}: silent by design — {s['paused_because']}", flush=True
+            )
     for a in alerts:
         print(f"[watchdog] ALERT {a}", flush=True)
     await _deliver(healthy, alerts)
