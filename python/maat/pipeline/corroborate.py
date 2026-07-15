@@ -15,6 +15,7 @@ identity resolution, §6.7), and primary-source detection are first cuts.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -124,6 +125,32 @@ def _agglomerate(sim, threshold: float) -> list[list[int]]:
     return [m for m in members if m is not None]
 
 
+# Rows of the similarity matrix computed at a time (#417). Bounds the transient block to
+# block × n × 4 bytes — at 512 × 68k that is ~139 MB, vs the 30.1 GiB the full matrix wanted.
+_SIM_BLOCK = int(os.environ.get("MAAT_SIM_BLOCK", "512"))
+
+
+def _candidate_pairs(x: np.ndarray, threshold: float, block: int) -> list[tuple[int, int]]:
+    """Index pairs whose cosine clears ``threshold``, found WITHOUT ever materialising N×N (#417).
+
+    Computed in row-blocks: each block is (block × n), so peak memory is bounded by ``block`` and
+    independent of the corpus size. Only the upper triangle is kept, and only pairs at/above the
+    bar survive — at a 0.82 bar that is a vanishingly small fraction of n², so the returned edge
+    list is tiny even on a corpus where the dense matrix would be tens of gigabytes."""
+    n = x.shape[0]
+    edges: list[tuple[int, int]] = []
+    for start in range(0, n, block):
+        stop = min(start + block, n)
+        sims = x[start:stop] @ x.T  # (block, n) — the ONLY allocation, and it is bounded
+        hits = np.nonzero(sims >= threshold)
+        for local, j in zip(hits[0].tolist(), hits[1].tolist()):
+            i = start + local
+            if j > i:  # upper triangle only; i == j is the self-match
+                edges.append((i, j))
+        del sims  # release the block before the next one is allocated
+    return edges
+
+
 def group_by_similarity(
     texts: list[str], threshold: float, *, embeddings: np.ndarray | None = None
 ) -> list[list[int]]:
@@ -131,16 +158,46 @@ def group_by_similarity(
 
     ``embeddings`` (rows aligned with ``texts``) lets a caller pass vectors it already holds — the
     corroborate agent's chunked, cached reuse path (#286) — so Mistral is not re-queried. Omitted →
-    embed the texts here (the small / direct-call path)."""
+    embed the texts here (the small / direct-call path).
+
+    **Memory (#417).** This used to be ``sim = x @ x.T`` — the full cosine matrix in one BLAS call.
+    That is O(n²) memory: at 68,249 claims it asked for **30.1 GiB on an 8 GB box** and raised
+    ArrayMemoryError on every tick, which killed the corroboration engine for 27 days. (The previous
+    fix in this same function traded an O(n³) HANG for that allocation — time was re-checked, space
+    was not.) The scale test was pinned at 1,000 claims — a 7.6 MiB matrix — so it could never fail.
+
+    The partition is now computed EXACTLY, in bounded memory, via a property of average linkage:
+    a merge needs the MEAN cross-similarity ≥ threshold, and **mean ≤ max**, so two claims can only
+    ever end up together if some pair between them already clears the bar. Therefore:
+
+      1. find the candidate pairs at/above the bar in row-blocks (never the full matrix);
+      2. take connected components of that sparse graph — nothing outside a component can merge into
+         it, because every cross pair is below the bar and so is every possible mean;
+      3. run the exact dense agglomeration WITHIN each component, where the sub-matrix is small.
+
+    Same answer as the dense version (merge order inside a component is unaffected by claims it can
+    never merge with), but peak memory is O(block × n + largest component²) instead of O(n²)."""
     if len(texts) <= 1:
         return [[0]] if texts else []
-    x = embeddings if embeddings is not None else np.asarray(mistral_embed(texts), dtype=np.float64)
-    x = np.asarray(x, dtype=np.float64)
+    x = embeddings if embeddings is not None else mistral_embed(texts)
+    # float32 halves the footprint and is far finer than the precision a 0.82 cosine bar needs.
+    x = np.asarray(x, dtype=np.float32)
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     norms[norms == 0.0] = 1.0  # a missing embedding (zero vector) must not divide by zero
     x = x / norms  # NOT in-place: never mutate a caller-supplied array (the reuse cache, #286)
-    sim = x @ x.T  # the full cosine matrix in one BLAS call (was an O(n^2·d) Python loop)
-    return _agglomerate(sim, threshold)
+
+    n = x.shape[0]
+    comps = _components(n, _candidate_pairs(x, threshold, max(1, _SIM_BLOCK)))
+    out: list[list[int]] = []
+    for comp in comps:
+        if len(comp) == 1:
+            out.append(comp)
+            continue
+        idx = np.asarray(sorted(comp))
+        sub = x[idx] @ x[idx].T  # small by construction — one same-fact story, not the corpus
+        for part in _agglomerate(sub, threshold):
+            out.append([int(idx[k]) for k in part])
+    return out
 
 
 # --- originator collapse (§5.5): lexical near-duplication + citation cascade ---

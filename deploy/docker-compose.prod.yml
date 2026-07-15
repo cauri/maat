@@ -124,66 +124,50 @@ services:
       MAAT_CURATION_LLM: ${MAAT_CURATION_LLM:-1}         # geo-tag clusters the TLD/lang heuristic can't place (#189)
       MAAT_GROUNDING_LLM: ${MAAT_GROUNDING_LLM:-1}       # judge each primary-bearing cluster vs its primary source (#228)
       MAAT_CONTRADICTION_NLI: ${MAAT_CONTRADICTION_NLI:-1}  # NLI contradiction detection (#229): pinned + smoke-tested ONNX MNLI cross-encoder
+      # ── #417 kill switches — both default OFF, both flip on with one env var + redeploy ──
+      # THE ENGINE. corroborate died 2026-06-17 on a 30.1 GiB allocation and stayed dead 27 days.
+      # The allocation is FIXED (blocked candidate scan; 68k claims now clusters in ~25s / 1.3 GB),
+      # but it stays OFF until cauri signs off on turning it back on — the fix is built, not armed.
+      MAAT_CORROBORATE_ENABLED: ${MAAT_CORROBORATE_ENABLED:-0}
+      # contradiction_agent wedged the whole tick for 6h+ (O(n^2) pure-python nearest_pairs over
+      # 12k claims, 100% CPU, 0 rows ever produced) — it is the reason harvest stopped. OFF until
+      # nearest_pairs gets the same treatment corroborate just got.
+      MAAT_CONTRADICTION_ENABLED: ${MAAT_CONTRADICTION_ENABLED:-0}
       MAAT_NLI_MODEL: ${MAAT_NLI_MODEL:-Xenova/nli-deberta-v3-small}  # DeBERTa-v3 NLI cross-encoder in ONNX (#229)
       HF_HOME: /data/hf                                  # cache the NLI model on a volume so it isn't re-downloaded each deploy (#229)
       MAAT_OWNERSHIP_LOOKUP: ${MAAT_OWNERSHIP_LOOKUP:-1}  # auto-resolve source ownership from Wikidata (#254); resolved owners are surfaced + overridable on /sources
       # Analyse surface (P14 #365): a publisher pasted into maat.press/analyse with no track
       # record is REGISTERED; this bounds how many registered sources the registry pass
       # auto-backfills per tick (the existing #241 review: pull its history → score it).
-      MAAT_BACKFILL_ON_REGISTER: ${MAAT_BACKFILL_ON_REGISTER:-2}
+      # #417: was 2 — the registry kept auto-backfilling 100 articles/source/tick INTO a corpus
+      # whose engine was dead, growing N (and so the failed allocation) for zero benefit. Held at 0
+      # while corroborate is off; restore to 2 when the engine is armed.
+      MAAT_BACKFILL_ON_REGISTER: ${MAAT_BACKFILL_ON_REGISTER:-0}
       MAAT_TRANSLATE_TITLES: ${MAAT_TRANSLATE_TITLES:-1}  # English gloss for non-English feed titles (#54), display-only
       # Intake pause (cauri, 2026-06): PAUSED by default while the console v2 is iterated — the
       # acquire steps below are skipped, but processing (corroborate, story-graph, grounding,
       # harvest…) keeps running so existing data matures. Resume with MAAT_INTAKE_PAUSED=0 in the
       # box .env (or flip this default) + redeploy.
       MAAT_INTAKE_PAUSED: ${MAAT_INTAKE_PAUSED:-1}
-    # NOTE: $$VAR (doubled) escapes compose's own parse-time substitution so the *container* shell
-    # evaluates these against its environment at runtime. A single ${VAR} here would be substituted
-    # by compose against the host env (unset → blank), breaking `sleep ""`.
-    command:
-      - sh
-      - -c
-      - |
-        while true; do
-          if [ "$${MAAT_INTAKE_PAUSED}" = "1" ]; then
-            echo "[clock] intake PAUSED (MAAT_INTAKE_PAUSED=1) — skipping acquire; processing still runs";
-          else
-            echo "[clock] tick: acquire (topics: $${MAAT_TOPICS})";
-            uv run --no-dev python scripts/clock.py || echo "[clock] acquire error";
-            echo "[clock] acquire-rss (balanced multipolar outlet feeds, #238)";
-            uv run --no-dev python scripts/acquire_rss.py || echo "[clock] rss error";
-            echo "[clock] acquire-locales (per-language/region GDELT floor, #239)";
-            uv run --no-dev python scripts/acquire_locales.py || echo "[clock] locale error";
-            echo "[clock] acquire-newsdata (paid multipolar channel; no-op unless MAAT_NEWSDATA_KEY set)";
-            uv run --no-dev python scripts/acquire_newsdata.py || echo "[clock] newsdata error";
-          fi
-          echo "[clock] ownership (resolve new sources' controlling owners via Wikidata, #254)";
-          uv run --no-dev python -m maat.agents.ownership_agent || echo "[clock] ownership error";
-          echo "[clock] translate-titles (English gloss for non-English feed titles, #54)";
-          uv run --no-dev python -m maat.agents.translate_titles || echo "[clock] translate-titles error";
-          echo "[clock] draining $${MAAT_TICK_DRAIN}s for extract+classify";
-          sleep "$${MAAT_TICK_DRAIN}";
-          echo "[clock] corroborate (recompute clusters)";
-          uv run --no-dev python -m maat.agents.corroborate_agent || echo "[clock] corroborate error";
-          echo "[clock] source-registry (lifecycle + reputation; gate new sources until scored, #241)";
-          uv run --no-dev python scripts/source_registry_agent.py || echo "[clock] source-registry error";
-          echo "[clock] story-graph (thread clusters into event-nodes, #42)";
-          uv run --no-dev python -m maat.agents.story_graph_agent || echo "[clock] story-graph error";
-          echo "[clock] geotag (infer country for clusters the heuristic can't place, #189)";
-          uv run --no-dev python -m maat.agents.geotag_agent || echo "[clock] geotag error";
-          echo "[clock] grounding (judge primary-bearing clusters vs their primary source, #228)";
-          uv run --no-dev python -m maat.agents.grounding_agent || echo "[clock] grounding error";
-          echo "[clock] contradiction (NLI between a claim and its nearest neighbours, #229)";
-          uv run --no-dev python -m maat.agents.contradiction_agent || echo "[clock] contradiction error";
-          echo "[clock] harvest (snapshot clusters for truth-over-time, #39)";
-          uv run --no-dev python scripts/harvest.py || echo "[clock] harvest error";
-          echo "[clock] triage (route submitted feedback to review/auto-fix, #58)";
-          uv run --no-dev python -m maat.agents.triage || echo "[clock] triage error";
-          echo "[clock] file-issues (auto-fix feedback -> tracked issues, #214)";
-          uv run --no-dev python -m maat.serving.issue_filing || echo "[clock] issue-filing error";
-          echo "[clock] tick done; sleeping $${MAAT_TICK_INTERVAL}s";
-          sleep "$${MAAT_TICK_INTERVAL}";
-        done
+    # #417: was a 13-step serial `sh -c 'while true; do STEP || echo "…error"; done'` loop. That
+    # shape caused the outage three ways: no step had a TIMEOUT (a contradiction hang deadlocked
+    # every later step AND every future tick — corroborate wasn't even retried); `|| echo` laundered
+    # every crash to exit 0 (corroborate OOM'd for 27 days in silence); and `while true` as PID 1
+    # meant the container could never exit, so `restart: unless-stopped` was dead code.
+    # scripts/clock_supervisor.py owns the loop now: hard per-step timeout, per-step outcome written
+    # to a status file, gated steps, and a real non-zero exit on supervisor failure.
+    command: ["uv", "run", "--no-dev", "python", "scripts/clock_supervisor.py"]
+    healthcheck:
+      # The clock is the ONE pipeline service that had no healthcheck — and a process-liveness check
+      # wouldn't have helped anyway: the hung process was alive, just doing nothing. So check WORK,
+      # not breath: the supervisor touches this file at the end of every tick. Stale ⇒ unhealthy.
+      test: ["CMD-SHELL", "test $(( $(date +%s) - $(stat -c %Y /tmp/clock_heartbeat 2>/dev/null || echo 0) )) -lt $$(( ${MAAT_TICK_INTERVAL:-10800} * 2 + 1800 ))"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+    mem_limit: 3g        # #417: an unbounded agent OOM'd the whole box twice; contain the blast
+    mem_reservation: 512m
     depends_on:
       postgres:
         condition: service_healthy
@@ -197,6 +181,39 @@ services:
         condition: service_started
     volumes:
       - hfcache:/data/hf   # NLI model cache (#229) — persists across deploys
+
+  # Pipeline watchdog (#417) — the mouth the detector never had.
+  #
+  # obs_metrics.stage_health was ALREADY correct: it maps cluster -> cluster.corroborated with a 24h
+  # stalled bar, and fed today's data it says "last ran 656h ago". It never fired because its only
+  # caller was an HTTP handler behind WireGuard + Google OAuth — Maat's whole liveness story ended in
+  # an act of human attention, and the operator was busy for a month. That is the normal case.
+  #
+  # This is its OWN service on purpose: the clock is exactly the thing that fails, so the reporter
+  # must not live inside it. It checks each stage independently (an aggregate max() across event
+  # types is what let live ingestion mask a 27-day-dead cluster stage) and PUSHES out: it pings a
+  # dead-man's switch only while healthy, so if the box, the DB, or the watchdog itself dies, the
+  # pings stop and the external monitor pages you. A heartbeat that must be STARVED to fire is the
+  # only kind that survives its own author crashing.
+  watchdog:
+    image: maat-app:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-maat}:${POSTGRES_PASSWORD:-maat}@postgres:5432/${POSTGRES_DB:-maat}"
+      MAAT_WATCHDOG_INTERVAL: ${MAAT_WATCHDOG_INTERVAL:-900}   # 15 min
+      # SET THESE or the watchdog can only log — which is precisely what failed for 27 days.
+      # MAAT_HEARTBEAT_URL: dead-man's switch (healthchecks.io / Better Stack) — the one that
+      #   survives the box vanishing entirely. MAAT_ALERT_WEBHOOK: Slack/Discord for the detail.
+      MAAT_HEARTBEAT_URL: ${MAAT_HEARTBEAT_URL:-}
+      MAAT_ALERT_WEBHOOK: ${MAAT_ALERT_WEBHOOK:-}
+    command: ["uv", "run", "--no-dev", "python", "scripts/watchdog.py"]
+    mem_limit: 256m
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   reader:
     build: ./python

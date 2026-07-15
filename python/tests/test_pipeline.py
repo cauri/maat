@@ -457,6 +457,86 @@ def test_group_by_similarity_scales_to_a_large_corpus(monkeypatch):
     assert sorted(i for g in groups for i in g) == list(range(2 * n_pairs))  # each claim once
 
 
+def test_group_by_similarity_is_bounded_in_memory_at_prod_scale():
+    """#417 — the test that would have caught the 27-day outage.
+
+    The scale test above was pinned at 1,000 claims (a 7.6 MiB matrix) and asserted only the
+    partition, so it could not fail on a resource blowup. Meanwhile prod grew to 68,249 claims,
+    where the old `sim = x @ x.T` asked for **30.1 GiB on an 8 GB box** and raised ArrayMemoryError
+    on EVERY tick for 27 days. Line 142 ran thousands of times in CI and never once at a size where
+    it could fail — it showed as covered.
+
+    So this test asserts the thing that actually broke: a MEMORY BOUND at a corpus size well past
+    prod's. It fails loudly if anyone reintroduces an O(n^2) allocation."""
+    import resource
+    import sys
+
+    import numpy as np
+
+    import maat.pipeline.corroborate as corro
+
+    n, d, k = 40_000, 128, 2_000  # dense matrix at this n would be 12.8 GB
+    rng = np.random.default_rng(3)
+    cent = rng.normal(size=(k, d)).astype(np.float32)
+    x = cent[rng.integers(0, k, n)] + rng.normal(scale=0.05, size=(n, d)).astype(np.float32)
+
+    unit = 1024**3 if sys.platform == "darwin" else 1024**2  # maxrss: bytes on macOS, KB on linux
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / unit
+    groups = corro.group_by_similarity([""] * n, 0.82, embeddings=x)
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / unit
+
+    assert len(groups) == k  # every planted story recovered, none chained together
+    assert sum(len(g) for g in groups) == n  # every claim placed exactly once
+    # The whole point: peak growth must stay bounded. The dense matrix alone would be ~12.8 GB here.
+    assert peak - before < 3.0, f"memory grew {peak - before:.2f} GB — an O(n^2) alloc is back"
+
+
+def test_candidate_pairs_finds_exactly_what_a_dense_scan_would():
+    """#417 — the blocked scan must be EXACT, not approximate: it has to find every pair at/above
+    the bar that a full dense matrix would, or the fix would silently lose corroboration. Also
+    checks the block size genuinely divides the work (several blocks, none of them n×n)."""
+    import numpy as np
+
+    import maat.pipeline.corroborate as corro
+
+    n, d = 900, 24
+    rng = np.random.default_rng(5)
+    x = rng.normal(size=(n, d)).astype(np.float32)
+    x = x / np.linalg.norm(x, axis=1, keepdims=True)
+    th = 0.5
+
+    dense = np.triu(x @ x.T, k=1)  # what the OLD code would have looked at
+    want = {(int(i), int(j)) for i, j in zip(*np.nonzero(dense >= th))}
+    got = set(corro._candidate_pairs(x, th, block=64))
+    assert got == want  # exact — no pair lost to blocking
+
+    assert n // 64 > 1  # the scan really is chunked, not one big block in disguise
+
+
+def test_group_by_similarity_matches_the_dense_algorithm_exactly():
+    """#417 — the rewrite must be behaviour-preserving. Component-pruning + per-component
+    agglomeration provably equals the old full-matrix agglomeration (mean ≤ max, so nothing below
+    the bar can ever merge). Assert it on clustered data rather than trusting the argument."""
+    import numpy as np
+
+    import maat.pipeline.corroborate as corro
+
+    rng = np.random.default_rng(7)
+    for trial in range(12):
+        n, d = int(rng.integers(2, 50)), 16
+        k = max(1, n // 5)
+        cent = rng.normal(size=(k, d))
+        x = cent[rng.integers(0, k, n)] + rng.normal(scale=0.08, size=(n, d))
+        for th in (0.5, 0.82, 0.9):
+            # the OLD algorithm, verbatim: full N×N then agglomerate
+            xn = np.asarray(x, dtype=np.float64)
+            xn = xn / np.linalg.norm(xn, axis=1, keepdims=True)
+            want = sorted(sorted(int(i) for i in g) for g in corro._agglomerate(xn @ xn.T, th))
+            got = sorted(sorted(int(i) for i in g)
+                         for g in corro.group_by_similarity([""] * n, th, embeddings=x))
+            assert got == want, f"diverged at trial={trial} n={n} th={th}"
+
+
 def _onehot_embed(texts, **_):
     """Deterministic fake embedder: identical strings → identical vector (cosine 1.0), distinct
     strings → orthogonal (cosine 0). Lets us test clustering wiring without the live model."""

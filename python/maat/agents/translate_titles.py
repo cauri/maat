@@ -52,20 +52,32 @@ async def main() -> None:
         print("translate-titles: no untranslated non-English titles")
         return
 
-    nc = await connect()
-    translated = 0
+    # #417 — same defect as ownership/geotag: `translate_text` is a BLOCKING LLM call, and calling it
+    # in the loop while holding a NATS connection starved the keepalive → server dropped the link →
+    # flush() raised FlushTimeoutError → every translation lost. This agent had emitted ZERO events
+    # in its life. Translate OFF the loop first, then connect and publish fast.
+    done_rows: list[tuple[str, str, str]] = []
     for r in todo:
-        en, engine = translate_text(r["title"], "en", source=(r["language"] or None))
+        en, engine = await asyncio.to_thread(
+            translate_text, r["title"], "en", (r["language"] or None)
+        )
         if engine != "mistral":
             continue  # no key / provider error — don't mark done; re-try on a later tick
-        await publish(
-            nc, ARTICLE_TITLE_EN, r["id"],
-            {"article_id": r["id"], "title_en": en.strip(), "lang": r["language"] or ""}, tenant,
-        )
-        translated += 1
-    await nc.flush()
-    await nc.close()
-    print(f"translate-titles: translated {translated}/{len(todo)} non-English title(s)")
+        done_rows.append((r["id"], en.strip(), r["language"] or ""))
+
+    nc = await connect()
+    try:
+        for i, (aid, en, lang) in enumerate(done_rows, 1):
+            await publish(
+                nc, ARTICLE_TITLE_EN, aid,
+                {"article_id": aid, "title_en": en, "lang": lang}, tenant,
+            )
+            if i % 50 == 0:
+                await nc.flush()
+        await nc.flush()
+    finally:
+        await nc.close()
+    print(f"translate-titles: translated {len(done_rows)}/{len(todo)} non-English title(s)")
 
 
 if __name__ == "__main__":
