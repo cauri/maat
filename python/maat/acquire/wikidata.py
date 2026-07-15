@@ -43,8 +43,29 @@ def search_entities(name: str, *, limit: int = 5) -> list[dict]:
         return []
 
 
+def _is_historical(claim: dict) -> bool:
+    """Is this Wikidata statement about the PAST — a former owner rather than a current one? (#419)
+
+    Wikidata records ownership history on the same property: "AOL — owned by — WarnerMedia" stays on
+    the entity forever, with a P582 ("end time") qualifier marking when it ended. Reading only the
+    mainsnak (as this did) treats every former parent as a current one — and that is not a harmless
+    over-count, it CHAINS: WarnerMedia is a former owner of aol.co.uk, tmz.com AND cnnturk.com, so
+    it bridged Yahoo → AOL → TMZ → Fox News → NY Post → CNN Türk → Milliyet into one "ownership
+    group". Those 7 outlets would have collapsed to a single independent originator, so a story all
+    of them reported would count once — silently suppressing real corroboration, the exact failure
+    the ownership rollup exists to prevent in the other direction.
+
+    Skipped: a statement with an end time (ownership that has ended), and a `deprecated`-rank
+    statement (Wikidata's own marker for "known wrong")."""
+    if claim.get("rank") == "deprecated":
+        return True
+    return bool(claim.get("qualifiers", {}).get("P582"))  # P582 = end time → former
+
+
 def entity_claims(qid: str) -> dict:
-    """An entity's label + the claim ids we read: ``{label, P31, P749, P127, P856}``. ``{}`` on error."""
+    """An entity's label + the claim ids we read: ``{label, P31, P749, P127, P856}``. ``{}`` on error.
+
+    CURRENT statements only — former/deprecated ones are dropped (see ``_is_historical``)."""
     try:
         r = httpx.get(
             _API,
@@ -57,6 +78,8 @@ def entity_claims(qid: str) -> dict:
         for p in _CLAIM_PROPS:
             vals = []
             for c in ent.get("claims", {}).get(p, []):
+                if _is_historical(c):
+                    continue  # a FORMER owner is not a co-ownership link today (#419)
                 dv = c.get("mainsnak", {}).get("datavalue", {}).get("value")
                 vals.append(dv.get("id") if isinstance(dv, dict) and "id" in dv else dv)
             out[p] = vals
