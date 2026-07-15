@@ -414,9 +414,14 @@ def _overall_status(
 ) -> str:
     if proj["articles"] == 0 and proj["clusters"] == 0:
         return "empty"
-    if dead["total"] > 0:
-        return "degraded"
+    # ORDER MATTERS (#417). This used to test dead-letters BEFORE stalled stages, so any dead letter
+    # at all pinned the banner to "degraded" and the one word that would have screamed — "stalled" —
+    # was unreachable. The box carries 158 chronic dead-letters, so it read "degraded" for months
+    # while the corroboration engine was dead for 27 days. An ACUTE outage must always outrank
+    # chronic noise: a stalled stage means the product is serving stale answers as if they were live.
     stalled = [s for s in stages if s["freshness"] == "stalled" and s["count"] > 0]
     if stalled:
         return "stalled"
+    if dead["total"] > 0:
+        return "degraded"
     return "healthy"

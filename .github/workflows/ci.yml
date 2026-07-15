@@ -164,3 +164,40 @@ jobs:
             'cd /root && docker compose up -d --build \
               && (docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile || true) \
               && docker compose ps'
+
+      # #417 — a deploy must ASSERT, not assume. `docker compose ps` exiting 0 is what "shipped"
+      # meant for 27 days while the corroboration engine was dead: the containers were up and doing
+      # nothing. These checks fail the deploy on the two things `ps` cannot see.
+      - name: Verify the deploy actually works
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          # 1. Every service the compose defines is actually running (not restart-looping).
+          #    A crash-looping kerneld is what silently stalled the fold in a past incident.
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "root@$DEPLOY_HOST" '
+            cd /root
+            bad=$(docker compose ps --format "{{.Service}} {{.State}}" | awk "\$2 != \"running\" {print \$1}")
+            if [ -n "$bad" ]; then echo "NOT RUNNING: $bad"; docker compose ps; exit 1; fi
+            echo "all services running"
+          '
+          # 2. The app the reader serves actually imports + answers. `uv run --no-dev` is the prod
+          #    entrypoint, so a module importing a dev-only dep passes tests and kills the box.
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://maat.press/analyse || echo 000)
+            [ "$code" = "200" ] && { echo "analyse surface: 200"; break; }
+            echo "waiting for the analyse surface (got $code)…"; sleep 10
+            [ "$i" = "12" ] && { echo "analyse surface never came back: $code"; exit 1; }
+          done
+
+      # #417 — the freshness gate. This is the check whose ABSENCE let a 27-day outage ship past
+      # every green deploy: nothing ever asserted the pipeline still PRODUCES anything. It is
+      # advisory while the engine is deliberately parked (MAAT_CORROBORATE_ENABLED=0); flip
+      # STRICT_FRESHNESS on with the engine and a stalled stage fails the deploy.
+      - name: Pipeline freshness (advisory while the engine is parked)
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "root@$DEPLOY_HOST" \
+            'cd /root && docker compose exec -T watchdog uv run --no-dev python -c "import asyncio,sys; from scripts.watchdog import once; sys.exit(0 if asyncio.run(once()) else 1)"'

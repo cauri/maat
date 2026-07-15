@@ -77,15 +77,29 @@ async def main() -> None:
         print("ownership: no new sources to resolve")
         return
 
+    # #417 — this agent had emitted ZERO events in its entire life, so the ownership map was empty
+    # and the news-laundering collapse (co-owned outlets → one originator, #41/#254) silently never
+    # fired. Cause: `_resolve` is a BLOCKING Wikidata HTTP round-trip, and it was called ×303 inside
+    # the loop while a NATS connection was held open. Blocking the event loop starves the client's
+    # keepalive, so the server dropped the connection (ConnectionResetError) and the final flush()
+    # raised FlushTimeoutError — taking every resolved owner with it. This is the SAME gotcha the
+    # acquisition path already documents: blocking work must not run on the loop.
+    # Fix: do all the slow blocking work OFF the loop and BEFORE connecting; then hold the
+    # connection only for the fast publish, and flush in batches so nothing buffers unboundedly.
+    resolved = [await asyncio.to_thread(_resolve, source, domain) for source, domain in todo]
+
     nc = await connect()
-    grouped = 0
-    for source, domain in todo:
-        info = _resolve(source, domain)
-        if info["owners"]:
-            grouped += 1
-        await publish(nc, SOURCE_OWNERSHIP_RESOLVED, source, info, tenant)
-    await nc.flush()
-    await nc.close()
+    published = 0
+    try:
+        for info in resolved:
+            await publish(nc, SOURCE_OWNERSHIP_RESOLVED, info["source"], info, tenant)
+            published += 1
+            if published % 50 == 0:
+                await nc.flush()  # bound the outbound buffer; surface a broken link early
+        await nc.flush()
+    finally:
+        await nc.close()
+    grouped = sum(1 for i in resolved if i["owners"])
     print(f"ownership: resolved {len(todo)} new source(s); {grouped} with a controlling owner")
 
 

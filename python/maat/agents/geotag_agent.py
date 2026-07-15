@@ -82,20 +82,29 @@ async def main() -> None:
         print("geotag: no unplaced clusters (heuristic covered everything)")
         return
 
-    nc = await connect()
-    inferred = 0
+    # #417 — same defect as ownership/translate-titles: `llm_country` is a BLOCKING LLM call made in
+    # the loop while a NATS connection was held open, starving the keepalive → dropped connection →
+    # flush() FlushTimeoutError → every inference lost. Zero events emitted in this agent's life.
+    # Infer OFF the loop first, then connect and publish fast.
+    placed: list[tuple[str, str]] = []
     for cid, fact in todo:
-        country = llm_country(fact)
-        if not country:
-            continue
-        await publish(
-            nc, STORY_GEO_INFERRED, cid,
-            {"cluster_id": cid, "country": country, "method": "llm"}, tenant,
-        )
-        inferred += 1
-    await nc.flush()
-    await nc.close()
-    print(f"geotag: inferred country for {inferred}/{len(todo)} unplaced cluster(s)")
+        country = await asyncio.to_thread(llm_country, fact)
+        if country:
+            placed.append((cid, country))
+
+    nc = await connect()
+    try:
+        for i, (cid, country) in enumerate(placed, 1):
+            await publish(
+                nc, STORY_GEO_INFERRED, cid,
+                {"cluster_id": cid, "country": country, "method": "llm"}, tenant,
+            )
+            if i % 50 == 0:
+                await nc.flush()
+        await nc.flush()
+    finally:
+        await nc.close()
+    print(f"geotag: inferred country for {len(placed)}/{len(todo)} unplaced cluster(s)")
 
 
 if __name__ == "__main__":
