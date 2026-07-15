@@ -15,12 +15,15 @@ identity resolution, §6.7), and primary-source detection are first cuts.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 from maat import ids
 from maat.pipeline.extremity import rate_extremity
@@ -151,6 +154,85 @@ def _candidate_pairs(x: np.ndarray, threshold: float, block: int) -> list[tuple[
     return edges
 
 
+# Memory ceiling for the exact dense agglomeration of ONE component (#419). A component of m
+# claims costs m² × (4 B for the float32 cosine sub-matrix + 8 B for _agglomerate's float64
+# working copy) — so this budget IS the component-size limit: m_max = sqrt(budget / 12).
+_MAX_COMPONENT_MB = float(os.environ.get("MAAT_CLUSTER_MAX_MB", "512"))
+_BYTES_PER_PAIR = 12
+# When a component exceeds that, re-cut it at a stricter bar, in these steps, up to this ceiling.
+_SUBDIVIDE_STEP = 0.02
+_SUBDIVIDE_MAX = 0.98
+
+
+def _max_exact_component(budget_mb: float = _MAX_COMPONENT_MB) -> int:
+    """Largest component whose exact dense agglomeration fits the memory budget."""
+    return max(2, int((budget_mb * 1024**2 / _BYTES_PER_PAIR) ** 0.5))
+
+
+def _cluster_component(
+    x: np.ndarray, idx: np.ndarray, threshold: float, *, bar: float | None = None
+) -> list[list[int]]:
+    """Exact average-linkage within one candidate component — subdividing if it cannot fit (#419).
+
+    **Why this exists.** ``group_by_similarity``'s component step is exact, but exactness alone does
+    not bound memory: it assumed a component is small because the bar is strict. Measured on the
+    live corpus, that is false. In this embedding space the pairwise cosine distribution is
+    ``p50=0.667, p90=0.730, p99=0.810`` — the 0.82 bar sits at about **p99.2**, so ~0.76% of ALL
+    pairs are edges, and a graph that dense **percolates**: at 20k claims the largest component is
+    15,794 (79% of the corpus), at 68,249 it is **60,945 (89%)**, with every other component tiny
+    (62, 52, 46…). One giant hairball plus the real facts. The hairball's dense sub-matrix is
+    **13.8 GiB** — so the exact computation is impossible on this box at any component granularity,
+    and the original ``x @ x.T`` (30.1 GiB) was the same wall one step earlier.
+
+    **What it does.** Components within budget are agglomerated EXACTLY, as before — that is the
+    normal path and covers every real same-fact cluster. A component that cannot fit is re-cut at a
+    stricter bar (+0.02 a step, to 0.98) and each piece recurses; raising the bar only ever removes
+    edges, so the pieces shrink monotonically and this terminates.
+
+    **This is an approximation, and it is deliberately the conservative one.** Re-cutting can miss a
+    merge that average linkage would have made at the original bar across two pieces, so it
+    **under-clusters: it can only split a fact, never fuse two.** Under-clustering costs a
+    corroboration we should have counted; over-clustering would INVENT one — it would fuse unrelated
+    claims and report independent sources agreeing on a "fact" nobody stated. Only one of those is
+    survivable, so when the exact answer is unavailable this fails toward silence, not toward
+    fabrication. It is never silent to the operator: each subdivision logs.
+    """
+    limit = _max_exact_component()
+    m = len(idx)
+    if m <= limit:
+        sub = x[idx] @ x[idx].T  # bounded by `limit` — this is the exact path
+        return [[int(idx[k]) for k in part] for part in _agglomerate(sub, threshold)]
+
+    at = threshold if bar is None else bar
+    nxt = round(min(at + _SUBDIVIDE_STEP, _SUBDIVIDE_MAX), 4)
+    if nxt <= at:  # bar exhausted: m near-identical claims that still won't fit — chunk, bounded
+        log.warning(
+            "corroborate: component of %d claims still exceeds the %d-claim budget at the strictest "
+            "bar (%.2f); splitting into fixed chunks — these claims are near-identical, so this is "
+            "a floor on an already-degenerate group",
+            m, limit, _SUBDIVIDE_MAX,
+        )
+        return [
+            [int(v) for v in idx[s : s + limit]] for s in range(0, m, limit)
+        ]
+
+    parts = _components(m, _candidate_pairs(x[idx], nxt, max(1, _SIM_BLOCK)))
+    log.warning(
+        "corroborate: component of %d claims exceeds the exact budget (%d claims / %.0f MB); "
+        "re-cut at bar %.2f into %d pieces (largest %d). This UNDER-clusters — a real merge may be "
+        "missed — but never over-clusters.",
+        m, limit, _MAX_COMPONENT_MB, nxt, len(parts), max((len(p) for p in parts), default=0),
+    )
+    out: list[list[int]] = []
+    for p in parts:
+        sel = idx[np.asarray(sorted(p))]
+        if len(sel) == 1:
+            out.append([int(sel[0])])
+        else:
+            out.extend(_cluster_component(x, sel, threshold, bar=nxt))
+    return out
+
+
 def group_by_similarity(
     texts: list[str], threshold: float, *, embeddings: np.ndarray | None = None
 ) -> list[list[int]]:
@@ -173,10 +255,16 @@ def group_by_similarity(
       1. find the candidate pairs at/above the bar in row-blocks (never the full matrix);
       2. take connected components of that sparse graph — nothing outside a component can merge into
          it, because every cross pair is below the bar and so is every possible mean;
-      3. run the exact dense agglomeration WITHIN each component, where the sub-matrix is small.
+      3. run the exact dense agglomeration WITHIN each component (``_cluster_component``).
 
-    Same answer as the dense version (merge order inside a component is unaffected by claims it can
-    never merge with), but peak memory is O(block × n + largest component²) instead of O(n²)."""
+    Steps 1–2 are exact and bounded. Step 3 is exact but **not** bounded by them: the components are
+    single-linkage, and single linkage chains. Measured on the live corpus, the candidate graph
+    percolates — one component holds 89% of all claims (see ``_cluster_component``) — so "the
+    sub-matrix is small" was wrong, and the honest bound is O(block × n) for the search plus a
+    CONFIGURED ceiling for the agglomeration, which ``_cluster_component`` enforces by re-cutting an
+    oversized component at a stricter bar. For every component that fits (all the real same-fact
+    clusters), the answer is identical to the dense version, because merge order inside a component
+    is unaffected by claims it can never merge with."""
     if len(texts) <= 1:
         return [[0]] if texts else []
     x = embeddings if embeddings is not None else mistral_embed(texts)
@@ -193,10 +281,7 @@ def group_by_similarity(
         if len(comp) == 1:
             out.append(comp)
             continue
-        idx = np.asarray(sorted(comp))
-        sub = x[idx] @ x[idx].T  # small by construction — one same-fact story, not the corpus
-        for part in _agglomerate(sub, threshold):
-            out.append([int(idx[k]) for k in part])
+        out.extend(_cluster_component(x, np.asarray(sorted(comp)), threshold))
     return out
 
 
