@@ -467,7 +467,14 @@ def test_group_by_similarity_is_bounded_in_memory_at_prod_scale():
     it could fail — it showed as covered.
 
     So this test asserts the thing that actually broke: a MEMORY BOUND at a corpus size well past
-    prod's. It fails loudly if anyone reintroduces an O(n^2) allocation."""
+    prod's. It fails loudly if anyone reintroduces an O(n^2) allocation.
+
+    **What it does NOT cover, and cannot (#419).** It plants 2,000 well-separated clusters, so every
+    connected component here is ~20 claims — the component step's bound holds because the FIXTURE
+    made it hold. Real embeddings aren't separated: on the live corpus the candidate graph percolates
+    into one 60,945-claim component (13.8 GiB), and this test stayed green while the real run OOM'd
+    there. This covers the blocked candidate SCAN; `tests/test_corroborate_scale.py` covers the
+    component bound against a percolating fixture. Keep both — they fail on different things."""
     import resource
     import sys
 
