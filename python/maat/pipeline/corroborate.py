@@ -23,12 +23,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-log = logging.getLogger(__name__)
-
 from maat import ids
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
 from maat.providers.seam import mistral_embed
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
