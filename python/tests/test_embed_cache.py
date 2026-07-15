@@ -20,10 +20,17 @@ def _run(coro):
 
 
 def test_vec_literal_parse_roundtrip():
+    import numpy as np
+
     v = [0.5, -1.25, 3.0]
-    assert ec._parse_vec(ec._vec_literal(v)) == v
-    assert ec._parse_vec("[]") == []
-    assert ec._parse_vec("[1, 2, 3]") == [1.0, 2.0, 3.0]  # tolerant of pgvector's spacing
+    # #419: _parse_vec now returns a float32 ndarray, not a boxed python list — the dtype IS the
+    # fix (a list of 1024 floats costs ~41 KB vs 4 KB, and this is built once per distinct claim;
+    # at 68,249 claims the list-based cache measured 2.80 GB, over the container's 3 GB limit).
+    got = ec._parse_vec(ec._vec_literal(v))
+    assert isinstance(got, np.ndarray) and got.dtype == np.float32
+    assert np.allclose(got, v)
+    assert ec._parse_vec("[]").tolist() == []
+    assert np.allclose(ec._parse_vec("[1, 2, 3]"), [1.0, 2.0, 3.0])  # tolerant of pgvector's spacing
 
 
 def test_embed_chunked_covers_all_in_order(monkeypatch):
@@ -120,3 +127,37 @@ def test_group_by_similarity_same_result_with_or_without_embeddings(monkeypatch)
     internal = group_by_similarity(["x", "y", "z"], 0.82)
     provided = group_by_similarity(["x", "y", "z"], 0.82, embeddings=emb)
     assert internal == provided  # behaviour-preserving: provided vectors == embedding internally
+
+
+def test_embeddings_are_float32_end_to_end_so_the_engine_fits_in_the_box():
+    """#419 — the allocation that would have OOM'd the engine the moment it was armed.
+
+    Measured at the real corpus (68,249 claims × 1024) with the OLD design:
+        cache dict of list[float] ....... 2.80 GB   (~41 KB per boxed 1024-float list)
+        returned float64 matrix ......... 0.52 GB
+        float32 copy made downstream .... 0.26 GB
+        ------------------------------------------
+        embeddings alone ................ 3.58 GB   vs the clock container's 3 GB mem_limit
+
+    So `group_by_similarity` being fixed (30.1 GiB → 1.3 GB) was NOT enough: the engine would have
+    died in the step BEFORE clustering. This pins the dtype contract end-to-end — float32 from the
+    cache through the returned matrix — which makes the downstream conversion a free view rather
+    than a second copy."""
+    import numpy as np
+
+    from maat.pipeline.corroborate import group_by_similarity
+
+    # the cache's parsed vectors
+    assert ec._parse_vec("[1,2,3]").dtype == np.float32
+    # …and the empty-corpus return
+    assert _run(ec.embeddings_for([])).dtype == np.float32
+
+    # the contract that matters downstream: a float32 matrix must pass through the clusterer's
+    # `np.asarray(x, dtype=np.float32)` WITHOUT allocating a copy (same buffer).
+    x = np.zeros((8, 4), dtype=np.float32)
+    assert np.asarray(x, dtype=np.float32) is x, "float32 in should be a free view, not a copy"
+
+    # and a float32 matrix still clusters correctly (precision is nowhere near the 0.82 bar)
+    v = np.array([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    groups = group_by_similarity(["a", "b", "c"], 0.82, embeddings=v)
+    assert sorted(sorted(g) for g in groups) == [[0, 1], [2]]
