@@ -209,6 +209,14 @@ services:
       #   survives the box vanishing entirely. MAAT_ALERT_WEBHOOK: Slack/Discord for the detail.
       MAAT_HEARTBEAT_URL: ${MAAT_HEARTBEAT_URL:-}
       MAAT_ALERT_WEBHOOK: ${MAAT_ALERT_WEBHOOK:-}
+      # The gates the watchdog needs to tell "broken" from "switched off" (#419). It cannot read the
+      # clock's environment, so without these it alerted CRITICAL on four deliberately-paused stages
+      # every 15 minutes, forever — an alarm that always fires, which is its own kind of outage.
+      # These MUST carry the same defaults as the acquisition-clock above: if the two disagree, the
+      # watchdog is describing a machine that doesn't exist. Suppression needs an explicit "0"/"1",
+      # so a dropped variable here alerts rather than silently muting the alarm.
+      MAAT_INTAKE_PAUSED: ${MAAT_INTAKE_PAUSED:-1}
+      MAAT_CORROBORATE_ENABLED: ${MAAT_CORROBORATE_ENABLED:-0}
     command: ["uv", "run", "--no-dev", "python", "scripts/watchdog.py"]
     mem_limit: 256m
     depends_on:
