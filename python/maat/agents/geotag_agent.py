@@ -31,6 +31,11 @@ from maat.geo import infer_country  # reuse the EXACT heuristic the feed applies
 
 ROOT = Path(__file__).resolve().parents[3]
 
+# #417 — commit in batches so a step timeout can never discard the run's work, and cap the work per
+# tick (one LLM call per unplaced cluster — this cap is a spend bound). The `done` set above dedupes, so a capped tick still makes permanent progress.
+_BATCH = int(os.environ.get("MAAT_GEOTAG_AGENT_BATCH", "20"))
+_MAX_PER_TICK = int(os.environ.get("MAAT_GEOTAG_AGENT_MAX_PER_TICK", "100"))
+
 
 def _jload(v):
     return json.loads(v) if isinstance(v, str) else (v or [])
@@ -85,26 +90,31 @@ async def main() -> None:
     # #417 — same defect as ownership/translate-titles: `llm_country` is a BLOCKING LLM call made in
     # the loop while a NATS connection was held open, starving the keepalive → dropped connection →
     # flush() FlushTimeoutError → every inference lost. Zero events emitted in this agent's life.
-    # Infer OFF the loop first, then connect and publish fast.
-    placed: list[tuple[str, str]] = []
-    for cid, fact in todo:
-        country = await asyncio.to_thread(llm_country, fact)
-        if country:
-            placed.append((cid, country))
-
-    nc = await connect()
-    try:
-        for i, (cid, country) in enumerate(placed, 1):
-            await publish(
-                nc, STORY_GEO_INFERRED, cid,
-                {"cluster_id": cid, "country": country, "method": "llm"}, tenant,
-            )
-            if i % 50 == 0:
-                await nc.flush()
-        await nc.flush()
-    finally:
-        await nc.close()
-    print(f"geotag: inferred country for {len(placed)}/{len(todo)} unplaced cluster(s)")
+    # Infer OFF the loop, commit in BATCHES (a step timeout must not discard the whole run), and cap
+    # the work per tick — this one costs an LLM call per cluster, so the cap is a spend bound too.
+    todo = todo[:_MAX_PER_TICK]
+    inferred = 0
+    for start in range(0, len(todo), _BATCH):
+        placed: list[tuple[str, str]] = []
+        for cid, fact in todo[start : start + _BATCH]:
+            country = await asyncio.to_thread(llm_country, fact)
+            if country:
+                placed.append((cid, country))
+        if not placed:
+            continue
+        nc = await connect()
+        try:
+            for cid, country in placed:
+                await publish(
+                    nc, STORY_GEO_INFERRED, cid,
+                    {"cluster_id": cid, "country": country, "method": "llm"}, tenant,
+                )
+            await nc.flush()
+        finally:
+            await nc.close()
+        inferred += len(placed)
+        print(f"geotag: committed {inferred}/{len(todo)}", flush=True)
+    print(f"geotag: inferred country for {inferred}/{len(todo)} unplaced cluster(s)")
 
 
 if __name__ == "__main__":
