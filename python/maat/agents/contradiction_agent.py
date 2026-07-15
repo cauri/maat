@@ -10,6 +10,16 @@ the harvester folds into the cluster's ``corrected`` → REFUTED.
 
 Runs after corroborate / grounding in the clock loop.
 Run: uv run python -m maat.agents.contradiction_agent
+
+**Bounded per tick (#419).** NLI is the expensive leg and it is measured, not guessed: 15.4 ms per
+call on the box, and this agent judges both directions, so **30.8 ms per pair** — about 29,200 pairs
+in a 900s step. Retrieval over the live corpus yields ~486,800 candidate pairs, so a cold start is
+~17 ticks of work. Judged pairs persist (``claim_relations`` → ``seen``), so progress accrues and
+this converges; but WITHOUT a budget each tick would be killed mid-work at the timeout and reported
+as TIMEOUT — for every tick until the backlog cleared. That is a false alarm that looks exactly like
+the 27-day outage, and it would trip the watchdog continuously while the agent was in fact working.
+So each tick judges at most ``MAAT_CONTRADICTION_MAX_PAIRS`` pairs and exits cleanly, reporting the
+backlog it left. Bounded time, same as corroborate is now bounded in memory.
 """
 
 from __future__ import annotations
@@ -26,9 +36,14 @@ from maat.bus import connect
 from maat.events import CLAIM_DISPUTED, CLAIM_RELATED, publish
 from maat.pipeline import nli
 from maat.pipeline.contradiction import CONTRADICTION_MIN_SCORE, arbitrate, nearest_pairs, pair_id
-from maat.providers.seam import mistral_embed
+from maat.pipeline.embed_cache import embeddings_for
 
 ROOT = Path(__file__).resolve().parents[3]
+
+# Pairs judged per tick. At a measured 30.8 ms/pair (two NLI directions) 20,000 pairs is ~616s,
+# inside the step's 900s timeout with headroom for retrieval. The rest waits for the next tick —
+# judged pairs persist, so the backlog drains monotonically instead of restarting each time.
+_MAX_PAIRS = int(os.environ.get("MAAT_CONTRADICTION_MAX_PAIRS", "20000"))
 
 
 def _jload(v):
@@ -67,14 +82,21 @@ async def main() -> None:
     if len(ids) < 2:
         print("contradiction: <2 live claims — nothing to compare")
         return
-    embeddings = mistral_embed([text_of[i] for i in ids])
-    emb_of = dict(zip(ids, embeddings))
+    # The persistent embedding cache (#286), NOT a bare mistral_embed: this used to re-embed every
+    # live claim on EVERY tick — paying Mistral again for vectors corroborate had already cached.
+    embeddings = await embeddings_for([text_of[i] for i in ids])
 
     nc = await connect()
     related = disputed = 0
-    for a, b in nearest_pairs(ids, [emb_of[i] for i in ids]):
+    judged = 0
+    candidates = nearest_pairs(ids, embeddings)
+    backlog = sum(1 for p in candidates if p not in seen)
+    for a, b in candidates:
         if (a, b) in seen:
             continue  # already judged this pair on a prior tick — don't pay for NLI again
+        if judged >= _MAX_PAIRS:
+            break  # tick budget spent — the rest is judged next tick (see the module docstring)
+        judged += 1
         # NLI both directions; keep the strongest reading.
         best = None
         for prem, hyp in ((a, b), (b, a)):
@@ -105,7 +127,14 @@ async def main() -> None:
                     disputed += 1
     await nc.flush()
     await nc.close()
-    print(f"contradiction: {related} relation(s), {disputed} dispute(s)")
+    left = max(0, backlog - judged)
+    # Always state the backlog. A bounded run that reports only what it DID is indistinguishable
+    # from a complete one — that is the shape of the failure this whole issue is about.
+    print(
+        f"contradiction: judged {judged:,}/{backlog:,} new pair(s) → {related} relation(s), "
+        f"{disputed} dispute(s)"
+        + (f"; {left:,} pair(s) left for the next tick" if left else "; backlog clear")
+    )
 
 
 if __name__ == "__main__":
