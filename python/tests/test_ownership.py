@@ -142,3 +142,40 @@ def test_a_former_owner_no_longer_groups_two_rivals():
          "owners": [{"qid": "Q15294742", "label": "Rossiya Segodnya"}]},
     ])
     assert real["rt.com"] == real["ria.ru"] == "Rossiya Segodnya"
+
+
+def test_index_funds_are_not_controlling_owners(monkeypatch):
+    """#423 — observed live: `BlackRock -> ubs.com, morganstanley.com, ibm.com` became one
+    "ownership group", so a fact all three reported would have counted ONCE. Wikidata's P127
+    ("owned by") makes no distinction between control and an index position, and these funds hold a
+    slice of nearly every large public company. Dropping them is the safe direction: a wrong merge
+    HIDES real corroboration."""
+    from maat.pipeline.ownership import direct_owners
+
+    # a passive shareholder must never become an ownership link…
+    assert direct_owners({"P127": ["Q219635"]}) == []            # BlackRock
+    assert direct_owners({"P127": ["Q849363", "Q2037125"]}) == []  # Vanguard, State Street
+    # …even when it sits alongside a real parent, the real parent alone survives
+    assert direct_owners({"P749": ["Q15294742"], "P127": ["Q219635"]}) == ["Q15294742"]
+
+    # a holding company that genuinely CONTROLS its subsidiaries is NOT an index fund — keep it
+    assert direct_owners({"P127": ["Q217583"]}) == ["Q217583"]   # Berkshire Hathaway
+    # and ordinary media parents are untouched
+    assert direct_owners({"P749": ["Q2288792"]}) == ["Q2288792"]  # Sinclair
+
+
+def test_shared_index_fund_no_longer_groups_unrelated_companies():
+    """#423 at the fold: outlets whose ONLY shared 'owner' is an index fund stay independent."""
+    from maat.pipeline.ownership import fold_ownership
+
+    # what the OLD fetch produced (BlackRock admitted as an owner) — the wrong merge
+    assert fold_ownership([
+        {"source": "ubs.com", "canonical": "ubs.com", "owners": [{"qid": "Q219635", "label": "BlackRock"}]},
+        {"source": "ibm.com", "canonical": "ibm.com", "owners": [{"qid": "Q219635", "label": "BlackRock"}]},
+    ]) != {}, "sanity: the fold does group on a shared owner qid"
+
+    # with direct_owners dropping the fund, those sources resolve with NO owners at all → no group
+    assert fold_ownership([
+        {"source": "ubs.com", "canonical": "ubs.com", "owners": []},
+        {"source": "ibm.com", "canonical": "ibm.com", "owners": []},
+    ]) == {}

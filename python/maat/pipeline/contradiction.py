@@ -9,7 +9,10 @@ or None when it is too close to call (record the contradiction, refute neither).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
+
+import numpy as np
 
 from maat import ids
 
@@ -35,6 +38,11 @@ def pair_id(a: str, b: str, relation: str) -> str:
     return ids.relation_id(a, b, relation)
 
 
+# Rows of the similarity matrix computed at a time (#419) — bounds the transient block to
+# block × n × 4 bytes and keeps peak memory independent of the corpus size.
+_SIM_BLOCK = int(os.environ.get("MAAT_SIM_BLOCK", "512"))
+
+
 def nearest_pairs(
     ids: Sequence[str], embeddings: Sequence[Sequence[float]], *, k: int = 10, min_sim: float = 0.5
 ) -> list[tuple[str, str]]:
@@ -42,20 +50,43 @@ def nearest_pairs(
 
     The bi-encoder retrieval step: the NLI cross-encoder only judges these pairs. Pairs below
     `min_sim` are dropped (unrelated claims rarely contradict, and NLI on them is wasted spend).
-    """
+
+    **Performance (#419).** This was a pure-Python O(n²·d) double loop with a full sort of all n-1
+    neighbours PER ROW. At the live corpus (12,393 claims × 1024 dims) that is ~153M cosine
+    computations — ~157 billion float ops in interpreter land — and it did not finish: it wedged at
+    100% CPU for 6+ hours. Because the clock ran its steps serially with no timeout, that hang
+    deadlocked every step after it AND every subsequent tick, which is how it stopped harvest and
+    prevented corroborate from ever being retried. It is the same shape as the allocation that
+    killed corroborate: an algorithm sized for the corpus of a year ago.
+
+    Now: the cosines are one blocked BLAS matmul (bounded, never n×n materialised), and top-k uses
+    argpartition (O(n) per row) instead of sorting all n-1. Same pairs out — for each item, its
+    top-k neighbours at/above ``min_sim``."""
     n = len(ids)
+    if n < 2:
+        return []
+    x = np.asarray(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(x, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0  # a zero vector must not divide by zero (it just matches nothing)
+    x = x / norms
+
+    kk = min(k, n - 1)
     pairs: set[tuple[str, str]] = set()
-    for i in range(n):
-        sims = sorted(
-            ((_cosine(embeddings[i], embeddings[j]), j) for j in range(n) if j != i),
-            reverse=True,
-        )
-        for sim, j in sims[:k]:
-            if sim < min_sim:
-                break
-            a, b = sorted((ids[i], ids[j]))
-            if a != b:
-                pairs.add((a, b))
+    for start in range(0, n, max(1, _SIM_BLOCK)):
+        stop = min(start + max(1, _SIM_BLOCK), n)
+        sims = x[start:stop] @ x.T  # (block, n) — the only allocation, and it is bounded
+        for local in range(stop - start):
+            i = start + local
+            row = sims[local]
+            row[i] = -np.inf  # never a neighbour of itself
+            # argpartition puts the kk largest at the end — O(n), no full sort
+            for j in np.argpartition(row, -kk)[-kk:].tolist():
+                if row[j] < min_sim:
+                    continue
+                a, b = sorted((ids[i], ids[j]))
+                if a != b:
+                    pairs.add((a, b))
+        del sims
     return sorted(pairs)
 
 
