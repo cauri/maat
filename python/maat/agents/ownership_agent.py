@@ -28,6 +28,12 @@ from maat.pipeline.ownership import direct_owners, domain_of, pick_entity
 
 ROOT = Path(__file__).resolve().parents[3]
 
+# #417 — commit in batches so a step timeout can never discard the whole run's work, and cap the
+# work per tick so this can't eat the tick's budget. `done` dedupes, so a capped tick still makes
+# permanent forward progress and the backlog drains across ticks.
+_BATCH = int(os.environ.get("MAAT_OWNERSHIP_BATCH", "25"))
+_MAX_PER_TICK = int(os.environ.get("MAAT_OWNERSHIP_MAX_PER_TICK", "120"))
+
 
 def _resolve(source: str, domain: str) -> dict:
     """Look up one source on Wikidata → its direct owners. Always returns a marker (owners may be
@@ -84,23 +90,30 @@ async def main() -> None:
     # keepalive, so the server dropped the connection (ConnectionResetError) and the final flush()
     # raised FlushTimeoutError — taking every resolved owner with it. This is the SAME gotcha the
     # acquisition path already documents: blocking work must not run on the loop.
-    # Fix: do all the slow blocking work OFF the loop and BEFORE connecting; then hold the
-    # connection only for the fast publish, and flush in batches so nothing buffers unboundedly.
-    resolved = [await asyncio.to_thread(_resolve, source, domain) for source, domain in todo]
-
-    nc = await connect()
-    published = 0
-    try:
-        for info in resolved:
-            await publish(nc, SOURCE_OWNERSHIP_RESOLVED, info["source"], info, tenant)
-            published += 1
-            if published % 50 == 0:
-                await nc.flush()  # bound the outbound buffer; surface a broken link early
-        await nc.flush()
-    finally:
-        await nc.close()
-    grouped = sum(1 for i in resolved if i["owners"])
-    print(f"ownership: resolved {len(todo)} new source(s); {grouped} with a controlling owner")
+    #
+    # Fixed in BATCHES, which matters for two independent reasons:
+    #   * the blocking Wikidata calls run OFF the loop, and a NATS connection is only held for the
+    #     fast publish that follows — so the keepalive is never starved;
+    #   * progress is DURABLE. 300+ sequential HTTP lookups can exceed the step's wall-clock budget,
+    #     and resolving everything before publishing anything would mean a timeout discards the lot
+    #     and the next tick starts from zero — resolving forever, emitting never. Each batch is
+    #     committed on its own, and `done` above dedupes, so every tick makes permanent progress.
+    todo = todo[:_MAX_PER_TICK]
+    resolved_n = grouped = 0
+    for start in range(0, len(todo), _BATCH):
+        chunk = todo[start : start + _BATCH]
+        infos = [await asyncio.to_thread(_resolve, source, domain) for source, domain in chunk]
+        nc = await connect()
+        try:
+            for info in infos:
+                await publish(nc, SOURCE_OWNERSHIP_RESOLVED, info["source"], info, tenant)
+            await nc.flush()
+        finally:
+            await nc.close()
+        resolved_n += len(infos)
+        grouped += sum(1 for i in infos if i["owners"])
+        print(f"ownership: committed {resolved_n}/{len(todo)} ({grouped} with an owner)", flush=True)
+    print(f"ownership: resolved {resolved_n} new source(s); {grouped} with a controlling owner")
 
 
 if __name__ == "__main__":
