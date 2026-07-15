@@ -112,3 +112,34 @@ def test_contradicted_grounding_flows_to_refuted_through_the_fold():
         {"fact": "F", "independent_originators": 3, "has_primary": True, "extremity": "notable", "grounding": "contradicted"},
     ]
     assert observations_from_history(hist)[0].outcome == "refuted"
+
+
+def test_grounding_agent_bounds_llm_work_per_tick():
+    """#419 — incremental is not the same as bounded.
+
+    `done` (the CLUSTER_GROUNDED events) stops the agent re-judging a cluster it already judged. It
+    says nothing about how many it judges in ONE tick. Each is an LLM call — measured at 3.1s on the
+    box — against a 1200s step timeout, so ~393 fit. A restarted engine faces a far bigger cold
+    backlog (the corroborate run alone yields 10,577 clusters), and unbudgeted the step is killed
+    mid-work and reported TIMEOUT every tick until it drains: a false alarm that looks exactly like
+    the 27-day outage.
+    """
+    import maat.agents.grounding_agent as agent
+
+    assert agent._MAX_CLUSTERS > 0
+    # sized against the MEASURED 3.1s/cluster, inside the 1200s step with headroom for the load
+    assert agent._MAX_CLUSTERS * 3.1 < 1200, "the per-tick budget cannot fit the step's 1200s timeout"
+
+
+def test_grounding_agent_reports_the_backlog_it_leaves():
+    """A bounded run that prints only what it DID reads as a complete one (#419).
+
+    That is the exact shape of the failure this issue is about — the pipeline inferring success from
+    the absence of a complaint. If the agent defers work, the operator has to be able to see it.
+    """
+    import inspect
+
+    import maat.agents.grounding_agent as agent
+
+    src = inspect.getsource(agent.main)
+    assert "left" in src and "next tick" in src, "the report must state the deferred backlog"

@@ -12,6 +12,14 @@ clusters we haven't judged before, so spend scales with the genuinely-checkable 
 corroborate and before harvest in the clock loop.
 
 Run: uv run python -m maat.agents.grounding_agent
+
+**Bounded per tick (#419).** Being incremental is not the same as being bounded. `done` stops us
+re-judging a cluster, but says nothing about how many are judged in ONE tick — and each is an LLM
+call, measured at 3.1s on the box, against a 1200s step timeout (~393 clusters). A restarted engine
+faces a cold backlog well past that (the corroborate run alone yields 10,577 clusters), so the step
+would be killed mid-work and reported TIMEOUT on every tick until it drained: a false alarm
+indistinguishable from the outage the watchdog exists to catch. Each tick now grounds at most
+``MAAT_GROUNDING_MAX_CLUSTERS`` and exits cleanly, reporting the backlog it left behind.
 """
 
 from __future__ import annotations
@@ -31,6 +39,12 @@ from maat.pipeline.corroborate import confidence_read, effective_originators, is
 from maat.pipeline.grounding import judge_grounding
 
 ROOT = Path(__file__).resolve().parents[3]
+
+# Clusters grounded per tick. judge_grounding is one LLM call, measured on the box at 3.1s, so the
+# 1200s step fits ~393; 300 leaves headroom for the corpus load. Grounded clusters persist (the
+# CLUSTER_GROUNDED events form `done`), so the backlog drains monotonically across ticks instead of
+# the step being killed mid-work and reported TIMEOUT every time — see the module docstring.
+_MAX_CLUSTERS = int(os.environ.get("MAAT_GROUNDING_MAX_CLUSTERS", "300"))
 
 
 def _jload(v):
@@ -84,9 +98,10 @@ async def main() -> None:
 
     nc = await connect()
     judged = 0
-    for r in crows:
-        if r["id"] in done:
-            continue
+    pending = [r for r in crows if r["id"] not in done]
+    for r in pending:
+        if judged >= _MAX_CLUSTERS:
+            break  # tick budget spent — the rest is judged next tick (see the module docstring)
         claim_ids = [str(x) for x in _jload(r["claim_ids"])]
         article_ids = list(dict.fromkeys(art_of_claim[c] for c in claim_ids if c in art_of_claim))
         primary = _primary_article(article_ids, arts)
@@ -120,7 +135,13 @@ async def main() -> None:
         judged += 1
     await nc.flush()
     await nc.close()
-    print(f"grounding: judged {judged} primary-bearing cluster(s)")
+    left = max(0, len(pending) - judged)
+    # Always state the backlog: a bounded run that reports only what it DID is indistinguishable
+    # from one that finished the work.
+    print(
+        f"grounding: judged {judged:,}/{len(pending):,} primary-bearing cluster(s)"
+        + (f"; {left:,} left for the next tick" if left else "; backlog clear")
+    )
 
 
 if __name__ == "__main__":
