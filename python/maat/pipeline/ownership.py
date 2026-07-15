@@ -40,14 +40,44 @@ def pick_entity(candidates: list[Mapping], source_domain: str, claims_by_qid: Ma
     return candidates[0]["id"] if candidates else None
 
 
+# Passive/index asset managers (#423). Wikidata's P127 ("owned by") does not distinguish CONTROL
+# from "holds an index position", so these funds — which hold a slice of nearly every large public
+# company — leak in as if they were parents. Observed live: `BlackRock -> ubs.com, morganstanley.com,
+# ibm.com` became one "ownership group", meaning those three would collapse to a single independent
+# originator and any fact all three reported would count ONCE. That is the same corroboration
+# SUPPRESSION as the historical-owner chaining (#419/#422), from a different direction.
+#
+# Deliberately NOT here: Berkshire Hathaway (Q217583) and other holding companies that genuinely
+# CONTROL their subsidiaries — if one of those owns two outlets, they really are one originator.
+# The line is control, not shareholding.
+_INSTITUTIONAL_INVESTORS: frozenset[str] = frozenset({
+    "Q219635",     # BlackRock
+    "Q849363",     # The Vanguard Group
+    "Q2037125",    # State Street Corporation
+    "Q1411292",    # Fidelity Investments
+    "Q505275",     # Capital Group Companies
+    "Q3511946",    # T. Rowe Price
+    "Q105773164",  # Geode Capital Management
+    "Q522617",     # Invesco
+})
+
+
 def direct_owners(claims: Mapping) -> list[str]:
-    """An entity's direct controlling owners: parent-org (P749) ∪ owned-by (P127), order-stable."""
+    """An entity's direct CONTROLLING owners: parent-org (P749) ∪ owned-by (P127), order-stable.
+
+    P749 (parent organization) is the control relation and is taken as-is. P127 (owned by) is
+    where passive shareholders leak in, so index/asset managers are dropped from it (#423) — an
+    outlet is not co-owned with every other company BlackRock holds a stake in. Erring toward NOT
+    collapsing is the safe direction: a wrong merge HIDES real corroboration."""
     seen: set[str] = set()
     out: list[str] = []
     for q in [*(claims.get("P749") or []), *(claims.get("P127") or [])]:
-        if isinstance(q, str) and q.startswith("Q") and q not in seen:
-            seen.add(q)
-            out.append(q)
+        if not (isinstance(q, str) and q.startswith("Q")) or q in seen:
+            continue
+        if q in _INSTITUTIONAL_INVESTORS:
+            continue  # a shareholding is not control — never a co-ownership link
+        seen.add(q)
+        out.append(q)
     return out
 
 
