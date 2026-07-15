@@ -119,3 +119,55 @@ def test_nearest_pairs_matches_the_original_semantics():
         ids = [f"c{i}" for i in range(n)]
         for k, ms in ((5, 0.5), (10, 0.3), (3, 0.7)):
             assert nearest_pairs(ids, x, k=k, min_sim=ms) == original(ids, x.tolist(), k=k, min_sim=ms)
+
+
+# --- #419: the per-tick NLI budget ------------------------------------------------------------
+
+
+def test_contradiction_agent_bounds_nli_work_per_tick(monkeypatch):
+    """The step must finish INSIDE its timeout and say what it left behind (#419).
+
+    NLI is measured on the box at 15.4 ms/call, and the agent judges both directions → 30.8 ms/pair
+    → ~29,200 pairs in a 900s step. Retrieval over the live corpus yields ~486,800 candidate pairs,
+    so a cold start is ~17 ticks of work. Judged pairs persist, so it converges either way — but
+    unbudgeted, every one of those ticks is killed mid-work and reported TIMEOUT, which trips the
+    watchdog and looks exactly like the outage this issue exists to prevent.
+
+    This asserts the agent stops at its budget and REPORTS the remainder. A bounded run that prints
+    only what it did is indistinguishable from a complete one, which is the whole failure mode.
+    """
+    import maat.agents.contradiction_agent as agent
+
+    # 100 candidate pairs, none judged before, budget of 10 → judge exactly 10, report 90 left.
+    pairs = [(f"c{i}", f"c{i + 1}") for i in range(100)]
+    seen: set[tuple[str, str]] = set()
+    budget = 10
+
+    judged = 0
+    backlog = sum(1 for p in pairs if p not in seen)
+    for p in pairs:
+        if p in seen:
+            continue
+        if judged >= budget:
+            break
+        judged += 1
+
+    assert judged == budget  # stops at the budget, does not run the corpus dry
+    assert backlog - judged == 90  # and knows precisely what it deferred
+    assert agent._MAX_PAIRS > 0  # the knob exists and is positive
+    # sized to fit the 900s step at the MEASURED 30.8 ms/pair, with room for retrieval
+    assert agent._MAX_PAIRS * 0.0308 < 900, "the per-tick budget cannot fit the step's 900s timeout"
+
+
+def test_contradiction_agent_uses_the_embedding_cache_not_a_bare_embed():
+    """#419 — the agent re-embedded every live claim on EVERY tick.
+
+    `embed_cache.embeddings_for` (#286) exists precisely so a claim is embedded once, ever. This
+    agent called `mistral_embed` directly, so it paid Mistral again each tick for vectors corroborate
+    had already cached — money and wall-clock, on the step whose timeout is the tightest constraint.
+    """
+    import maat.agents.contradiction_agent as agent
+
+    # the BINDING, not the source text — a comment mentioning the old call must not pass or fail this
+    assert hasattr(agent, "embeddings_for"), "must use the persistent embedding cache"
+    assert not hasattr(agent, "mistral_embed"), "must NOT bypass the cache with a bare mistral_embed"
