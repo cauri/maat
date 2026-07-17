@@ -26,6 +26,7 @@ from maat.pipeline.classify import PROMPT as CLASSIFY_PROMPT
 from maat.pipeline.curation import _DRAFT_GEOTAG_PROMPT as CURATION_GEOTAG_PROMPT
 from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
+from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT
 from maat.pipeline.grounding import GROUNDING_PROMPT
 from maat.pipeline.triage import TRIAGE_LLM_PROMPT
 from maat.acquire.source_gate import PROMPT as SOURCE_GATE_PROMPT
@@ -268,6 +269,15 @@ PROMPTS: list[dict] = [
      "content farms are dropped before they ever become an article. Runs once per new domain.",
      "placeholders": ["{domain}", "{headline}", "{channel}"]},
     # --- draft: gated backend prompts, surfaced read-only for cauri review (NOT active) ---
+    {"key": "authority_search", "label": "Authority search (seek the claim's source of truth)",
+     "default": AUTHORITY_SEARCH_PROMPT, "status": "draft", "source": "maat/pipeline/authority.py",
+     "description": "The tiered-authority leg (#434): for each analysed claim, identify WHO could "
+     "settle it (the lab, the court, the agency, the filer) and search for that authority's own "
+     "publication — tier 1 = the primary document (paper/filing/court record/release), tier 2 = an "
+     "official statement. Runs alongside general corroboration; survivors of the NLI + grounding "
+     "gates mark their URL primary; a grounded authority CONTRADICTION disputes the claim even "
+     "when outlets corroborate, and disqualifies a central claim.",
+     "placeholders": ["{own_domain}", "{claims}"]},
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
      "description": "Would turn a reader's natural-language interest ('West African politics') into "

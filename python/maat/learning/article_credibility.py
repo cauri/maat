@@ -82,6 +82,10 @@ class ArticleClaim:
     central: bool = False              # in_headline or is_synthesis — a load-bearing claim
     disputed: bool = False             # #229 — contradicted by a stronger claim
     grounding: str | None = None       # #228 — "supported" | "not_addressed" | "contradicted"
+    # #434 — a tier-1/2 AUTHORITY (the paper / filing / responsible institution, actively sought
+    # and NLI-verified) contradicts this claim. The strongest disqualifier: it names the source
+    # class in the reason, and unlike ``disputed`` it fires even when outlets corroborate.
+    primary_contradicted: bool = False
     rated_originator: bool = False
     why: list[str] = field(default_factory=list)
 
@@ -90,7 +94,9 @@ def _disqualifiers(central: list[ArticleClaim]) -> list[str]:
     """The disqualifying failures among the central claims (empty → none). Order-stable, deduped."""
     reasons: list[str] = []
     for c in central:
-        if c.disputed or c.grounding == "contradicted":
+        if c.primary_contradicted:
+            reasons.append("a central claim is contradicted by the primary source")
+        elif c.disputed or c.grounding == "contradicted":
             reasons.append("a central claim is contradicted by stronger reporting")
         elif c.extremity in _BIG and c.independent_originators <= 1 and not c.has_primary:
             reasons.append(f"a central {c.extremity} claim rests on a single unsupported source")

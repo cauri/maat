@@ -64,6 +64,8 @@ from maat.pipeline.analyse import (
     match_claims,
     sanitise_body,
 )
+from maat import prompts as prompts_mod
+from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT, parse_authority_citations
 from maat.pipeline.claim import Claim
 from maat.pipeline.corroborate import SAME_FACT_THRESHOLD, ClaimRow
 from maat.pipeline.identity import canonical_source
@@ -95,6 +97,9 @@ _LIVE = os.environ.get("MAAT_ANALYSE_LIVE", "1") not in ("0", "false", "no")
 # default; turn off to run Apify-only. web_search_20260209 is available on Sonnet 4.6.
 _WEB_SEARCH = os.environ.get("MAAT_ANALYSE_WEB_SEARCH", "1") not in ("0", "false", "no")
 _SEARCH_MODEL = os.environ.get("MAAT_ANALYSE_SEARCH_MODEL", "claude-sonnet-4-6")
+# Tiered authority (#434) — the source-of-truth-seeking leg, on by default (cauri: the FIRST level
+# of fact checking). Runs in parallel with the general pass; off → exactly the pre-#434 behaviour.
+_AUTHORITY = os.environ.get("MAAT_ANALYSE_AUTHORITY", "1") not in ("0", "false", "no")
 # NLI entailment gate thresholds (#389) — tunable in prod without a deploy once the web_neutral
 # recall-drift signal shows whether the gate is too strict. Model swap is the other lever
 # (MAAT_NLI_MODEL, in pipeline/nli.py).
@@ -252,6 +257,9 @@ class _Assets:
     # from admin.config.promoted — the same flow the feed's corroborate agent honours.
     knobs: ScoringKnobs = ScoringKnobs()
     same_fact: float = SAME_FACT_THRESHOLD  # cluster.same_fact — the §5.4 bar, also promotable
+    # #434 — the authority-search prompt, resolved from the prompt store (operator-editable via
+    # /prompts, seed = the DRAFT in pipeline/authority.py) once per assets build, like the knobs.
+    authority_prompt: str = AUTHORITY_SEARCH_PROMPT
 
 
 _ASSETS_CACHE = VersionCache(maxsize=2)
@@ -370,6 +378,9 @@ async def _load_assets(pool: Any) -> _Assets:
         ownership={**auto_owner, **manual_owner},   # manual overrides auto
         knobs=ScoringKnobs(**overrides["knobs"]),
         same_fact=overrides["same_fact_threshold"],
+        authority_prompt=await prompts_mod.active_text(
+            pool, "authority_search", prompts_mod.seed_default("authority_search")
+        ),
     )
     _ASSETS_CACHE.put("assets", version, assets)
     return assets
@@ -646,6 +657,63 @@ def make_web_search(denied: set[str]):
         return out[:n] + [[] for _ in range(n - len(out))]
 
     return web_search
+
+
+def _authority_batch(
+    claim_texts: Sequence[str], own_domain: str, blocked: list[str], prompt_seed: str,
+    *, deep: bool = False,
+) -> list[list[Citation]]:
+    """One authority-search call over a small batch of claims → per-claim TIERED citations.
+
+    Same shape as ``_search_batch`` — same tool, same model, same budget arithmetic — but the
+    prompt seeks each claim's authoritative PRIMARY (tier 1 = the document itself, tier 2 = the
+    official statement) instead of press coverage, and the parser drops anything the model returns
+    outside tiers 1–2. The pipeline then applies the identical NLI + grounding gates; survivors
+    mark their URL primary for the fold (#434)."""
+    n = len(claim_texts)
+    claims_block = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(claim_texts))
+    prompt = prompt_seed.replace("{own_domain}", own_domain or "unknown").replace(
+        "{claims}", claims_block
+    )
+    per_claim, base = (6, 4) if deep else (3, 2)
+    tool: dict = {
+        "type": _WEB_SEARCH_TOOL_TYPE, "name": "web_search", "max_uses": per_claim * n + base,
+    }
+    if blocked:
+        tool["blocked_domains"] = blocked
+    try:
+        blocks = claude_web_search(prompt, tools=[tool], model=_SEARCH_MODEL)
+    except Exception as e:  # noqa: BLE001 - a failed batch just leaves its claims to the general leg
+        log.warning("authority-search batch of %d claims failed: %s", n, type(e).__name__)
+        return [[] for _ in range(n)]
+    return parse_authority_citations(_blocks_text(blocks), n)
+
+
+def make_authority_search(denied: set[str], prompt_seed: str):
+    """The pipeline's authority-seeking WebSearchFn (#434): per-claim tier-1/2 citations from
+    primary-source-targeted search. Batched and concurrent like ``make_web_search``; blocks the
+    article's own outlet + denied sources at the tool level; the pipeline re-verifies everything."""
+
+    def authority_search(
+        claim_texts: Sequence[str], own_domain: str, deep: bool = False
+    ) -> list[list[Citation]]:
+        n = len(claim_texts)
+        if not n:
+            return []
+        blocked = sorted({d for d in (own_domain, *denied) if d})
+        batches = [
+            list(claim_texts[s : s + _SEARCH_BATCH]) for s in range(0, n, _SEARCH_BATCH)
+        ]
+        with ThreadPoolExecutor(max_workers=len(batches)) as ex:
+            results = list(ex.map(
+                lambda b: _authority_batch(b, own_domain, blocked, prompt_seed, deep=deep), batches
+            ))
+        out: list[list[Citation]] = []
+        for r in results:
+            out.extend(r)
+        return out[:n] + [[] for _ in range(n - len(out))]
+
+    return authority_search
 
 
 def make_nli():
@@ -998,6 +1066,10 @@ async def run_analysis(
             ownership=assets.ownership,
             corpus_lookup=lookup,
             web_search=make_web_search(assets.denied) if (_LIVE and _WEB_SEARCH) else None,
+            authority_search=(
+                make_authority_search(assets.denied, assets.authority_prompt)
+                if (_LIVE and _WEB_SEARCH and _AUTHORITY) else None
+            ),
             nli=make_nli(),
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),
@@ -1087,6 +1159,10 @@ async def run_check(
             reputation=assets.reputation,
             ownership=assets.ownership,
             web_search=make_web_search(assets.denied) if (_LIVE and _WEB_SEARCH) else None,
+            authority_search=(
+                make_authority_search(assets.denied, assets.authority_prompt)
+                if (_LIVE and _WEB_SEARCH and _AUTHORITY) else None
+            ),
             nli=make_nli(),
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),

@@ -36,7 +36,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 import numpy as np
@@ -124,6 +124,8 @@ class LiveMeta:
                                  # second search before being concluded single-source
     deep_rescued: int = 0        # …of those, how many the deeper search actually corroborated —
                                  # the "was one shallow pass enough?" signal (low → recall is fine)
+    authority_corroborated: int = 0  # #434: claims with >=1 accepted tier-1/2 AUTHORITY source
+    authority_contradicted: int = 0  # #434: claims a grounded tier-1/2 authority CONTRADICTS
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,14 @@ class Citation:
     url: str
     domain: str
     quote: str
+    # Authority tier (#434) — set ONLY by the authority-seeking leg, 0 for general web search:
+    #   1 = the primary document itself (peer-reviewed paper, official filing, court record, the
+    #       named institution's own release or dataset);
+    #   2 = an official statement by the relevant authority (press office, spokesperson page).
+    # A tier-1/2 citation that survives the SAME NLI + grounding gates marks its URL as a primary
+    # source for the fold (``corroborate_fixed(primary_urls=…)``) — cauri's first level of fact
+    # checking: the lab's own paper outranks any amount of outlet corroboration.
+    tier: int = 0
 
 
 @dataclass(frozen=True)
@@ -155,6 +165,11 @@ class ClaimReading:
     verdict: str
     tier: str
     matched_cluster_id: str | None  # internal provenance — never exposed publicly (what, not how)
+    # #434 — a tier-1/2 AUTHORITY (the primary document / the responsible institution) contradicts
+    # this claim. Stronger than ``disputed``: it disputes even when other outlets corroborate (the
+    # lab's own paper beats five stories repeating each other), and on a central claim it is
+    # DISQUALIFYING for the whole article.
+    primary_contradicted: bool = False
     checked: bool = True            # False → novel claim we did NOT search (over the live cap):
                                     # carried with NO score, excluded from the overall, and offered
                                     # to the reader for an on-demand force-check (#397). Never
@@ -370,6 +385,7 @@ def claim_verdict(
     *,
     disputed: bool = False,
     grounding: str | None = None,
+    primary_contradicted: bool = False,
 ) -> tuple[str, str]:
     """Verdict wording for ONE analysed claim — (label, tier).
 
@@ -377,6 +393,10 @@ def claim_verdict(
     "corroborated" is RESERVED for claims with actual outside confirmation. A lone-source claim
     says so plainly — the score is unchanged; only the words stop overpromising. The feed rarely
     surfaces lone claims (min_corroboration gates them), so this lives here, not there."""
+    if primary_contradicted:
+        # #434 — the authority itself (the paper, the filing, the institution) says otherwise.
+        # Outranks any outlet corroboration; wording names the source class, not the mechanism.
+        return "Disputed — contradicted by the primary source", "floor"
     if disputed or grounding == "contradicted":
         return "Disputed — contradicted by stronger reporting", "floor"
     if independent_originators <= 1:
@@ -477,6 +497,8 @@ def _live_reading(
     *, disputed: bool = False, ownership: dict[str, str] | None = None,
     cite_weights: dict[str, float] | None = None,
     knobs: ScoringKnobs | None = None,
+    primary_urls: set[str] | None = None,
+    primary_contradicted: bool = False,
 ) -> tuple[ClaimReading, bool]:
     """Fold live-found corroborating claims with the pasted article's own assertion — the same
     §5.5 collapse and §5.6 read the feed uses, over evidence found minutes ago.
@@ -489,10 +511,14 @@ def _live_reading(
     the same anti-laundering rollup the feed applies, so web search surfacing several sister
     outlets of one group cannot inflate the count."""
     kn = knobs or ScoringKnobs()
+    # #434: an authority contradiction disputes even a claim other outlets corroborate — the
+    # primary document outranks repetition. It rides the same grounding="contradicted" read.
+    disputed = disputed or primary_contradicted
     grounding = "contradicted" if disputed else None
     own = ClaimRow(id=claim.id, text=claim.text, article_id=_ANALYSED, source=source)
     cor = corroborate_fixed(
         [own, *matched_rows], {**bodies, _ANALYSED: body}, extremity, grounding=grounding,
+        primary_urls=primary_urls,  # #434 — accepted tier-1/2 authority citations
         ownership=ownership, reputation=dict(reputation),  # S1 #399
         attribution={
             # S5 #403: each cited source graded by attribution × entailment strength…
@@ -505,12 +531,13 @@ def _live_reading(
     )
     verdict, tier = claim_verdict(
         cor.confidence, cor.independent_originators, cor.has_primary, extremity,
-        disputed=disputed, grounding=grounding,
+        disputed=disputed, grounding=grounding, primary_contradicted=primary_contradicted,
     )
     reading = ClaimReading(
         claim=claim, extremity=extremity, confidence=cor.confidence,
         independent_originators=cor.independent_originators, has_primary=cor.has_primary,
         disputed=disputed, grounding=grounding, verdict=verdict, tier=tier, matched_cluster_id=None,
+        primary_contradicted=primary_contradicted,
     )
     rated = any(  # OUTSIDE corroboration only (S4 #402) — publisher rating is the ceiling
         _rep(reputation, r.source) is not None for r in matched_rows
@@ -692,12 +719,26 @@ class _CiteFetch:
             return self._bodies[url]
 
 
+class WebRows(NamedTuple):
+    """One claim's gated web evidence (#381/#434). ``primary_urls`` are the accepted rows that came
+    from tier-1/2 AUTHORITY citations — the fold treats them as primary sources. ``primary_contradicted``
+    is a tier-1/2 authority whose (grounded) quote CONTRADICTS the claim — it disputes the claim
+    even when outlets corroborate, and disqualifies a central claim."""
+
+    rows: list[ClaimRow]
+    bodies: dict[str, str]
+    contradicted: bool
+    weights: dict[str, float]
+    primary_urls: set[str]
+    primary_contradicted: bool
+
+
 def _websearch_rows(
     i: int, claim: Claim, citations: Sequence[Citation], *,
     url: str, own_canon: str, accept_candidate: Callable[[LiveCandidate], bool] | None,
     cite_fetch: _CiteFetch, nli: NliFn | None, nli_min: float, contradict_min: float,
     entail_floor: float | None = None,
-) -> tuple[list[ClaimRow], dict[str, str], bool, dict[str, float]]:
+) -> WebRows:
     """One claim's web-search corroboration. For each offered citation: exclude the pasted outlet /
     denied domains, then NLI-JUDGE the quote against the claim (the hard gate — entailment counts,
     contradiction disputes, everything else drops). An NLI-entailed source is then re-fetched
@@ -715,6 +756,8 @@ def _websearch_rows(
     bodies: dict[str, str] = {}
     weights: dict[str, float] = {}
     contradicted = False
+    primary_urls: set[str] = set()
+    primary_contradicted = False
     seen: set[str] = set()
     for n, cit in enumerate(citations):
         if not cit.url or cit.url == url or cit.url in seen:
@@ -731,6 +774,14 @@ def _websearch_rows(
         )
         if verdict == "contradicts":
             contradicted = True
+            if cit.tier >= 1:
+                # #434 — the AUTHORITY itself says otherwise. Disqualifying strength, so it earns
+                # the SAME anti-fabrication standard as acceptance: if we can fetch the page and
+                # the quote's content is wholly absent, don't count it; unfetchable → judged on
+                # NLI alone, symmetric with the acceptance path.
+                pbody = cite_fetch.body(cit.url)
+                if pbody is None or quote_grounded(cit.quote, pbody):
+                    primary_contradicted = True
             continue
         body = cite_fetch.body(cit.url)  # best-effort; None when the publisher is walled
         quote = cit.quote
@@ -756,7 +807,11 @@ def _websearch_rows(
             * entailment_weight(strength, nli_min, floor=entail_floor),
             2,
         )
-    return rows, bodies, contradicted, weights
+        if cit.tier >= 1:
+            # An ACCEPTED (NLI-entailed, grounded) tier-1/2 authority citation: its URL becomes a
+            # primary source for the fold — the primary lift + "Stated by the primary source".
+            primary_urls.add(cit.url)
+    return WebRows(rows, bodies, contradicted, weights, primary_urls, primary_contradicted)
 
 
 def _safe_search(search: SearchFn, query: str) -> list[LiveCandidate]:
@@ -912,6 +967,7 @@ def analyse_article(
     ownership: dict[str, str] | None = None,
     corpus_lookup: CorpusLookup | None = None,
     web_search: WebSearchFn | None = None,
+    authority_search: WebSearchFn | None = None,
     nli: NliFn | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
@@ -1007,7 +1063,7 @@ def analyse_article(
         )))
 
     live: LiveMeta | None = None
-    have_live = web_search is not None or search is not None
+    have_live = web_search is not None or search is not None or authority_search is not None
     if not have_live or not novel_idx:
         for i in novel_idx:
             resolve(i, _lone_reading(fact_claims[i], body, source, extremities[i], reputation, knobs))
@@ -1033,18 +1089,38 @@ def analyse_article(
         # ONE web-search pass over all selected claims (#381): per-claim cited quotes, aligned with
         # `selected`. A failed pass leaves every claim to the Apify fallback below.
         citations: dict[int, Sequence[Citation]] = {}
-        if web_search is not None:
-            try:
-                results = web_search([fact_claims[i].text for i in selected], source)
-            except Exception as e:  # noqa: BLE001 - a failed web-search never sinks the analysis
-                log.warning("web-search pass failed (%s) — all %d claims fall back to Apify",
-                            type(e).__name__, len(selected))
-                results = []
-            for k, i in enumerate(selected):
-                if k < len(results):
-                    citations[i] = results[k]
+        if web_search is not None or authority_search is not None:
+            texts = [fact_claims[i].text for i in selected]
 
-        tally = {"web": 0, "contra": 0, "fallback": 0, "neutral": 0}
+            def _pass(fn: WebSearchFn | None, label: str) -> list[Sequence[Citation]]:
+                if fn is None:
+                    return []
+                try:
+                    return list(fn(texts, source))
+                except Exception as e:  # noqa: BLE001 - a failed pass never sinks the analysis
+                    log.warning("%s pass failed (%s)", label, type(e).__name__)
+                    return []
+
+            # #434: the AUTHORITY pass (seek the claim's source of truth — cauri's first level of
+            # fact checking) runs IN PARALLEL with the general pass; its citations are merged FIRST
+            # per claim, so every downstream path — live_one, the neutral second-chance, the deep
+            # rescue's `citations.get(i)` merge — carries authority evidence with no extra plumbing.
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fut_gen = ex.submit(_pass, web_search, "web-search")
+                fut_auth = ex.submit(_pass, authority_search, "authority-search")
+                results, auth_results = fut_gen.result(), fut_auth.result()
+            for k, i in enumerate(selected):
+                # NB: named cits_merged, not `merged` — that outer name is consolidate_claims'
+                # merge COUNT and flows into ArticleAnalysis.merged_claims; shadowing it here
+                # overwrote the int with a citation list (caught by the #411 dedup test).
+                cits_merged = [
+                    *(auth_results[k] if k < len(auth_results) else ()),
+                    *(results[k] if k < len(results) else ()),
+                ]
+                if cits_merged:
+                    citations[i] = cits_merged
+
+        tally = {"web": 0, "contra": 0, "fallback": 0, "neutral": 0, "auth": 0, "auth_contra": 0}
         # Which claims each ops counter has ALREADY counted, so the deep pass adjusts precisely
         # rather than blind-incrementing (a pass-1 web claim can still be independent_originators<=1
         # when its only outside source collapsed with the pasted outlet, and would double-count on
@@ -1062,14 +1138,24 @@ def analyse_article(
             bodies: dict[str, str] = {}
             weights: dict[str, float] = {}
             contradicted = False
+            primary_urls: set[str] = set()
+            primary_contradicted = False
             cits = citations.get(i)
             if cits:
-                matched_rows, bodies, contradicted, weights = _websearch_rows(
+                wr = _websearch_rows(
                     i, claim, cits, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
                     entail_floor=(knobs.entail_floor if knobs else None),
                 )
+                matched_rows, bodies, contradicted, weights = wr.rows, wr.bodies, wr.contradicted, wr.weights
+                primary_urls, primary_contradicted = wr.primary_urls, wr.primary_contradicted
+                if primary_urls or primary_contradicted:
+                    with tally_lock:
+                        if primary_urls:
+                            tally["auth"] += 1
+                        if primary_contradicted:
+                            tally["auth_contra"] += 1
             if matched_rows:
                 with tally_lock:
                     tally["web"] += 1
@@ -1088,14 +1174,17 @@ def analyse_article(
                     if matched_rows and web_search is not None:
                         with tally_lock:
                             tally["fallback"] += 1
-            # Conservative dispute: a verified outside source contradicts AND none corroborate.
-            dispute = contradicted and not matched_rows
+            # Conservative dispute: a verified outside source contradicts AND none corroborate —
+            # EXCEPT an authority contradiction (#434), which disputes regardless of outlet
+            # corroboration: the primary document outranks repetition.
+            dispute = (contradicted and not matched_rows) or primary_contradicted
             if dispute:
                 with tally_lock:
                     tally["contra"] += 1
             resolve(i, _live_reading(
                 claim, body, source, extremities[i], matched_rows, bodies, reputation,
                 disputed=dispute, ownership=ownership, cite_weights=weights, knobs=knobs,
+                primary_urls=primary_urls, primary_contradicted=primary_contradicted,
             ))
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -1130,17 +1219,20 @@ def analyse_article(
                 if not extra:
                     return
                 merged = [*(citations.get(i) or ()), *extra]
-                rows, bodies2, _contra, weights2 = _websearch_rows(
+                wr = _websearch_rows(
                     i, fact_claims[i], merged, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
                     entail_floor=(knobs.entail_floor if knobs else None),
                 )
+                rows, bodies2, weights2 = wr.rows, wr.bodies, wr.weights
                 if not rows:
                     return
                 reading, rated = _live_reading(
                     fact_claims[i], body, source, extremities[i], rows, bodies2, reputation,
-                    disputed=False, ownership=ownership, cite_weights=weights2, knobs=knobs,
+                    disputed=wr.primary_contradicted, ownership=ownership, cite_weights=weights2,
+                    knobs=knobs, primary_urls=wr.primary_urls,
+                    primary_contradicted=wr.primary_contradicted,
                 )
                 if reading.independent_originators > readings[i].independent_originators:
                     with tally_lock:
@@ -1162,6 +1254,7 @@ def analyse_article(
             web_corroborated=tally["web"], web_contradicted=tally["contra"],
             web_neutral=tally["neutral"], apify_fallbacks=tally["fallback"],
             nli_available=nli is not None, deep_searched=deep_searched, deep_rescued=deep_rescued,
+            authority_corroborated=tally["auth"], authority_contradicted=tally["auth_contra"],
         )
 
     done = [r for r in readings if r is not None]
@@ -1190,6 +1283,7 @@ def analyse_article(
                 disputed=r.disputed,
                 grounding=r.grounding,
                 rated_originator=rated,
+                primary_contradicted=r.primary_contradicted,
             )
             for r, rated in scored
         ],
@@ -1215,6 +1309,7 @@ def check_one_claim(
     reputation: Mapping[str, float],
     ownership: dict[str, str] | None = None,
     web_search: WebSearchFn | None = None,
+    authority_search: WebSearchFn | None = None,
     nli: NliFn | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
@@ -1243,29 +1338,43 @@ def check_one_claim(
     bodies: dict[str, str] = {}
     weights: dict[str, float] = {}
     contradicted = False
+    primary_urls: set[str] = set()
+    primary_contradicted = False
 
-    if web_search is not None:
-        try:
-            results = web_search([claim.text], source)
-        except Exception as e:  # noqa: BLE001 - a failed pass falls back to Apify below
-            log.warning("force-check web-search failed: %s", type(e).__name__)
-            results = []
-        cits = results[0] if results else []
+    if web_search is not None or authority_search is not None:
+        def _one(fn: WebSearchFn | None, label: str) -> Sequence[Citation]:
+            if fn is None:
+                return ()
+            try:
+                results = fn([claim.text], source)
+            except Exception as e:  # noqa: BLE001 - a failed pass falls back to Apify below
+                log.warning("force-check %s failed: %s", label, type(e).__name__)
+                return ()
+            return results[0] if results else ()
+
+        # #434: authority citations FIRST — same merge order as the batch path.
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut_gen = ex.submit(_one, web_search, "web-search")
+            fut_auth = ex.submit(_one, authority_search, "authority-search")
+            cits = [*fut_auth.result(), *fut_gen.result()]
         if cits:
-            matched_rows, bodies, contradicted, weights = _websearch_rows(
+            wr = _websearch_rows(
                 0, claim, cits, url=url, own_canon=own_canon,
                 accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                 nli_min=nli_entail_min, contradict_min=nli_contradict_min,
                 entail_floor=(knobs.entail_floor if knobs else None),
             )
+            matched_rows, bodies, contradicted, weights = wr.rows, wr.bodies, wr.contradicted, wr.weights
+            primary_urls, primary_contradicted = wr.primary_urls, wr.primary_contradicted
     if not matched_rows and search is not None:  # web-search found nothing usable → Apify fallback
         matched_rows, bodies = _apify_rows(
             0, claim, search=search, extract=extract, embed=embed,
             shared=_LiveShared(live_max_candidates), accept_candidate=accept_candidate,
             own_canon=own_canon, url=url, same_fact_threshold=same_fact_threshold,
         )
-    dispute = contradicted and not matched_rows
+    dispute = (contradicted and not matched_rows) or primary_contradicted
     return _live_reading(
         claim, body, source, extremity, matched_rows, bodies, reputation,
         disputed=dispute, ownership=ownership, cite_weights=weights, knobs=knobs,
+        primary_urls=primary_urls, primary_contradicted=primary_contradicted,
     )
