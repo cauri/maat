@@ -24,7 +24,8 @@ from maat.pipeline.corroborate import ClaimRow, corroborate
 from maat.pipeline.embed_cache import embeddings_for
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
-from maat.pipeline.ownership import fold_ownership
+from maat.learning.trajectory import load_trajectory
+from maat.pipeline.ownership import evidenced_ownership, fold_ownership
 from maat.translate import translate_text
 from maat.ids import cluster_id
 
@@ -61,7 +62,10 @@ async def main() -> None:
         ADMIN_SOURCE_GROUPED,
     )
     manual = {canonical_source(r["s"]): r["g"] for r in grps if r["s"] and r["g"]}
-    ownership = {**auto, **manual}  # manual overrides auto
+    # #425: the auto (Wikidata) groups collapse only with OBSERVED shared output — same-fact
+    # co-occurrence in the trajectory, a shared refuted fact being sufficient alone. Manual
+    # operator groups stay blanket and override.
+    ownership = {**evidenced_ownership(auto, await load_trajectory(pool)), **manual}
     # Operator config enactment (#183/#184): the pipeline runs on the PROMOTED thresholds
     # (sign-off-gated), falling back to code defaults for anything not promoted.
     promoted = await pool.fetch(

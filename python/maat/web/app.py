@@ -61,7 +61,7 @@ from maat.acquire.clean import clean_article
 from maat.acquire.rss import load_feeds as _load_feeds
 from maat.metrics import de_us
 from maat.pipeline.identity import canonical_source
-from maat.pipeline.ownership import fold_ownership
+from maat.pipeline.ownership import evidenced_ownership, fold_ownership
 from maat.obs_metrics import pipeline_health
 from maat.pipeline.corroborate import (
     ClaimRow,
@@ -775,6 +775,13 @@ async def sources_view(ok: str = "") -> str:
         json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
         for r in await pool.fetch("select data from events where type='cluster.corroborated' order by id")
     ]
+    # #425: which auto ownership groups are EVIDENCED (observed shared output → they collapse) vs
+    # dormant (co-owned on paper, no shared output → they no longer do). Surfaced so the operator
+    # can see why a group stopped collapsing rather than wondering.
+    evidenced = evidenced_ownership(auto_owner, history)
+    for nm, info in owner_by.items():
+        if info.get("auto"):
+            info["evidenced"] = canonical_source(nm or "") in evidenced
     rep_by = {r.source: r for r in fold_reputation(history, hindsight=await load_hindsight(pool))}
     reg_rows = await pool.fetch(
         "select data from events where type in ($1, $2) order by id",

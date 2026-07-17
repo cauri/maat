@@ -69,7 +69,7 @@ from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT, parse_authority_cit
 from maat.pipeline.claim import Claim
 from maat.pipeline.corroborate import SAME_FACT_THRESHOLD, ClaimRow
 from maat.pipeline.identity import canonical_source
-from maat.pipeline.ownership import fold_ownership
+from maat.pipeline.ownership import evidenced_ownership, fold_ownership
 from maat.providers.seam import claude_web_search, mistral_embed
 from maat.serving.buildcache import VersionCache, data_version
 from maat.serving.ratelimit import PerIpRateLimiter, client_ip
@@ -398,7 +398,10 @@ async def _load_assets(pool: Any) -> _Assets:
         embeds=embeds,
         reputation=reputation,
         denied=denied_sources([r["data"] for r in flag_rows]),
-        ownership={**auto_owner, **manual_owner},   # manual overrides auto
+        # #425: co-ownership collapses only with OBSERVED shared output (same-fact
+        # co-occurrence; a shared refuted fact alone suffices). Manual operator groups stay
+        # blanket and override — a human's explicit group never needs statistical evidence.
+        ownership={**evidenced_ownership(auto_owner, history), **manual_owner},
         knobs=ScoringKnobs(**overrides["knobs"]),
         same_fact=overrides["same_fact_threshold"],
         authority_prompt=await prompts_mod.active_text(
