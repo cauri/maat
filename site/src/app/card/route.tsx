@@ -141,7 +141,7 @@ export async function GET(request: Request) {
           </div>
           <div style={{ display: "flex", color: MUT, fontSize: square ? 28 : 24, marginTop: 14 }}>
             {a.source}
-            {a.publisher.rated ? `  ·  publisher track record ${a.publisher.score}/100` : ""}
+            {a.publisher.rated ? `  ·  publisher track record ${a.publisher.score}%` : ""}
           </div>
         </div>
 

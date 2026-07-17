@@ -12,6 +12,9 @@
   --amber: #956211;
   --red: #a02318;
   --red-wash: #f7e6e2;
+  /* publisher reputation — its own axis, deliberately outside the veracity band palette */
+  --slate: #34566e;
+  --slate-wash: #e8eef3;
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
@@ -96,8 +99,20 @@ form.paste button:disabled { opacity: 0.55; cursor: default; }
   display: inline-block; margin-top: 10px; font-size: 13.5px; color: var(--mut);
   border: 1px solid var(--line); border-radius: 999px; padding: 5px 13px; background: var(--paper);
 }
-.pub-badge.rated { color: var(--gold); border-color: var(--gold-wash); background: var(--gold-wash); }
-.pub-badge.rated strong { font-size: 15px; }
+
+/* publisher track record — a first-class rating on its OWN axis: slate (not a veracity band
+   colour) + a percentage, so it never reads as another per-claim score (cauri). */
+.pub-rating {
+  display: flex; align-items: center; gap: 16px; margin-top: 14px;
+  padding: 14px 18px; border: 1px solid var(--slate); border-radius: 12px;
+  background: var(--slate-wash);
+}
+.pub-rating .pub-score { display: flex; align-items: baseline; gap: 1px; color: var(--slate); white-space: nowrap; }
+.pub-rating .pub-num { font: 700 44px/0.9 var(--serif); letter-spacing: -0.02em; }
+.pub-rating .pub-denom { font: 600 23px/1 var(--serif); }
+.pub-rating .pub-meta { display: flex; flex-direction: column; gap: 2px; }
+.pub-rating .pub-label { font: 600 17px/1.2 var(--serif); color: var(--slate); }
+.pub-rating .pub-sub { font-size: 13px; color: var(--mut); }
 
 .overall { display: flex; flex-direction: column; gap: 10px; }
 .overall .band-row { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
@@ -233,6 +248,7 @@ h3.section { font: 600 19px/1.3 var(--serif); margin: 26px 0 12px; }
 @media (max-width: 560px) {
   .claim { grid-template-columns: 84px 1fr; }
   .big-score { font-size: 42px; }
+  .pub-rating .pub-num { font-size: 40px; }
 }
 
 .projections .claim p.text { color: var(--mut); }

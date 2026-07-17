@@ -36,7 +36,7 @@ import time
 import traceback
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -48,7 +48,7 @@ from maat import events as events_mod
 from maat.acquire import apify, gdelt, source_gate
 from maat.acquire.fetch import FetchedPage, fetch_article, fetch_page
 from maat.acquire.source_gate import prefiltered_reject
-from maat.learning.reputation import fold_reputation, reputation_score
+from maat.learning.reputation import SourceReputation, fold_reputation, reputation_score
 from maat.learning.trajectory import load_trajectory
 from maat import config as config_mod
 from maat.pipeline.analyse import (
@@ -109,6 +109,11 @@ _GATED = os.environ.get("MAAT_ANALYSE_GATE", "1") not in ("0", "false", "no")
 _MAX_SEARCHES = int(os.environ.get("MAAT_ANALYSE_MAX_SEARCHES", "10"))
 _MAX_CANDIDATES = int(os.environ.get("MAAT_ANALYSE_MAX_CANDIDATES", "18"))
 _BODY_CHARS = int(os.environ.get("MAAT_ANALYSE_BODY_CHARS", "60000"))
+# Reputation floor (cauri): a source needs at least this many resolved terminal outcomes
+# (confirmed/refuted facts) before Maat rests a reputation on it — we never rate a publisher on
+# too little info. Below the floor the source is treated as unproven everywhere reputation is read
+# (the publisher rating, each claim's track-record flag, and the cold-start score cap).
+_REPUTATION_FLOOR = int(os.environ.get("MAAT_ANALYSE_REPUTATION_FLOOR", "10"))
 # An analysis costs real LLM + search work, so the per-IP budget is strict: a small burst, then
 # one every five minutes. GETs of finished analyses are NOT limited (bounded, cached reads).
 _LIMITER = PerIpRateLimiter(
@@ -271,6 +276,29 @@ def _jload(v: Any) -> list:
     return list(v) if v else []
 
 
+def build_reputation_map(
+    recs: Iterable[SourceReputation], *, floor: int
+) -> dict[str, float]:
+    """Collapse fold_reputation records into the ``{source: 0..1 standing}`` map the analysis reads.
+
+    Admits only sources whose track record rests on at least ``floor`` resolved terminal outcomes
+    (confirmed/refuted facts) — Maat never rests a reputation on too little info (cauri). Keyed by
+    the raw source string AND its canonical id (§6.7) so a pasted ``bbc.co.uk`` finds a record
+    stored under ``bbc.com`` / "BBC News"; on a canonical collision the record with the most
+    resolved outcomes speaks for the outlet.
+    """
+    rated = [r for r in recs if r.outcome_n >= floor]
+    reputation: dict[str, float] = {r.source: reputation_score(r) for r in rated}
+    best: dict[str, tuple[int, float]] = {}
+    for r in rated:
+        canon = canonical_source(r.source)
+        if canon not in best or r.outcome_n > best[canon][0]:
+            best[canon] = (r.outcome_n, reputation_score(r))
+    for canon, (_n, score) in best.items():
+        reputation.setdefault(canon, score)
+    return reputation
+
+
 async def _load_assets(pool: Any) -> _Assets:
     version = await data_version(pool)
     cached = _ASSETS_CACHE.get("assets", version)
@@ -348,18 +376,10 @@ async def _load_assets(pool: Any) -> _Assets:
         except Exception:  # noqa: BLE001 - no embeddings → corpus leg off; live leg still runs
             embeds = None
 
-    # Reputation keyed by the raw source string AND its canonical id (§6.7): the pasted
-    # bbc.co.uk must find a track record stored under bbc.com / "BBC News". On a canonical
-    # collision, the record with the most resolved outcomes speaks for the outlet.
-    recs = [r for r in fold_reputation(history) if r.outcome_n > 0]
-    reputation: dict[str, float] = {r.source: reputation_score(r) for r in recs}
-    best: dict[str, tuple[int, float]] = {}
-    for r in recs:
-        canon = canonical_source(r.source)
-        if canon not in best or r.outcome_n > best[canon][0]:
-            best[canon] = (r.outcome_n, reputation_score(r))
-    for canon, (_n, score) in best.items():
-        reputation.setdefault(canon, score)
+    # Only sources whose track record rests on enough resolved outcomes are rated — Maat never
+    # rests a reputation on too little info (cauri). Canonical-aware, so a pasted bbc.co.uk finds
+    # a record stored under bbc.com / "BBC News".
+    reputation = build_reputation_map(fold_reputation(history), floor=_REPUTATION_FLOOR)
 
     auto_owner = fold_ownership(
         json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in owner_rows
@@ -840,7 +860,7 @@ def _build_share(*, title: str | None, source: str, label: str, score: int, fore
     disp = _trim(title or "this article", 90)
     headline = label if forecast_only else f"{label} · {score}/100"
     top = _cap(top_reason) if top_reason else ""
-    pub_rec = f" (track record {pub_score_100}/100)" if pub_score_100 is not None else ""
+    pub_rec = f" (track record {pub_score_100}%)" if pub_score_100 is not None else ""
     og_description = _trim(
         f"{headline}. " + (f"{top}. " if top else "")
         + "Maat weighs each factual claim against independent reporting — not tone or bias.",
