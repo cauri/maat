@@ -47,6 +47,7 @@ from maat.learning.story_credibility import StoryScore
 from maat.pipeline.claim import Claim
 from maat.pipeline.classify import classify_claims
 from maat.pipeline.corroborate import (
+    SAME_FACT_THRESHOLD,
     ClaimRow,
     _named_speaker,
     attribution_weight,
@@ -329,7 +330,7 @@ def match_claims(
     *,
     embed: Callable[[list[str]], list[list[float]]] = mistral_embed,
     corpus_embeddings: np.ndarray | None = None,
-    threshold: float = 0.82,
+    threshold: float = SAME_FACT_THRESHOLD,
 ) -> list[int | None]:
     """Best same-fact corpus match per claim text (cosine ≥ threshold), else None.
 
@@ -853,7 +854,7 @@ def _apify_rows(
 def consolidate_claims(
     claims: list[Claim],
     embed: Callable[[list[str]], list[list[float]]],
-    threshold: float = 0.82,
+    threshold: float = SAME_FACT_THRESHOLD,
 ) -> tuple[list[Claim], int]:
     """Merge near-duplicate extracted claims into ONE claim each (#411) — one fact, one claim.
 
@@ -921,7 +922,7 @@ def analyse_article(
     extremity_of: Callable[[str], str] = rate_extremity,
     embed: Callable[[list[str]], list[list[float]]] = mistral_embed,
     language_of: Callable[[str], str] = _detect_language,
-    same_fact_threshold: float = 0.82,
+    same_fact_threshold: float = SAME_FACT_THRESHOLD,
     nli_entail_min: float = 0.5,
     nli_contradict_min: float = 0.6,
     live_max_searches: int = 10,
@@ -1221,7 +1222,7 @@ def check_one_claim(
     extract: Callable[..., list[Claim]] = extract_claims,
     extremity_of: Callable[[str], str] = rate_extremity,
     embed: Callable[[list[str]], list[list[float]]] = mistral_embed,
-    same_fact_threshold: float = 0.82,
+    same_fact_threshold: float = SAME_FACT_THRESHOLD,
     nli_entail_min: float = 0.5,
     nli_contradict_min: float = 0.6,
     live_max_candidates: int = 18,

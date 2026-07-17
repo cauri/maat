@@ -65,7 +65,7 @@ from maat.pipeline.analyse import (
     sanitise_body,
 )
 from maat.pipeline.claim import Claim
-from maat.pipeline.corroborate import ClaimRow
+from maat.pipeline.corroborate import SAME_FACT_THRESHOLD, ClaimRow
 from maat.pipeline.identity import canonical_source
 from maat.pipeline.ownership import fold_ownership
 from maat.providers.seam import claude_web_search, mistral_embed
@@ -251,7 +251,7 @@ class _Assets:
     # Promoted scoring overrides (#412): the operator Config panel's sign-off-gated knobs, folded
     # from admin.config.promoted — the same flow the feed's corroborate agent honours.
     knobs: ScoringKnobs = ScoringKnobs()
-    same_fact: float = 0.82                 # cluster.same_fact — the §5.4 bar, also promotable
+    same_fact: float = SAME_FACT_THRESHOLD  # cluster.same_fact — the §5.4 bar, also promotable
 
 
 _ASSETS_CACHE = VersionCache(maxsize=2)

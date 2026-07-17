@@ -68,3 +68,36 @@ def test_analyse_overrides_maps_promotes_to_scoring_knobs():
     from maat.pipeline.analyse import ScoringKnobs
 
     ScoringKnobs(**kn)
+
+
+def test_same_fact_default_is_sourced_from_the_live_constant():
+    """#436 — the knob registry must READ the code, never mirror it.
+
+    config.py's own docstring promises defaults are sourced from live code so the admin view can
+    never drift — but cluster.same_fact was a mirrored string literal, and the default duplicated
+    into SEVEN call sites (registry, corroborate(), four analyse signatures, serving _Assets).
+    When the bar changed 0.82 → 0.90 (measured percolation, cauri 2026-07-17), every copy had to be
+    hunted by hand. This pins the registry to corroborate.SAME_FACT_THRESHOLD; the signature
+    defaults reference the same constant, so the next change is one line.
+    """
+    from maat.config import KNOBS_BY_KEY
+    from maat.pipeline import analyse as pa
+    from maat.pipeline.corroborate import SAME_FACT_THRESHOLD, corroborate
+    import inspect
+
+    assert float(KNOBS_BY_KEY["cluster.same_fact"]["default"]) == SAME_FACT_THRESHOLD
+    # and the pipeline signatures genuinely bind the constant, not a re-typed literal
+    assert inspect.signature(corroborate).parameters["same_fact_threshold"].default == SAME_FACT_THRESHOLD
+    assert inspect.signature(pa.analyse_article).parameters["same_fact_threshold"].default == SAME_FACT_THRESHOLD
+    assert inspect.signature(pa.check_one_claim).parameters["same_fact_threshold"].default == SAME_FACT_THRESHOLD
+    assert inspect.signature(pa.consolidate_claims).parameters["threshold"].default == SAME_FACT_THRESHOLD
+    assert inspect.signature(pa.match_claims).parameters["threshold"].default == SAME_FACT_THRESHOLD
+
+
+def test_a_promoted_same_fact_override_still_beats_the_new_default():
+    """Raising the default must not disturb the operator-override path: a promoted
+    admin.config.promoted for cluster.same_fact wins over SAME_FACT_THRESHOLD, exactly as before."""
+    from maat.config import active_config, pipeline_overrides
+
+    cfg = active_config([{"key": "cluster.same_fact", "value": "0.85"}])
+    assert pipeline_overrides(cfg)["same_fact_threshold"] == 0.85

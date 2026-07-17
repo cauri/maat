@@ -61,7 +61,7 @@ async def embeddings_for(texts: list[str]) -> np.ndarray:
     new vectors. Returns an ``(len(texts), dim)`` **float32** array. Falls back to a plain chunked
     embed if the cache table is unavailable.
 
-    **float32, not float64 (#419).** Cosine at a 0.82 bar needs nowhere near float64's precision,
+    **float32, not float64 (#419).** Cosine at the same-fact bar needs nowhere near float64's precision,
     and the corpus is now large enough that the dtype is a liveness question, not a taste one: the
     float64 matrix is 0.52 GB at 68,249 claims and every downstream consumer immediately makes a
     float32 copy of it (another 0.26 GB) while the original stays alive in the caller. Returning

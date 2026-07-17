@@ -30,6 +30,18 @@ from maat.providers.seam import mistral_embed
 
 log = logging.getLogger(__name__)
 
+# The §5.4 same-fact bar: cosine similarity two claims must clear to be candidates for the same
+# cluster. THE one authoritative default — config.py's knob registry, every pipeline signature and
+# serving's _Assets all read this constant (#436; it had drifted into seven separate literals).
+#
+# 0.90, not 0.82 (cauri, 2026-07-17). Measured on the live corpus (68,249 claims): pairwise cosine
+# p50=0.667 p90=0.730 p99=0.810, so 0.82 sat at ~p99.2 — low enough that 0.76% of ALL pairs were
+# edges and the candidate graph PERCOLATED into one 60,945-claim component. The subdivision
+# fallback in _cluster_component had to re-cut it at 0.84→0.86→0.88→0.90 to break it: the fallback,
+# not the knob, was setting the real bar. Now the knob says what actually happens. Operators can
+# still override via a promoted `cluster.same_fact` (admin.config.promoted wins over this default).
+SAME_FACT_THRESHOLD: float = 0.90
+
 
 @dataclass
 class ClaimRow:
@@ -38,9 +50,11 @@ class ClaimRow:
     article_id: str
     source: str
     # Optional English pivot used ONLY for same-fact clustering (#240): a non-English claim
-    # translated to English so a fact reported across languages clusters as one (mistral_embed is
-    # multilingual but cross-lingual same-fact sits right at the 0.82 bar; the pivot lifts it
-    # clear). Empty → cluster on `text` (identical to pre-#240 behaviour). Display/fact stay `text`.
+    # translated to English so a fact reported across languages clusters as one. mistral_embed is
+    # multilingual, but cross-lingual same-fact pairs score well below same-language ones — they sat
+    # right at the old 0.82 bar and clear the stricter SAME_FACT_THRESHOLD even less often, so the
+    # pivot is what lifts them over it. Watch cross-lingual corroboration first if the bar changes.
+    # Empty → cluster on `text` (identical to pre-#240 behaviour). Display/fact stay `text`.
     embed_text: str = ""
 
 
@@ -138,7 +152,7 @@ def _candidate_pairs(x: np.ndarray, threshold: float, block: int) -> list[tuple[
 
     Computed in row-blocks: each block is (block × n), so peak memory is bounded by ``block`` and
     independent of the corpus size. Only the upper triangle is kept, and only pairs at/above the
-    bar survive — at a 0.82 bar that is a vanishingly small fraction of n², so the returned edge
+    bar survive — at the same-fact bar that is a vanishingly small fraction of n², so the returned edge
     list is tiny even on a corpus where the dense matrix would be tens of gigabytes."""
     n = x.shape[0]
     edges: list[tuple[int, int]] = []
@@ -177,7 +191,7 @@ def _cluster_component(
     **Why this exists.** ``group_by_similarity``'s component step is exact, but exactness alone does
     not bound memory: it assumed a component is small because the bar is strict. Measured on the
     live corpus, that is false. In this embedding space the pairwise cosine distribution is
-    ``p50=0.667, p90=0.730, p99=0.810`` — the 0.82 bar sits at about **p99.2**, so ~0.76% of ALL
+    ``p50=0.667, p90=0.730, p99=0.810`` — the original 0.82 bar sat at about **p99.2**, so ~0.76% of ALL
     pairs are edges, and a graph that dense **percolates**: at 20k claims the largest component is
     15,794 (79% of the corpus), at 68,249 it is **60,945 (89%)**, with every other component tiny
     (62, 52, 46…). One giant hairball plus the real facts. The hairball's dense sub-matrix is
@@ -268,7 +282,7 @@ def group_by_similarity(
     if len(texts) <= 1:
         return [[0]] if texts else []
     x = embeddings if embeddings is not None else mistral_embed(texts)
-    # float32 halves the footprint and is far finer than the precision a 0.82 cosine bar needs.
+    # float32 halves the footprint and is far finer than the precision the cosine bar needs.
     x = np.asarray(x, dtype=np.float32)
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     norms[norms == 0.0] = 1.0  # a missing embedding (zero vector) must not divide by zero
@@ -737,7 +751,7 @@ def corroborate(
     claims: list[ClaimRow],
     bodies: dict[str, str],
     *,
-    same_fact_threshold: float = 0.82,
+    same_fact_threshold: float = SAME_FACT_THRESHOLD,
     duplicate_source_threshold: float = 0.40,
     min_corroboration: int = 2,
     extremity_of: Callable[[str], str] = rate_extremity,
