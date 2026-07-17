@@ -1,0 +1,53 @@
+# Weekly server snapshot (#437) — the copy that survives everything.
+#
+# Layered with the rest of the backup story:
+#   1. Hetzner automated backups: 7 daily whole-disk images — but they are DELETED WITH THE SERVER.
+#   2. Nightly pg_dump on the box (systemd timer): transactionally consistent, so every disk image
+#      contains a guaranteed-restorable dump (a raw copy of a running postgres data dir may not be).
+#   3. THIS: a weekly snapshot, whose lifecycle is independent of the server — it survives server
+#      deletion, and it is created from OUTSIDE the box (GitHub cron), so a compromised or dead box
+#      cannot stop it. Keeps the newest 4; prunes only snapshots this workflow created (label-gated).
+#
+# Residual gap (needs cauri): the Hetzner project's server limit (1) blocks a second-DC dump target;
+# raise the limit in the console and scripts get a Helsinki push target (#437).
+
+name: snapshot
+on:
+  schedule:
+    - cron: "41 4 * * 1" # Mondays 04:41 UTC — after the 03:17 nightly dump, so the image contains it
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create snapshot of maat-dev
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: |
+          set -euo pipefail
+          RESP=$(curl -sf -X POST \
+            -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"snapshot","description":"maat weekly (ci)","labels":{"maat-weekly":"true"}}' \
+            "https://api.hetzner.cloud/v1/servers/141200110/actions/create_image")
+          echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print('image', d['image']['id'], '->', d['action']['status'])"
+
+      - name: Prune — keep newest 4 weekly snapshots
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            "https://api.hetzner.cloud/v1/images?type=snapshot&label_selector=maat-weekly&sort=created:desc&per_page=50" \
+          | python3 -c "
+          import json, sys
+          ids = [i['id'] for i in json.load(sys.stdin)['images']][4:]
+          print('pruning:', ids or 'nothing')
+          for i in ids: print(i)
+          " | tail -n +2 | while read -r ID; do
+            [ -n "$ID" ] && curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
+              "https://api.hetzner.cloud/v1/images/$ID" && echo "deleted $ID"
+          done

@@ -16,17 +16,31 @@ from scripts import watchdog
 
 
 class _FakePool:
-    """Returns per-stage (type, last_seen) exactly as the real bounded aggregate query does."""
+    """Returns per-stage (type, last_seen) exactly as the real bounded aggregate query does.
 
-    def __init__(self, last_seen: dict[str, datetime]):
+    ``backup_age_s`` drives the ops_status('backup') freshness row (#437): a float is seconds since
+    the last successful pg_dump; None means one has never succeeded. Defaults fresh so the stage
+    tests stay about stages."""
+
+    def __init__(self, last_seen: dict[str, datetime], backup_age_s: float | None = 3600.0):
         self._rows = [{"type": t, "last_seen": ts} for t, ts in last_seen.items()]
+        self._backup_age_s = backup_age_s
 
     async def fetch(self, _sql, _types):
         return self._rows
 
+    async def fetchrow(self, _sql):
+        if self._backup_age_s is None:
+            return None
+        return {"age_s": self._backup_age_s}
+
 
 def _ago(**kw) -> datetime:
     return datetime.now(timezone.utc) - timedelta(**kw)
+
+
+async def _fresh_backup(_pool):  # a healthy backup, for tests that are about stages
+    return 3600.0
 
 
 def test_catches_the_real_outage_a_dead_cluster_stage_behind_live_ingestion():
@@ -147,6 +161,7 @@ def test_intentionally_silent_stages_do_not_alert(monkeypatch):
         ]
 
     monkeypatch.setattr(wd, "_stage_rows", fake_rows)
+    monkeypatch.setattr(wd, "_backup_age_s", _fresh_backup)
     healthy, alerts, health = asyncio.run(wd.check(object()))
 
     assert healthy is True, "the box is in its intended state — the dead-man's switch must stay fed"
@@ -176,6 +191,7 @@ def test_a_stage_pages_the_moment_its_switch_is_turned_back_on(monkeypatch):
         return [{"stage": "cluster", "last_seen": None}]  # …and cluster is still dead
 
     monkeypatch.setattr(wd, "_stage_rows", fake_rows)
+    monkeypatch.setattr(wd, "_backup_age_s", _fresh_backup)
     healthy, alerts, _ = asyncio.run(wd.check(object()))
 
     assert healthy is False, "an armed engine with a dead cluster stage is THE outage — it must page"
@@ -201,6 +217,7 @@ def test_suppression_requires_an_explicit_switch_never_a_default(monkeypatch):
         return [{"stage": "cluster", "last_seen": None}]
 
     monkeypatch.setattr(wd, "_stage_rows", fake_rows)
+    monkeypatch.setattr(wd, "_backup_age_s", _fresh_backup)
     healthy, alerts, _ = asyncio.run(wd.check(object()))
 
     assert healthy is False, "an UNSET gate must alert — silence is only ever opt-in"
@@ -210,3 +227,30 @@ def test_suppression_requires_an_explicit_switch_never_a_default(monkeypatch):
     monkeypatch.setenv("MAAT_CORROBORATE_ENABLED", "false")
     healthy, _, _ = asyncio.run(wd.check(object()))
     assert healthy is False, "only the exact string '0' suppresses; anything else alerts"
+
+
+# --- #437: a backup that silently stops must page --------------------------------------------
+
+
+def test_a_backup_that_never_succeeded_pages():
+    """No ops_status row (or no table) = no successful pg_dump has ever been recorded. That is not
+    a neutral state: the one artefact meant to survive everything else failing does not exist."""
+    pool = _FakePool({t: _ago(minutes=5) for t in watchdog.STAGE_EVENT_TYPES.values()},
+                     backup_age_s=None)
+    healthy, alerts, health = asyncio.run(watchdog.check(pool))
+    assert healthy is False
+    assert any("backup" in a and "missing" in a for a in alerts)
+    assert {s["stage"]: s["freshness"] for s in health}["backup"] == "never"
+
+
+def test_a_stale_backup_pages_a_fresh_one_does_not():
+    """48h threshold: one missed night doesn't page (flaky run ≠ dead timer), a dead timer does."""
+    stale = _FakePool({t: _ago(minutes=5) for t in watchdog.STAGE_EVENT_TYPES.values()},
+                      backup_age_s=3 * 24 * 3600.0)
+    healthy, alerts, _ = asyncio.run(watchdog.check(stale))
+    assert healthy is False and any("backup" in a and "stale" in a for a in alerts)
+
+    one_missed_night = _FakePool({t: _ago(minutes=5) for t in watchdog.STAGE_EVENT_TYPES.values()},
+                                 backup_age_s=30 * 3600.0)
+    healthy, alerts, _ = asyncio.run(watchdog.check(one_missed_night))
+    assert healthy is True and alerts == []
