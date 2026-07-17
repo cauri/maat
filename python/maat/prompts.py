@@ -26,6 +26,7 @@ from maat.pipeline.classify import PROMPT as CLASSIFY_PROMPT
 from maat.pipeline.curation import _DRAFT_GEOTAG_PROMPT as CURATION_GEOTAG_PROMPT
 from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
+from maat.learning.hindsight import HINDSIGHT_RESOLVE_PROMPT, HINDSIGHT_TRIAGE_PROMPT
 from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT
 from maat.pipeline.grounding import GROUNDING_PROMPT
 from maat.pipeline.triage import TRIAGE_LLM_PROMPT
@@ -269,6 +270,19 @@ PROMPTS: list[dict] = [
      "content farms are dropped before they ever become an article. Runs once per new domain.",
      "placeholders": ["{domain}", "{headline}", "{channel}"]},
     # --- draft: gated backend prompts, surfaced read-only for cauri review (NOT active) ---
+    {"key": "hindsight_triage", "label": "Hindsight triage (worth resolving?)",
+     "default": HINDSIGHT_TRIAGE_PROMPT, "status": "draft", "source": "maat/learning/hindsight.py",
+     "description": "Screens an outlet's past claims before hindsight resolution (#435): keep only "
+     "falsifiable AND discriminating claims — mundane-true claims resolve true for every outlet "
+     "and measure nothing. Fails closed (a failed batch is dropped, never resolved unscreened).",
+     "placeholders": ["{claims}"]},
+    {"key": "hindsight_resolve", "label": "Hindsight resolution (did the claim prove true?)",
+     "default": HINDSIGHT_RESOLVE_PROMPT, "status": "draft", "source": "maat/learning/hindsight.py",
+     "description": "Resolves ONE past claim against today's knowledge (#435), preferring primary "
+     "evidence (the tier ladder). The verdict only scores when an NLI model AGREES with the quoted "
+     "evidence — an LLM's say-so is never an outcome. Confirmed/refuted outcomes anchor reputation "
+     "outside the corroboration loop at full weight.",
+     "placeholders": ["{claim}", "{source}", "{published}"]},
     {"key": "authority_search", "label": "Authority search (seek the claim's source of truth)",
      "default": AUTHORITY_SEARCH_PROMPT, "status": "draft", "source": "maat/pipeline/authority.py",
      "description": "The tiered-authority leg (#434): for each analysed claim, identify WHO could "

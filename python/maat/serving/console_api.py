@@ -351,7 +351,10 @@ def _make_console_router() -> Any:
                 "select data from events where type = 'cluster.corroborated' order by id"
             )
         ]
-        rep_by = {r.source: r for r in fold_reputation(corr_events)}
+        from maat.learning.trajectory import load_hindsight
+
+        rep_by = {r.source: r
+                  for r in fold_reputation(corr_events, hindsight=await load_hindsight(pool))}
         traj_by = reputation_trajectories(corr_events)  # {source: [score, …]} sparkline
         registry = sreg.fold_sources(
             _jload(x["data"])

@@ -65,6 +65,15 @@ ADMIN_EVENT_TYPES = frozenset(
 # idempotent per (cluster_id, calendar-day).
 CLUSTER_SNAPSHOT = "cluster.snapshot"
 
+# Hindsight reputation (#435): one PAST claim resolved against TODAY'S knowledge — the exogenous
+# outcome source that anchors reputation outside the corroboration loop. Emitted by
+# scripts/hindsight_backfill.py (one-shot, per outlet); read raw from the events log by the
+# reputation consumers (no projection — bounded count, indexed by type). Payload:
+# {source, fact, outcome: confirmed|refuted|unresolved, article_url, published_at,
+#  evidence: {url, quote, tier}, provenance: "hindsight"}. Stream id is stable per (source, fact)
+# so re-runs re-assert rather than double-count.
+FACT_HINDSIGHT = "fact.hindsight"
+
 # Primary-source grounding (#228, §5/§8): the grounding agent (agents.grounding_agent) judges
 # whether a cluster's fact is SUPPORTED / CONTRADICTED / NOT_ADDRESSED by its primary source, and
 # emits this with the grounding-refined confidence. maat-kerneld updates the cluster row (grounding
