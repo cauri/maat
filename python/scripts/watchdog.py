@@ -139,20 +139,6 @@ async def check(pool) -> tuple[bool, list[str], list[dict]]:
     alerts: list[str] = []
     healthy = True
 
-    backup_age = await _backup_age_s(pool)
-    if backup_age is None or backup_age > BACKUP_STALE_S:
-        healthy = False
-        alerts.append(
-            "CRITICAL backup is "
-            + ("missing — no successful pg_dump has ever been recorded"
-               if backup_age is None
-               else f"stale — last success {_fmt_age(backup_age)} ago (threshold 48h)")
-        )
-    health.append({
-        "stage": "backup", "event_type": "ops_status", "age_s": backup_age,
-        "freshness": "never" if backup_age is None
-        else ("stalled" if backup_age > BACKUP_STALE_S else "fresh"),
-    })
     for s in health:
         if s["stage"] in silent:
             # Stale on purpose. Shown in the status line, never alerted, never unhealthy — see
@@ -172,6 +158,25 @@ async def check(pool) -> tuple[bool, list[str], list[dict]]:
                 f"stage '{s['stage']}' ({s['event_type']}) is {s['freshness']} — "
                 f"last seen {_fmt_age(s['age_s'])} ago"
             )
+
+    # Backup freshness (#437) — AFTER the stage loop, so this appended row is never re-processed
+    # by it. The first deploy appended it before the loop and every missing-backup check produced
+    # TWO alert lines ("CRITICAL backup is missing" + a generic "stage 'backup' is never"): noise,
+    # and noise in an alarm is how alarms get ignored.
+    backup_age = await _backup_age_s(pool)
+    if backup_age is None or backup_age > BACKUP_STALE_S:
+        healthy = False
+        alerts.append(
+            "CRITICAL backup is "
+            + ("missing — no successful pg_dump has ever been recorded"
+               if backup_age is None
+               else f"stale — last success {_fmt_age(backup_age)} ago (threshold 48h)")
+        )
+    health.append({
+        "stage": "backup", "event_type": "ops_status", "age_s": backup_age,
+        "freshness": "never" if backup_age is None
+        else ("stalled" if backup_age > BACKUP_STALE_S else "fresh"),
+    })
     return healthy, alerts, health
 
 

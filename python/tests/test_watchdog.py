@@ -254,3 +254,15 @@ def test_a_stale_backup_pages_a_fresh_one_does_not():
                                  backup_age_s=30 * 3600.0)
     healthy, alerts, _ = asyncio.run(watchdog.check(one_missed_night))
     assert healthy is True and alerts == []
+
+
+def test_a_missing_backup_produces_exactly_one_alert_line():
+    """#437 follow-up — the first deploy double-alerted: the backup health row was appended BEFORE
+    the stage loop, so the loop re-processed it and every check printed both "CRITICAL backup is
+    missing" AND a generic "stage 'backup' is never". Noise in an alarm is how alarms get ignored —
+    one condition, one line."""
+    pool = _FakePool({t: _ago(minutes=5) for t in watchdog.STAGE_EVENT_TYPES.values()},
+                     backup_age_s=None)
+    healthy, alerts, _ = asyncio.run(watchdog.check(pool))
+    assert healthy is False
+    assert len([a for a in alerts if "backup" in a]) == 1, alerts
