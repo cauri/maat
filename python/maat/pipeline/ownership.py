@@ -136,3 +136,102 @@ def fold_ownership(resolved: Iterable[Mapping]) -> dict[str, str]:
         for m in members:
             out[m] = label
     return out
+
+
+# --- evidence-gated collapse (#425): co-ownership is a hypothesis, not a merge --------------------
+
+# Same-fact co-occurrences a co-owned pair needs before it collapses (when no shared REFUTED fact
+# exists — one of those collapses the pair on its own). DRAFT knob.
+_MIN_SHARED_FACTS = 2
+
+
+def evidenced_ownership(
+    auto: Mapping[str, str], history: Iterable[Mapping], *, min_shared: int = _MIN_SHARED_FACTS,
+) -> dict[str, str]:
+    """Keep only the co-owned pairs that demonstrably SHARE OUTPUT (#425) — cauri's design.
+
+    "Co-owned outlets that make the same false claims — clear evidence of news laundering. Two
+    outlets that do not share the same news (the Condé Nast pattern) need not be collapsed. State
+    control is just like any other ownership."
+
+    ``auto`` is ``fold_ownership``'s blanket map (co-ownership per Wikidata); ``history`` is the
+    trajectory (``load_trajectory`` rows). A co-owned PAIR survives when:
+      * it shares at least one fact that resolved REFUTED — the same false claim from commonly
+        owned outlets is the strongest laundering signal, sufficient on its own; or
+      * it co-occurs on ``min_shared`` or more same-fact clusters — shared output, the workable
+        tier while refutations stay rare (no automated contradiction detector feeds outcomes yet).
+    Surviving pairs re-union-find; components keep their group label; everything else DROPS OUT of
+    the map — a co-owned outlet with no shared output counts as the independent originator it
+    demonstrably is. A wrong merge HIDES real corroboration, so the doubt resolves to independence
+    (the module's standing posture) — while the CONTENT-based collapse signals (lexical
+    near-duplication, citation cascade, wire credit) still catch verbatim laundering immediately,
+    with or without ownership: ownership was the only content-blind edge, and now it needs evidence.
+
+    Operator ``admin.source.grouped`` entries are merged OVER this map by the callers, unchanged —
+    a human's explicit group never needs statistical evidence.
+    """
+    if not auto:
+        return {}
+    # Which fact-buckets did each co-owned source appear in, and how did each fact resolve?
+    from maat.learning.calibration import REFUTED, resolve_outcome  # local: avoid an import cycle
+
+    by_fact: dict[str, list[Mapping]] = {}
+    for ev in history:
+        key = " ".join(str(ev.get("fact", "")).lower().split())
+        if key:
+            by_fact.setdefault(key, []).append(ev)
+
+    pair_shared: dict[tuple[str, str], int] = {}
+    pair_refuted: dict[tuple[str, str], int] = {}
+    for hist in by_fact.values():
+        first, last = hist[0], hist[-1]
+        outcome = resolve_outcome(
+            int(first.get("independent_originators", 0)),
+            int(last.get("independent_originators", 0)),
+            latest_has_primary=bool(last.get("has_primary", False)),
+            corrected=any(h.get("corrected") for h in hist),
+            grounding=last.get("grounding"),
+        )
+        # Trajectory sources are RAW strings; the ownership map is keyed canonical (#36's lesson).
+        canons = sorted({
+            c for s in (last.get("sources") or []) if (c := canonical_source(str(s))) in auto
+        })
+        for i, a in enumerate(canons):
+            for b in canons[i + 1:]:
+                if auto.get(a) != auto.get(b):
+                    continue  # different owners — sharing a fact is just corroboration
+                pair_shared[(a, b)] = pair_shared.get((a, b), 0) + 1
+                if outcome == REFUTED:
+                    pair_refuted[(a, b)] = pair_refuted.get((a, b), 0) + 1
+
+    survivors = [
+        pair for pair, n in pair_shared.items()
+        if pair_refuted.get(pair, 0) >= 1 or n >= min_shared
+    ]
+    if not survivors:
+        return {}
+    # Union-find over the surviving pairs only — a blanket group can SPLIT into evidenced subgroups.
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in survivors:
+        parent.setdefault(a, a)
+        parent.setdefault(b, b)
+        parent[find(a)] = find(b)
+    groups: dict[str, list[str]] = {}
+    for c in parent:
+        groups.setdefault(find(c), []).append(c)
+    out: dict[str, str] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        label = Counter(auto[m] for m in members).most_common(1)[0][0]
+        for m in members:
+            out[m] = label
+    return out
