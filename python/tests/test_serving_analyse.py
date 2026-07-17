@@ -425,7 +425,7 @@ def test_share_copy_tally_and_publisher_record():
     share = sa.share_copy(analysis, sa.public_reasons(analysis))
     assert share["tally"] == {"total": 3, "corroborated": 2, "single_source": 1,
                               "disputed": 0, "primary": 0}
-    assert "83/100" in share["linkedin_text"]          # publisher track record surfaced
+    assert "83%" in share["linkedin_text"]             # publisher track record surfaced (percentage)
     assert share["headline"] == "Corroborated · 72/100"
 
 
@@ -450,7 +450,7 @@ def test_share_copy_from_payload_rebuilds_from_a_stored_dict():
     assert share["headline"] == "Fails verification · 20/100"
     assert share["tally"] == {"total": 3, "corroborated": 2, "single_source": 1,
                               "disputed": 0, "primary": 0}
-    assert "74/100" in share["linkedin_text"]
+    assert "74%" in share["linkedin_text"]
     assert "false" not in share["og_description"].lower()
 
 

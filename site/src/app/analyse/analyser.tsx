@@ -500,19 +500,29 @@ export default function Analyser() {
             {(analysis?.source ?? meta?.source) || ""}
             {(analysis?.date ?? meta?.date) ? ` · ${analysis?.date ?? meta?.date}` : ""}
           </div>
-          {analysis?.publisher && (
-            <div className={`pub-badge ${analysis.publisher.rated ? "rated" : ""}`}>
-              {analysis.publisher.rated ? (
-                <>
-                  Publisher track record: <strong>{analysis.publisher.score}/100</strong>
-                </>
-              ) : analysis.publisher.review_started ? (
-                <>No track record yet — Maat has started reviewing this publisher&rsquo;s past reporting.</>
-              ) : (
-                <>Publisher not yet rated.</>
-              )}
-            </div>
-          )}
+          {analysis?.publisher &&
+            (analysis.publisher.rated ? (
+              <div className="pub-rating">
+                <div className="pub-score">
+                  <span className="pub-num">{analysis.publisher.score}</span>
+                  <span className="pub-denom">%</span>
+                </div>
+                <div className="pub-meta">
+                  <span className="pub-label">Publisher track record</span>
+                  <span className="pub-sub">
+                    How this outlet&rsquo;s past reporting has held up against independent sources over time.
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="pub-badge">
+                {analysis.publisher.review_started ? (
+                  <>No track record yet. Maat has started reviewing this publisher&rsquo;s past reporting for accuracy.</>
+                ) : (
+                  <>Publisher not yet rated.</>
+                )}
+              </div>
+            ))}
         </div>
       )}
 
