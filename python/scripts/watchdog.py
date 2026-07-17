@@ -110,12 +110,49 @@ async def _stage_rows(pool) -> list[dict]:
     return [{"type": r["type"], "created_at": r["last_seen"]} for r in rows]
 
 
+# A nightly backup older than this is a failing backup. 48h = one missed night plus slack, so a
+# single flaky run doesn't page but a genuinely dead timer does.
+BACKUP_STALE_S = 48 * 3600
+
+
+async def _backup_age_s(pool) -> float | None:
+    """Seconds since the last successful pg_dump (#437), or None if one has never succeeded.
+
+    /root/backup_maat.sh upserts ops_status('backup') on success — writing INTO postgres precisely
+    so this service can read it over the connection it already holds. A backup that silently stops
+    is invisible until the day it's needed; that is the 27-day failure shape again, aimed at the
+    one artefact meant to survive everything else failing. So its freshness pages like a stage."""
+    try:
+        row = await pool.fetchrow(
+            "select extract(epoch from now() - updated_at) as age_s "
+            "from ops_status where key = 'backup'"
+        )
+    except Exception:  # noqa: BLE001 - table not created yet (backup never ran) → same as never
+        return None
+    return float(row["age_s"]) if row else None
+
+
 async def check(pool) -> tuple[bool, list[str], list[dict]]:
     """(healthy, alert lines, per-stage detail). Healthy = no CRITICAL stage stalled or never-run."""
     health = stage_health(await _stage_rows(pool))
     silent = _expected_silent()
     alerts: list[str] = []
     healthy = True
+
+    backup_age = await _backup_age_s(pool)
+    if backup_age is None or backup_age > BACKUP_STALE_S:
+        healthy = False
+        alerts.append(
+            "CRITICAL backup is "
+            + ("missing — no successful pg_dump has ever been recorded"
+               if backup_age is None
+               else f"stale — last success {_fmt_age(backup_age)} ago (threshold 48h)")
+        )
+    health.append({
+        "stage": "backup", "event_type": "ops_status", "age_s": backup_age,
+        "freshness": "never" if backup_age is None
+        else ("stalled" if backup_age > BACKUP_STALE_S else "fresh"),
+    })
     for s in health:
         if s["stage"] in silent:
             # Stale on purpose. Shown in the status line, never alerted, never unhealthy — see
