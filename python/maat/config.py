@@ -28,6 +28,7 @@ from maat.pipeline.corroborate import (
     _W_BALD,
     _W_NAMED,
     _W_OWN,
+    SAME_FACT_THRESHOLD,
 )
 from maat.pipeline.extremity import EXTREMITY_MODEL
 from maat.providers.seam import CLAUDE_JUDGE, MISTRAL_BULK, MISTRAL_EMBED
@@ -125,8 +126,11 @@ KNOBS: list[dict] = [
      "type": "float", "default": str(_CONFIDENCE_CAP), "core": True, "source": "corroborate.py:_CONFIDENCE_CAP",
      "help": "The most confidence Maat will ever show — it never claims 100% certainty."},
     {"key": "cluster.same_fact", "label": "Same-story similarity", "group": "Clustering (§5.4-5.5)",
-     "type": "float", "default": "0.82", "core": True, "source": "corroborate.py:same_fact_threshold",
-     "help": "How similar two articles must be to count as the SAME story. Higher = stricter (fewer merges)."},
+     "type": "float", "default": str(SAME_FACT_THRESHOLD), "core": True,
+     "source": "corroborate.py:SAME_FACT_THRESHOLD",
+     "help": "How similar two articles must be to count as the SAME story. Higher = stricter (fewer "
+             "merges). 0.90 measured 2026-07: at 0.82 the corpus percolated into one giant cluster "
+             "and the safety-net, not this knob, set the real bar."},
     {"key": "cluster.duplicate_source", "label": "Duplicate-source similarity",
      "group": "Clustering (§5.4-5.5)", "type": "float", "default": "0.40", "core": True,
      "source": "corroborate.py:duplicate_source_threshold",
