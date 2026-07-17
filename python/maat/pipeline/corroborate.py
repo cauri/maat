@@ -825,6 +825,7 @@ def corroborate_fixed(
     primary_lift: float | None = None,
     cap: float | None = None,
     grounding: str | None = None,
+    primary_urls: set[str] | None = None,
 ) -> Corroboration:
     """Recompute ONE cluster over a FIXED claim set (operator-decided) — no same-fact
     re-clustering, no LLM. The admin console (P8 F3) uses this when an operator splits,
@@ -837,6 +838,11 @@ def corroborate_fixed(
     record — corroboration by established outlets weighs more than by unknowns. None → unchanged.
     ``attribution`` (S2 #400): per-article_id weight overrides for the sourcing scan — the analyse
     path passes the pasted article's CLAIM-aware attribution (voice/speaker). None → body-scan.
+    ``primary_urls`` (#434): article_ids the AUTHORITY-SEEKING leg verified as tier-1/2 primary
+    sources (the paper / the filing / the institution's own release). ``is_primary_source`` is a
+    narrow name heuristic that most real authorities (courts, ccTLD statistics offices, journals)
+    do not match — this is the explicit flag for evidence that was FOUND by seeking the authority,
+    gated by the same NLI + grounding checks as everything else. ORed into the primary detection.
     """
     if not claims:
         raise ValueError("corroborate_fixed needs at least one claim")
@@ -851,7 +857,9 @@ def corroborate_fixed(
         originators, bodies, art_source, reputation=reputation, attribution=attribution,
         rep_unrated=rep_unrated, rep_floor=rep_floor,
     )
-    primary = any(is_primary_source(s) for s in {c.source for c in claims})
+    primary = any(is_primary_source(s) for s in {c.source for c in claims}) or bool(
+        primary_urls and any(c.article_id in primary_urls for c in claims)
+    )
     return Corroboration(
         fact=claims[0].text,
         claim_ids=[c.id for c in claims],

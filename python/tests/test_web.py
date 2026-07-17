@@ -246,6 +246,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     assert set(prompts.PROMPTS_BY_KEY) == {
         "extract", "classify", "extremity", "acquire_queries", "source_gate",  # active backend
         "topics_enrich", "curation_geotag", "triage_llm", "grounding",  # draft backend (gated)
+        "authority_search",  # draft backend (#434) — the tiered-authority leg, cauri to review
         "prompt_chat_agent", "console_assistant", "sia",  # draft: chat helper, page assistant, Sia (#306)
         "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
     }
@@ -260,7 +261,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
         by_status.setdefault(p["status"], set()).add(p["key"])
     assert by_status["active"] == {"extract", "classify", "extremity", "acquire_queries", "source_gate"}
     assert by_status["draft"] == {
-        "topics_enrich", "curation_geotag", "triage_llm", "grounding",
+        "topics_enrich", "curation_geotag", "triage_llm", "grounding", "authority_search",
         "prompt_chat_agent", "console_assistant", "sia"
     }
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
@@ -268,7 +269,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     # review. Only on-device (Swift mirrors) stay read-only / out of the editable set.
     assert prompts.EDITABLE_KEYS == frozenset(
         {"extract", "classify", "extremity", "acquire_queries", "source_gate",
-         "topics_enrich", "curation_geotag", "triage_llm", "grounding",
+         "topics_enrich", "curation_geotag", "triage_llm", "grounding", "authority_search",
          "prompt_chat_agent", "console_assistant", "sia"}
     )
     assert "summarizer_ondevice" not in prompts.EDITABLE_KEYS
