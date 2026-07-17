@@ -77,6 +77,18 @@ def _source_is_independent_originator(source: str, originators: list[list[str]])
     return True
 
 
+# Provenance weights for the confirmation rate (#435) — the circle-breaker. A corroboration-derived
+# outcome is the corpus agreeing with itself: resolve_outcome CONFIRMS at >=3 independent
+# originators, and reputation then weights the very corroboration that produced it (S1). Left
+# undiscounted, reputation and corroboration feed each other with no external anchor — the same
+# closed loop, one level up, as the outage ("Maat never asks anything outside itself"). A HINDSIGHT
+# outcome is exogenous: a past claim resolved against today's knowledge (primary evidence, NLI-
+# gated), so it anchors the loop from outside. Full weight for hindsight, half for corroboration —
+# exogenous ground truth outweighs corpus self-agreement 2:1. DRAFT knobs, review with cauri.
+_HINDSIGHT_WEIGHT = 1.0
+_CORROBORATION_WEIGHT = 0.5
+
+
 @dataclass
 class _SourceAccumulator:
     """Running tallies per source, updated as we fold events."""
@@ -93,6 +105,13 @@ class _SourceAccumulator:
     facts_confirmed: int = 0
     facts_refuted: int = 0
     facts_unresolved: int = 0
+    # provenance-weighted outcome sums (#435): raw ints above stay the honest display/floor counts;
+    # the RATE uses these, so hindsight outcomes move it 2x what corroboration-derived ones do.
+    confirmed_weighted: float = 0.0
+    refuted_weighted: float = 0.0
+    # provenance detail (display: "6 of 9 outcomes from hindsight")
+    hindsight_confirmed: int = 0
+    hindsight_refuted: int = 0
 
 
 @dataclass(frozen=True)
@@ -125,13 +144,20 @@ class SourceReputation:
     facts_confirmed: int                # facts from this source that later confirmed
     facts_refuted: int                  # facts from this source that later were refuted
     facts_unresolved: int               # facts still in flight (corroborating / unconfirmed)
-    outcome_n: int                      # total facts with a resolved terminal outcome
-    confirmation_rate: float | None     # confirmed / (confirmed + refuted); None if no terminal outcomes
+    outcome_n: int                      # total facts with a resolved terminal outcome (RAW count —
+                                        # the "enough information" floor reads this, never weights)
+    confirmation_rate: float | None     # provenance-WEIGHTED (#435): hindsight outcomes count
+                                        # _HINDSIGHT_WEIGHT, corroboration-derived ones
+                                        # _CORROBORATION_WEIGHT; None if no terminal outcomes
+
+    # -- provenance detail (#435): how many of the outcomes came from hindsight resolution --
+    hindsight_confirmed: int = 0
+    hindsight_refuted: int = 0
 
     # -- composite reliability rank (not a score, a sort key) --
     # Higher = more reliably confirmed. Tie-break: independent_rate, then appearances.
     # Never collapsed into a single magic number — each dimension is surfaced separately.
-    _reliability_rank: float = field(repr=False)
+    _reliability_rank: float = field(repr=False, default=0.0)
 
 
 def _make_reputation(source: str, acc: _SourceAccumulator) -> SourceReputation:
@@ -145,8 +171,9 @@ def _make_reputation(source: str, acc: _SourceAccumulator) -> SourceReputation:
         else 0.0
     )
     outcome_n = acc.facts_confirmed + acc.facts_refuted
+    weighted_total = acc.confirmed_weighted + acc.refuted_weighted
     confirmation_rate = (
-        round(acc.facts_confirmed / outcome_n, 3) if outcome_n else None
+        round(acc.confirmed_weighted / weighted_total, 3) if outcome_n and weighted_total else None
     )
     # Reliability rank: confirmed_rate (primary) × independent_rate (secondary).
     # Sources with no resolved outcomes rank below any source that has.
@@ -169,6 +196,8 @@ def _make_reputation(source: str, acc: _SourceAccumulator) -> SourceReputation:
         facts_unresolved=acc.facts_unresolved,
         outcome_n=outcome_n,
         confirmation_rate=confirmation_rate,
+        hindsight_confirmed=acc.hindsight_confirmed,
+        hindsight_refuted=acc.hindsight_refuted,
         _reliability_rank=round(rank, 4),
     )
 
@@ -183,6 +212,7 @@ class _FactTracker:
 def fold_reputation(
     events: Iterable[Mapping],
     *,
+    hindsight: Iterable[Mapping] = (),
     attribution_weight_fn=attribution_weight,
 ) -> list[SourceReputation]:
     """Fold the `cluster.corroborated` event stream into per-source reputation records.
@@ -261,13 +291,41 @@ def fold_reputation(
             if is_solo and is_extraordinary:
                 acc.solo_extraordinary += 1
 
-            # Outcome accounting (truth-over-time, not consensus).
+            # Outcome accounting (truth-over-time, not consensus). Corroboration-derived
+            # outcomes carry the DISCOUNTED weight (#435): resolve_outcome confirmed this fact
+            # because the corpus agreed with itself — a real signal, but not an external anchor.
             if outcome == CONFIRMED:
                 acc.facts_confirmed += 1
+                acc.confirmed_weighted += _CORROBORATION_WEIGHT
             elif outcome == REFUTED:
                 acc.facts_refuted += 1
+                acc.refuted_weighted += _CORROBORATION_WEIGHT
             else:
                 acc.facts_unresolved += 1
+
+    # Pass 3 (#435): HINDSIGHT outcomes — past claims resolved against today's knowledge (primary
+    # evidence, NLI-gated; see learning/hindsight.py). Exogenous, so they carry FULL weight: this
+    # is the anchor that breaks the reputation↔corroboration circle. They are outcomes only —
+    # never appearances, never independence signals (they carry no cluster structure), so
+    # independent_rate and the presence signals stay exactly what corroboration measured.
+    for row in hindsight:
+        source = str(row.get("source") or "")
+        outcome = str(row.get("outcome") or "")
+        if not source or outcome not in ("confirmed", "refuted", "unresolved"):
+            continue
+        if source not in accs:
+            accs[source] = _SourceAccumulator()
+        acc = accs[source]
+        if outcome == "confirmed":
+            acc.facts_confirmed += 1
+            acc.hindsight_confirmed += 1
+            acc.confirmed_weighted += _HINDSIGHT_WEIGHT
+        elif outcome == "refuted":
+            acc.facts_refuted += 1
+            acc.hindsight_refuted += 1
+            acc.refuted_weighted += _HINDSIGHT_WEIGHT
+        else:
+            acc.facts_unresolved += 1
 
     records = [_make_reputation(src, acc) for src, acc in accs.items()]
     # Sort by reliability descending, then source name for determinism.

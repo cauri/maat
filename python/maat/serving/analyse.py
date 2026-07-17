@@ -49,7 +49,7 @@ from maat.acquire import apify, gdelt, source_gate
 from maat.acquire.fetch import FetchedPage, fetch_article, fetch_page
 from maat.acquire.source_gate import prefiltered_reject
 from maat.learning.reputation import SourceReputation, fold_reputation, reputation_score
-from maat.learning.trajectory import load_trajectory
+from maat.learning.trajectory import load_hindsight, load_trajectory
 from maat import config as config_mod
 from maat.pipeline.analyse import (
     AnalyseError,
@@ -379,7 +379,10 @@ async def _load_assets(pool: Any) -> _Assets:
     # Only sources whose track record rests on enough resolved outcomes are rated — Maat never
     # rests a reputation on too little info (cauri). Canonical-aware, so a pasted bbc.co.uk finds
     # a record stored under bbc.com / "BBC News".
-    reputation = build_reputation_map(fold_reputation(history), floor=_REPUTATION_FLOOR)
+    reputation = build_reputation_map(
+        fold_reputation(history, hindsight=await load_hindsight(pool)),
+        floor=_REPUTATION_FLOOR,
+    )
 
     auto_owner = fold_ownership(
         json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in owner_rows

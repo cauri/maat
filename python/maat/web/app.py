@@ -54,7 +54,7 @@ from maat.learning.reputation import (
     reputation_trajectories,
 )
 from maat.learning.rl import policy_step
-from maat.learning.trajectory import load_trajectory
+from maat.learning.trajectory import load_hindsight, load_trajectory
 from maat.serving.stories import StoryView, load_story_detail, load_story_views
 from maat.learning import source_registry as sreg
 from maat.acquire.clean import clean_article
@@ -775,7 +775,7 @@ async def sources_view(ok: str = "") -> str:
         json.loads(r["data"]) if isinstance(r["data"], str) else r["data"]
         for r in await pool.fetch("select data from events where type='cluster.corroborated' order by id")
     ]
-    rep_by = {r.source: r for r in fold_reputation(history)}
+    rep_by = {r.source: r for r in fold_reputation(history, hindsight=await load_hindsight(pool))}
     reg_rows = await pool.fetch(
         "select data from events where type in ($1, $2) order by id",
         events.SOURCE_REGISTERED, events.SOURCE_STATE_CHANGED,
@@ -1084,7 +1084,7 @@ async def reputation_view(ok: str = "") -> str:
     confirmation/refutation outcomes where the trajectory resolved them.
     """
     history = await _corroboration_history(app.state.pool)
-    reps = fold_reputation(history)
+    reps = fold_reputation(history, hindsight=await load_hindsight(app.state.pool))
     return _doc(_reputation_page(reps, len(history)), "reputation", "reputation", flash=ok)
 
 
@@ -1785,7 +1785,7 @@ async def _source_ratings(pool) -> list[dict]:
     from collections import defaultdict
 
     history = await _corroboration_history(pool)
-    reps = fold_reputation(history)
+    reps = fold_reputation(history, hindsight=await load_hindsight(pool))
     rep_by_src = {r.source: r for r in reps}
     trajectories = reputation_trajectories(history)
 

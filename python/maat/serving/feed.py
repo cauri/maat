@@ -44,7 +44,7 @@ from maat.learning.accuracy import lifecycle_by_fact
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.source_learning import learn_preferences
 from maat.learning.source_registry import fold_sources, pending_sources
-from maat.learning.trajectory import load_trajectory
+from maat.learning.trajectory import load_hindsight, load_trajectory
 from maat.pipeline.corroborate import confidence_label, is_primary_source
 from maat.pipeline.curation import Story as CurationStory, curate
 from maat.serving.buildcache import VersionCache, data_version
@@ -872,7 +872,9 @@ def _make_router() -> Any:
                     payload, lifecycle_by_fact(history, datetime.now(timezone.utc))
                 )
             if history and reputation:
-                payload["source_reputation"] = _reputation_map(fold_reputation(history))
+                payload["source_reputation"] = _reputation_map(
+                    fold_reputation(history, hindsight=await load_hindsight(pool))
+                )
         _FEED_CACHE.put(cache_key, version, payload)
         return JSONResponse(payload)
 
@@ -883,7 +885,7 @@ def _make_router() -> Any:
         ingestion clock actuates these (re-rank within budget + deepen top sources, maat/acquire/steer.py)."""
         pool = request.app.state.pool
         history = await _load_corroboration_history(pool)
-        prefs = learn_preferences(fold_reputation(history))
+        prefs = learn_preferences(fold_reputation(history, hindsight=await load_hindsight(pool)))
         return JSONResponse(_preferences_payload(prefs))
 
     @router.get("/story/{cluster_id}", response_class=JSONResponse)

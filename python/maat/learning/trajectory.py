@@ -68,3 +68,24 @@ async def load_trajectory(pool: Any) -> list[dict]:
         return [_snapshot_to_dict(r) for r in rows]
     rows = await pool.fetch(_FALLBACK_QUERY)  # nothing harvested yet — keep the views alive
     return [_jobj(r["data"]) for r in rows]
+
+
+async def load_hindsight(pool: Any) -> list[dict]:
+    """The ``fact.hindsight`` outcomes (#435), latest-per-stream — the exogenous rows
+    ``fold_reputation(hindsight=…)`` anchors reputation with.
+
+    Latest-per-stream is the re-assert contract: a re-run of the backfill for one outlet emits the
+    same stream ids, so an updated resolution REPLACES the old outcome instead of double-counting.
+    Bounded: one indexed type-scan over a stream that grows by design in the hundreds, not the
+    millions. Missing table / no events → empty (reputation then runs exactly as before)."""
+    try:
+        rows = await pool.fetch(
+            "select stream_id, data from events where type = 'fact.hindsight' order by id"
+        )
+    except Exception:  # noqa: BLE001 - events table unavailable → no hindsight, never a crash
+        return []
+    latest: dict[str, dict] = {}
+    for r in rows:
+        d = r["data"]
+        latest[r["stream_id"]] = json.loads(d) if isinstance(d, str) else d
+    return list(latest.values())

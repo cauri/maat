@@ -25,7 +25,7 @@ from typing import Any
 
 from maat.learning.reputation import fold_reputation, reputation_score
 from maat.learning.story_credibility import FactView, StoryScore, score_story
-from maat.learning.trajectory import load_trajectory
+from maat.learning.trajectory import load_hindsight, load_trajectory
 from maat.serving.buildcache import VersionCache, data_version
 
 
@@ -363,7 +363,9 @@ async def _load_common(pool: Any) -> _Common:
         },
         id_to_source={a["id"]: a["source"] for a in arts},
         # Reputation of RATED sources only (a resolved track record); cold-start = absent = neutral.
-        reputation={r.source: reputation_score(r) for r in fold_reputation(history) if r.outcome_n > 0},
+        reputation={r.source: reputation_score(r)
+                    for r in fold_reputation(history, hindsight=await load_hindsight(pool))
+                    if r.outcome_n > 0},
         disputed_claims={str(c["id"]) for c in claims if c["disputed"]},
         node_clusters=dict(node_clusters),
         node_meta={r["id"]: dict(r) for r in meta_rows},
