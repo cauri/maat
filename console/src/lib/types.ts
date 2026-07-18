@@ -195,10 +195,21 @@ export interface PromptSummary {
   editable: boolean;
   golden: boolean;
   needs_review: boolean;
+  description: string; // what this prompt shapes (#446) — the hub reads by behaviour, not slug
+  source: string; // where the seed lives in the repo
 }
 
 export interface PromptsResponse {
   prompts: PromptSummary[];
+}
+
+export interface PromptVersion {
+  version: number;
+  text: string;
+  reason: string;
+  actor: string;
+  active: boolean;
+  created_at: string | null;
 }
 
 export interface PromptDetail {
@@ -207,6 +218,10 @@ export interface PromptDetail {
   status: string;
   text: string;
   default: string;
+  description: string;
+  source: string;
+  placeholders: string[];
+  versions: PromptVersion[]; // newest first — restore = save an old version's text (#446)
 }
 
 // ── Business: spend + acquisition (#314) ─────────────────────────────────────────────────
