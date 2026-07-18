@@ -1,33 +1,24 @@
 "use client";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import Link from "next/link";
 
 import { ConfigKnobs } from "./config-knobs";
-import { PromptsEditor } from "./prompts-editor";
 
+// Prompts moved to their own room (#446) — /prompts in the rail. cauri's cross-project pattern is
+// a first-class prompt hub, and a tab inside "Tuning" is exactly the buried placement that kept
+// it from being found. Tuning keeps the config knobs.
 export function TuningRoom() {
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-4 p-4 sm:p-6">
-      <Tabs defaultValue="config">
-        <TabsList>
-          <TabsTrigger value="config">Config</TabsTrigger>
-          <TabsTrigger value="prompts">Prompts</TabsTrigger>
-        </TabsList>
-        <TabsContent value="config" className="mt-4">
-          <p className="mb-3 text-sm text-muted-foreground">
-            Scoring settings. Propose stages a value to review; Promote makes it live — which needs
-            your sign-off.
-          </p>
-          <ConfigKnobs />
-        </TabsContent>
-        <TabsContent value="prompts" className="mt-4">
-          <p className="mb-3 text-sm text-muted-foreground">
-            The live instructions each agent runs. Saving an edit makes it live and needs your
-            sign-off.
-          </p>
-          <PromptsEditor />
-        </TabsContent>
-      </Tabs>
+      <p className="text-sm text-muted-foreground">
+        Scoring settings. Propose stages a value to review; Promote makes it live — which needs
+        your sign-off. Looking for the prompts? They have their own room now:{" "}
+        <Link href="/prompts" className="underline underline-offset-2">
+          Prompts
+        </Link>
+        .
+      </p>
+      <ConfigKnobs />
     </div>
   );
 }

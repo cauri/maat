@@ -148,3 +148,14 @@ def test_event_to_sse_tolerates_missing_data():
     assert frame["actor"] is None
     assert frame["data"] == {}
     assert frame["ts"] == 1
+
+
+def test_prompt_registry_carries_hub_fields_for_the_prompts_room():
+    """#446 — the Prompts room reads by BEHAVIOUR, not slug: every registry entry must carry the
+    description and source the hub renders, and the detail payload's extra fields come straight
+    from these. (The endpoint itself is exercised in the integration tests; this pins the registry
+    contract the room depends on.)"""
+    for p in prompts_mod.PROMPTS:
+        assert isinstance(p.get("description", ""), str) and p.get("description"), p["key"]
+        assert isinstance(p.get("source", ""), str) and p.get("source"), p["key"]
+        assert isinstance(p.get("placeholders", []), list), p["key"]

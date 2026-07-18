@@ -540,6 +540,10 @@ def _make_console_router() -> Any:
                     "editable": p["key"] in prompts_mod.EDITABLE_KEYS,
                     "golden": p["key"] in prompts_mod.GOLDEN_EVAL_KEYS,
                     "needs_review": review.get(p["key"], False),
+                    # The prompts room (#446): what each prompt SHAPES, straight from the registry —
+                    # the hub reads as "which behaviour do I want to tune", never a slug hunt.
+                    "description": p.get("description", ""),
+                    "source": p.get("source", ""),
                 }
                 for p in prompts_mod.PROMPTS
             ]
@@ -550,12 +554,37 @@ def _make_console_router() -> Any:
         if key not in prompts_mod.PROMPTS_BY_KEY:
             raise HTTPException(status_code=404, detail="no such prompt")
         text = await prompts_mod.active_text(_pool(request), key, prompts_mod.seed_default(key))
+        entry = prompts_mod.PROMPTS_BY_KEY[key]
+        # Version history (#446) — the append-only trail the kernel keeps (admin.prompt.updated →
+        # one row per version). Restore in the console = prompt.update with an old version's text,
+        # so history needs no new command. Absent table (fresh DB) → empty, same as active_text.
+        versions: list[dict[str, Any]] = []
+        try:
+            rows = await _pool(request).fetch(
+                "select version, text, reason, actor, active, created_at from prompts "
+                "where key = $1 order by version desc limit 20",
+                key,
+            )
+            versions = [
+                {
+                    "version": r["version"], "text": r["text"], "reason": r["reason"] or "",
+                    "actor": r["actor"] or "", "active": bool(r["active"]),
+                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                }
+                for r in rows
+            ]
+        except Exception:  # noqa: BLE001 - prompts table not migrated yet → no history to show
+            versions = []
         return {
             "key": key,
             "editable": key in prompts_mod.EDITABLE_KEYS,
-            "status": prompts_mod.PROMPTS_BY_KEY[key]["status"],
+            "status": entry["status"],
             "text": text,
             "default": prompts_mod.seed_default(key),
+            "description": entry.get("description", ""),
+            "source": entry.get("source", ""),
+            "placeholders": entry.get("placeholders", []),
+            "versions": versions,
         }
 
     # ---- feedback (inputs · triage) ----------------------------------------------------
