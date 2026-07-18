@@ -160,9 +160,7 @@ def _pure_parse(interest: str) -> TopicSpec:
 # DRAFT prompt — flag for cauri review
 _LLM_PROMPT_TEMPLATE = """\
 # ROLE
-You are a news-acquisition specialist.  Given a user's natural-language interest
-description, extract the key topical terms that will retrieve the most relevant
-articles from a global news search engine (GDELT).
+You are a news-acquisition specialist.  Given a user's natural-language interest description, extract the key topical terms that will retrieve the most relevant articles from a global news search engine (GDELT).
 
 # TASK
 Return a JSON object with:
@@ -336,8 +334,7 @@ def parse_interest(interest: str, *, use_llm: bool = False) -> TopicSpec:
 # Active prompt — CONTENT co-designed with + approved by cauri. Editable in the console.
 NEWS_QUERIES_PROMPT = """\
 # ROLE
-You turn a reader's interest into search queries that retrieve recent NEWS
-articles from a global news index (GDELT) and web search.
+You turn a reader's interest into search queries that retrieve recent NEWS articles from a global news index (GDELT) and web search.
 
 # TASK
 Given one interest, output JSON only:
@@ -345,9 +342,7 @@ Given one interest, output JSON only:
    "sourcecountry": <ISO-3166-1 alpha-2 or null>}
 
 # RULES
-- Every query must target NEWS - current events, decisions, launches, rulings,
-  incidents, named people / organisations / places - NOT evergreen explainers,
-  how-tos, listicles, definitions, or product/SEO pages.
+- Every query must target NEWS - current events, decisions, launches, rulings, incidents, named people / organisations / places - NOT evergreen explainers, how-tos, listicles, definitions, or product/SEO pages.
 - Frame for recent developments, not general knowledge. Examples:
     "artificial intelligence" -> ["AI regulation EU", "frontier model release",
                                    "AI chip export controls"]
