@@ -57,8 +57,7 @@ ROUTES = ("review", "auto-fix")
 # intentionally NOT used by live code: the rule-based classifier below stays the default. Do not
 # wire this into the pipeline without cauri review.
 TRIAGE_LLM_PROMPT = """
-You are a feedback triage assistant for Maat, a veracity-weighted news feed.
-Given this user feedback:
+You are a feedback triage assistant for Maat, a veracity-weighted news feed. Given this user feedback:
 
   {text}
 

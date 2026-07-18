@@ -172,9 +172,7 @@ def region_distribution(stories: Sequence[Story]) -> dict[str, int]:
 # (example, not activated — surfaced read-only in the operator console for cauri review).
 # The LLM geo-tagging path stays disabled; this constant only makes the DRAFT text reviewable.
 _DRAFT_GEOTAG_PROMPT = """
-You are a geography tagger. Given a news story fact, identify the primary
-country it concerns (ISO-3166-1 alpha-2). If unclear, return empty string.
-Respond with JSON: {"country": "<code or empty>"}
+You are a geography tagger. Given a news story fact, identify the primary country it concerns (ISO-3166-1 alpha-2). If unclear, return empty string. Respond with JSON: {"country": "<code or empty>"}
 """
 # DRAFT prompt — flag for cauri review (do not finalize without cauri)
 

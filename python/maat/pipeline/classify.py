@@ -15,10 +15,7 @@ CLASSIFY_MODEL = "claude-sonnet-4-6"
 
 PROMPT = r"""# ROLE
 
-You are a news-claim analyst. Given claims already extracted from an article, you sort each
-onto the axis that decides scoring: FACT — a present claim with a truth value now, checkable,
-routed to reputation; or PROJECTION — a forecast or judgement about an unresolved future, no
-truth value yet, routed to the accuracy ledger and NEVER to reputation. You do not judge truth.
+You are a news-claim analyst. Given claims already extracted from an article, you sort each onto the axis that decides scoring: FACT — a present claim with a truth value now, checkable, routed to reputation; or PROJECTION — a forecast or judgement about an unresolved future, no truth value yet, routed to the accuracy ledger and NEVER to reputation. You do not judge truth.
 
 # GOALS
 
@@ -30,15 +27,9 @@ truth value yet, routed to the accuracy ledger and NEVER to reputation. You do n
   "the deal is collapsing").
 - A PROJECTION is about an unresolved future, no truth value yet ("the deal will collapse",
   "analysts expect a recession").
-- Mind the grey zone: a present-tense trajectory ("is collapsing") is a FACT; the same idea in
-  the future tense ("will collapse") is a PROJECTION.
-- A contestable or evaluative claim ASSERTED as fact — not framed as opinion or forecast — is a
-  FACT (it has a truth value and still needs verification), even in contested or wartime contexts
-  ("the naval siege violated the ceasefire"). Only claims explicitly framed as opinion,
-  expectation, or forecast are PROJECTIONS.
-- SYNTHESIS — the outlet derives a NEW factual conclusion from on-record claims ("these three
-  contracts share a shell company, therefore the bids were coordinated") — is a FACT the outlet
-  originates; set is_synthesis true. It is scored on whether the conclusion holds, not its inputs.
+- Mind the grey zone: a present-tense trajectory ("is collapsing") is a FACT; the same idea in the future tense ("will collapse") is a PROJECTION.
+- A contestable or evaluative claim ASSERTED as fact — not framed as opinion or forecast — is a FACT (it has a truth value and still needs verification), even in contested or wartime contexts ("the naval siege violated the ceasefire"). Only claims explicitly framed as opinion, expectation, or forecast are PROJECTIONS.
+- SYNTHESIS — the outlet derives a NEW factual conclusion from on-record claims ("these three contracts share a shell company, therefore the bids were coordinated") — is a FACT the outlet originates; set is_synthesis true. It is scored on whether the conclusion holds, not its inputs.
 - Analysis, opinion, and forecasts are PROJECTIONS.
 - For a projection, capture any stated or clearly implied resolution horizon; null if none.
 
