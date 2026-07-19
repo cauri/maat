@@ -74,6 +74,7 @@ from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT, parse_authority_cit
 from maat.pipeline.claim import Claim
 from maat.pipeline.claimify import PROMPT as CLAIMIFY_PROMPT
 from maat.pipeline.claimify import normalise_input
+from maat.pipeline import origin as origin_mod
 from maat.pipeline.corroborate import SAME_FACT_THRESHOLD, ClaimRow
 from maat.pipeline.identity import canonical_source
 from maat.pipeline.ownership import evidenced_ownership, fold_ownership
@@ -116,6 +117,9 @@ _AUTHORITY = os.environ.get("MAAT_ANALYSE_AUTHORITY", "1") not in ("0", "false",
 # (free) Google Fact Check Tools key; no key → the leg is off and LiveMeta records it, never silent.
 _FACTCHECK = os.environ.get("MAAT_ANALYSE_FACTCHECK", "1") not in ("0", "false", "no")
 _FACTCHECK_KEY = os.environ.get("MAAT_FACTCHECK_KEY", "").strip()
+# Origin trace (P16 #452) — the provenance pass for CLAIM mode (earliest-window GDELT search +
+# attribution-chain read). On by default; provenance rides beside the verdict, never in the score.
+_ORIGIN = os.environ.get("MAAT_ANALYSE_ORIGIN", "1") not in ("0", "false", "no")
 # NLI entailment gate thresholds (#389) — tunable in prod without a deploy once the web_neutral
 # recall-drift signal shows whether the gate is too strict. Model swap is the other lever
 # (MAAT_NLI_MODEL, in pipeline/nli.py).
@@ -291,6 +295,8 @@ class _Assets:
     authority_prompt: str = AUTHORITY_SEARCH_PROMPT
     # P16 #450 — the claim normaliser's prompt, resolved the same way (seed in pipeline/claimify.py).
     claimify_prompt: str = CLAIMIFY_PROMPT
+    # P16 #452 — the origin-trace attribution-chain prompt (seed in pipeline/origin.py).
+    origin_prompt: str = origin_mod.PROMPT
 
 
 _ASSETS_CACHE = VersionCache(maxsize=2)
@@ -435,6 +441,9 @@ async def _load_assets(pool: Any) -> _Assets:
         ),
         claimify_prompt=await prompts_mod.active_text(
             pool, "claimify", prompts_mod.seed_default("claimify")
+        ),
+        origin_prompt=await prompts_mod.active_text(
+            pool, "origin_chain", prompts_mod.seed_default("origin_chain")
         ),
     )
     _ASSETS_CACHE.put("assets", version, assets)
@@ -771,6 +780,33 @@ def make_authority_search(denied: set[str], prompt_seed: str):
     return authority_search
 
 
+def make_origin_search():
+    """The pipeline's OriginSearchFn (#452): the earliest indexed coverage of a claim — GDELT DOC
+    queried OLDEST-FIRST over the widest window the index offers (DOC coverage starts 2017).
+    Best-effort: a dead or throttled query returns [] and the trace degrades to the other
+    signals. The pipeline title-guards every hit before a date can become "first seen"."""
+
+    def origin_search(claim_text: str) -> list[origin_mod.OriginHit]:
+        query = gdelt_query(claim_text)
+        if not query:
+            return []
+        end = gdelt.gdelt_stamp(datetime.now(timezone.utc))
+        try:
+            arts = gdelt.search(
+                query, maxrecords=10, startdatetime="20170101000000", enddatetime=end,
+                sort="dateasc", retries=2, timeout=20.0,
+            )
+        except Exception as e:  # noqa: BLE001 - a dead leg degrades the trace, never the run
+            log.warning("origin search failed for %r: %s", query[:60], type(e).__name__)
+            return []
+        return [
+            origin_mod.OriginHit(url=a.url, domain=a.domain, title=a.title, seendate=a.seendate)
+            for a in arts
+        ]
+
+    return origin_search
+
+
 def make_fact_check(key: str):
     """The pipeline's FactCheckFn (#451): published ClaimReview fact-checks per claim text, from
     the Google Fact Check Tools API — one query per claim, concurrently, each best-effort (a dead
@@ -827,10 +863,26 @@ def make_gate():
 # ── public payload ("what, not how") ─────────────────────────────────────────────────────────────
 
 
+def public_origin(trace: Any) -> dict[str, Any]:
+    """The origin trace on the wire (P16 #452). Everything here is public BY DESIGN — provenance
+    is the answer the reader asked for, so it names the earliest carrier, the attributed origin,
+    and the top carriers (locked with cauri; the corroboration mechanism stays hidden elsewhere).
+    Copy discipline: this is "the earliest trace we FOUND", and the UI must say so."""
+    return {
+        "earliest": trace.earliest,
+        "attributed_to": trace.attributed_to,
+        "kind": trace.kind,
+        "chain": list(trace.chain),
+        "carriers": trace.carriers,
+        "top_carriers": list(trace.top_carriers),
+        "confidence": trace.confidence,
+    }
+
+
 def public_claim(r: ClaimReading) -> dict[str, Any]:
     # An unchecked claim (#397) was never searched — it carries NO score (a number would imply we
     # weighed it). ``checked`` lets the page render the "Not checked" state + its force-check button.
-    return {
+    out = {
         "text": r.claim.text,
         "voice": r.claim.voice,
         "speaker": r.claim.speaker,
@@ -841,6 +893,9 @@ def public_claim(r: ClaimReading) -> dict[str, Any]:
         "tier": r.tier,
         "checked": r.checked,
     }
+    if r.origin is not None:  # claim mode only (#452) — article claims never carry a trace
+        out["origin"] = public_origin(r.origin)
+    return out
 
 
 def public_projection(r: ClaimReading) -> dict[str, Any]:
@@ -1059,6 +1114,9 @@ def ops_meta(
             "factcheck_hits": lv.factcheck_hits,
             "factcheck_supported": lv.factcheck_supported,
             "factcheck_refuted": lv.factcheck_refuted,
+            # Origin trace (#452) — claim mode only; 0/0 for article analyses.
+            "origin_searched": lv.origin_searched,
+            "origin_traced": lv.origin_traced,
         }
     return out
 
@@ -1123,6 +1181,10 @@ def claim_public_payload(analysis: ClaimAnalysis, aid: str) -> dict[str, Any]:
         },
         "claims": [public_claim(r) for r in analysis.facts],
         "projections": [public_projection(r) for r in analysis.projections],
+        # The PRIMARY claim's trace, aliased top-level for the origin card (#452) — the first
+        # fact claim is the load-bearing one the reader asked about.
+        "origin": (public_origin(analysis.facts[0].origin)
+                   if analysis.facts and analysis.facts[0].origin is not None else None),
         "share": claim_share_copy(analysis, reasons),
         "scope": CLAIM_SCOPE_LINE,
         "analysed_at": datetime.now(timezone.utc).isoformat(),
@@ -1324,6 +1386,12 @@ async def run_claim_analysis(
                 if (_LIVE and _WEB_SEARCH and _AUTHORITY) else None
             ),
             fact_check=make_fact_check(_FACTCHECK_KEY) if (_LIVE and _FACTCHECK) else None,
+            origin_search=make_origin_search() if (_LIVE and _ORIGIN) else None,
+            origin_extract=(
+                (lambda claim, docs: origin_mod.extract_chain(
+                    claim, docs, prompt=assets.origin_prompt))
+                if (_LIVE and _ORIGIN) else None
+            ),
             nli=make_nli(),
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),
@@ -1454,6 +1522,8 @@ def _public_progress(kind: str, data: dict) -> dict:
                 for c in data.get("claims", []) if isinstance(c, dict)
             ],
         }
+    if kind == "traced":  # claim mode (P16 #452): the origin trace — public by design
+        return {"index": data.get("index"), "origin": public_origin(data["trace"])}
     return data
 
 

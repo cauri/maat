@@ -257,3 +257,67 @@ def test_understood_progress_is_mapped_not_passed_through():
     })
     assert out == {"display": _CANON, "language": "en",
                    "claims": [{"text": "X", "kind": "fact"}]}
+
+
+# --- the origin trace on the wire (#452) ------------------------------------------------------
+
+
+def _trace(**kw):
+    from maat.pipeline.origin import OriginTrace
+
+    return OriginTrace(
+        earliest=kw.pop("earliest", {"date": "2026-07-09", "source": "old.example",
+                                     "url": "https://old.example/musk"}),
+        attributed_to=kw.pop("attributed_to", "viral social media posts"),
+        kind=kw.pop("kind", "social"),
+        chain=kw.pop("chain", ["viral social media posts", "dailyx.com"]),
+        carriers=kw.pop("carriers", 2),
+        top_carriers=kw.pop("top_carriers", ["bbc.com", "rts.ch"]),
+        confidence=kw.pop("confidence", "strong"),
+    )
+
+
+def test_claim_payload_carries_the_origin_card():
+    import dataclasses
+
+    reading = dataclasses.replace(_reading(), origin=_trace())
+    p = sa.claim_public_payload(_claim_analysis(facts=[reading]), "cl-abc")
+    assert p["origin"]["attributed_to"] == "viral social media posts"
+    assert p["origin"]["earliest"]["date"] == "2026-07-09"
+    assert p["claims"][0]["origin"]["carriers"] == 2
+    # An analysis with no trace serves an explicit null card, not a missing key.
+    bare = sa.claim_public_payload(_claim_analysis(), "cl-def")
+    assert bare["origin"] is None
+    assert "origin" not in bare["claims"][0]
+
+
+def test_traced_progress_maps_to_public_origin():
+    out = sa._public_progress("traced", {"index": 0, "trace": _trace()})
+    assert out == {"index": 0, "origin": {
+        "earliest": {"date": "2026-07-09", "source": "old.example",
+                     "url": "https://old.example/musk"},
+        "attributed_to": "viral social media posts", "kind": "social",
+        "chain": ["viral social media posts", "dailyx.com"], "carriers": 2,
+        "top_carriers": ["bbc.com", "rts.ch"], "confidence": "strong",
+    }}
+
+
+def test_make_origin_search_maps_gdelt_hits_and_survives_failure(monkeypatch):
+    from maat.acquire.gdelt import GdeltArticle
+
+    def fake_search(query, **kw):
+        assert kw["sort"] == "dateasc"
+        assert kw["startdatetime"] == "20170101000000"
+        return [GdeltArticle(url="https://old.example/musk", title="t", domain="old.example",
+                             language="en", country="US", seendate="20260709T080000Z")]
+
+    monkeypatch.setattr(sa.gdelt, "search", fake_search)
+    search = sa.make_origin_search()
+    hits = search("Parliament postponed the budget vote")
+    assert hits[0].domain == "old.example" and hits[0].seendate == "20260709T080000Z"
+
+    def boom(query, **kw):
+        raise OSError("throttled")
+
+    monkeypatch.setattr(sa.gdelt, "search", boom)
+    assert sa.make_origin_search()("anything meaningful here") == []

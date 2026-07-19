@@ -56,6 +56,7 @@ def build_params(
     sourcecountry: str | None = None,
     startdatetime: str | None = None,
     enddatetime: str | None = None,
+    sort: str = "hybridrel",
 ) -> dict[str, str]:
     q = query.strip()
     if sourcelang:
@@ -67,7 +68,9 @@ def build_params(
         "mode": "artlist",
         "format": "json",
         "maxrecords": str(maxrecords),
-        "sort": "hybridrel",
+        # "dateasc" walks a window OLDEST-first — the origin-trace leg (P16 #452) uses it to find
+        # the earliest indexed coverage of a claim; the default stays relevance-ranked.
+        "sort": sort,
     }
     # Historical backfill (#40): GDELT DOC 2.0 takes a startdatetime/enddatetime WINDOW
     # (YYYYMMDDHHMMSS) instead of a rolling `timespan`. When a full window is given it wins and
@@ -108,6 +111,7 @@ def search(
     sourcecountry: str | None = None,
     startdatetime: str | None = None,
     enddatetime: str | None = None,
+    sort: str = "hybridrel",
     timeout: float = 30.0,
     retries: int = 4,
 ) -> list[GdeltArticle]:
@@ -125,6 +129,7 @@ def search(
         sourcecountry=sourcecountry,
         startdatetime=startdatetime,
         enddatetime=enddatetime,
+        sort=sort,
     )
     headers = {"User-Agent": _UA}
     last: httpx.Response | None = None
