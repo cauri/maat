@@ -36,6 +36,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
@@ -63,7 +64,7 @@ from maat.pipeline.extract import extract_claims
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
 from maat.acquire.social import SocialPost
-from maat.pipeline.origin import OriginChain, OriginHit, OriginTrace, build_trace
+from maat.pipeline.origin import OriginChain, OriginHit, OriginTrace, build_trace, parse_when
 from maat.providers.seam import mistral_embed
 
 log = logging.getLogger("maat.pipeline.analyse")
@@ -147,6 +148,11 @@ class LiveMeta:
     # silent. hits = guarded matching posts that produced a "circulating since" card.
     social_checked: bool = False
     social_hits: int = 0
+    # Absence-as-evidence (#454) — big zero-evidence claims put to the expected-coverage judge,
+    # and how many the judge hardened. fresh_absent = claims softened to "too early to tell".
+    coverage_judged: int = 0
+    coverage_expected: int = 0
+    fresh_absent: int = 0
 
 
 @dataclass(frozen=True)
@@ -251,6 +257,13 @@ OriginExtractFn = Callable[[str, list[tuple[str, str]]], OriginChain | None]
 # ``SocialSearchFn`` (#453): social posts matching one claim (X/Reddit via Apify) — origin-trace
 # DISPLAY only, structurally: it returns SocialPost, which no fold accepts. Never corroboration.
 SocialSearchFn = Callable[[str], Sequence[SocialPost]]
+# ``CoverageFn`` (#454): would a TRUE version of this claim certainly be widely covered? Judges
+# expected coverage only — never truth, never evidence. None result = don't harden anything.
+CoverageFn = Callable[[str], bool | None]
+
+# #454 — a claim whose earliest trace is inside this window is "too early to tell", never the
+# hardened absence verdict (breaking-news protection, mirroring article mode's extremity gate).
+_FRESH_WINDOW = timedelta(hours=48)
 
 
 @dataclass(frozen=True)
@@ -1624,6 +1637,8 @@ def analyse_claim(
     origin_search: OriginSearchFn | None = None,
     origin_extract: OriginExtractFn | None = None,
     social_search: SocialSearchFn | None = None,
+    coverage_judge: CoverageFn | None = None,
+    now: datetime | None = None,
     nli: NliFn | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
@@ -2075,7 +2090,51 @@ def analyse_claim(
         live = replace(live, origin_searched=n, origin_traced=traced_count[0],
                        social_checked=social_search is not None, social_hits=social_hits[0])
 
-    done = [r for r in readings if r is not None]
+    # ── absence as evidence (#454): silence hardens a BIG claim — behind two protections ───────
+    # Only zero-evidence, undisputed claims are touched. FRESH beats hardening: a claim whose
+    # earliest trace is hours old reads "too early to tell" (breaking news is not punished);
+    # otherwise a significant/extraordinary claim goes to the expected-coverage judge, and only
+    # a confident YES sharpens the wording — a failed or absent judge changes nothing.
+    fresh_absent: set[int] = set()
+    coverage_judged = coverage_expected = 0
+    now_dt = now or datetime.now(timezone.utc)
+    for i in range(n):
+        reading = readings[i]
+        if (reading is None or reading.disputed or reading.has_primary
+                or reading.independent_originators > 0):
+            continue
+        earliest = reading.origin.earliest if reading.origin is not None else None
+        when = parse_when(earliest["date"]) if earliest else None
+        if when is not None and timedelta(0) <= now_dt - when <= _FRESH_WINDOW:
+            fresh_absent.add(i)
+            readings[i] = replace(
+                reading, verdict="Too early to tell — no independent support yet", tier="lo",
+            )
+            continue
+        if coverage_judge is not None and reading.extremity in _BIG:
+            coverage_judged += 1
+            try:
+                expected = coverage_judge(fact_claims[i].text)
+            except Exception as e:  # noqa: BLE001 - a failed judge leaves the standard reading
+                log.warning("expected-coverage judge failed: %s", type(e).__name__)
+                expected = None
+            if expected:
+                coverage_expected += 1
+                readings[i] = replace(reading, verdict=(
+                    "No credible support found — a claim of this scale would be widely reported"
+                ))
+    if coverage_judged or fresh_absent:
+        if live is None:
+            live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None,
+                            factcheck_checked=fact_check is not None)
+        live = replace(live, coverage_judged=coverage_judged,
+                       coverage_expected=coverage_expected, fresh_absent=len(fresh_absent))
+
+    done_pairs = [
+        (i, r, rated)
+        for i, (r, rated) in enumerate(zip(readings, rated_flags)) if r is not None
+    ]
+    done = [r for _, r, _ in done_pairs]
     score = score_claims([
         ArticleClaim(
             confidence=r.confidence,
@@ -2087,8 +2146,9 @@ def analyse_claim(
             grounding=r.grounding,
             rated_originator=rated,
             primary_contradicted=r.primary_contradicted,
+            fresh_absence=i in fresh_absent,  # #454 — hours old: never the disqualified floor
         )
-        for r, rated in zip(done, rated_flags)
+        for i, r, rated in done_pairs
     ])
     emit("scored", {"score": score.score, "band": score.band, "label": score.label})
 

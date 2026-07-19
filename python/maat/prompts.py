@@ -29,6 +29,7 @@ from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
 from maat.learning.hindsight import HINDSIGHT_RESOLVE_PROMPT, HINDSIGHT_TRIAGE_PROMPT
 from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT
 from maat.pipeline.claimify import PROMPT as CLAIMIFY_PROMPT
+from maat.pipeline.coverage import PROMPT as COVERAGE_PROMPT
 from maat.pipeline.origin import PROMPT as ORIGIN_CHAIN_PROMPT
 from maat.pipeline.grounding import GROUNDING_PROMPT
 from maat.pipeline.triage import TRIAGE_LLM_PROMPT
@@ -303,6 +304,15 @@ PROMPTS: list[dict] = [
      "guard); the engine enforces a fixed JSON schema and rejects anything else — a reply is "
      "never repaired into something plausible.",
      "placeholders": ["{reader_input}", "{max_claims}"]},
+    {"key": "expected_coverage", "label": "Expected coverage (would a true claim be covered?)",
+     "default": COVERAGE_PROMPT, "status": "draft", "source": "maat/pipeline/coverage.py",
+     "description": "Absence-as-evidence (P16 #454): for a significant/extraordinary claim with "
+     "ZERO evidence, judges one question — would a TRUE version certainly be widely covered? "
+     "Only a confident yes hardens the wording ('a claim of this scale would be widely "
+     "reported'); niche-but-big claims answer false and keep the standard reading; a claim "
+     "first seen <48h ago is 'too early to tell' and never hardened. Judges coverage "
+     "expectations only — never truth, never evidence.",
+     "placeholders": ["{claim}"]},
     {"key": "origin_chain", "label": "Origin trace (who does the evidence credit?)",
      "default": ORIGIN_CHAIN_PROMPT, "status": "draft", "source": "maat/pipeline/origin.py",
      "description": "The origin trace's attribution-chain pass (P16 #452): over the top evidence "

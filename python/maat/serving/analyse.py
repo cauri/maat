@@ -74,6 +74,7 @@ from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT, parse_authority_cit
 from maat.pipeline.claim import Claim
 from maat.pipeline.claimify import PROMPT as CLAIMIFY_PROMPT
 from maat.pipeline.claimify import normalise_input
+from maat.pipeline import coverage as coverage_mod
 from maat.pipeline import origin as origin_mod
 from maat.pipeline.corroborate import SAME_FACT_THRESHOLD, ClaimRow
 from maat.pipeline.identity import canonical_source
@@ -123,6 +124,8 @@ _ORIGIN = os.environ.get("MAAT_ANALYSE_ORIGIN", "1") not in ("0", "false", "no")
 # Social origin leg (#453) — X/Reddit search feeding the trace DISPLAY only (never corroboration;
 # the source-gate rejection of social stands). Needs the Apify key; off → recorded, never silent.
 _SOCIAL = os.environ.get("MAAT_ANALYSE_SOCIAL", "1") not in ("0", "false", "no")
+# Absence-as-evidence (#454) — the expected-coverage judge for big zero-evidence claims.
+_COVERAGE = os.environ.get("MAAT_ANALYSE_COVERAGE", "1") not in ("0", "false", "no")
 # NLI entailment gate thresholds (#389) — tunable in prod without a deploy once the web_neutral
 # recall-drift signal shows whether the gate is too strict. Model swap is the other lever
 # (MAAT_NLI_MODEL, in pipeline/nli.py).
@@ -300,6 +303,8 @@ class _Assets:
     claimify_prompt: str = CLAIMIFY_PROMPT
     # P16 #452 — the origin-trace attribution-chain prompt (seed in pipeline/origin.py).
     origin_prompt: str = origin_mod.PROMPT
+    # P16 #454 — the expected-coverage judge's prompt (seed in pipeline/coverage.py).
+    coverage_prompt: str = coverage_mod.PROMPT
 
 
 _ASSETS_CACHE = VersionCache(maxsize=2)
@@ -447,6 +452,9 @@ async def _load_assets(pool: Any) -> _Assets:
         ),
         origin_prompt=await prompts_mod.active_text(
             pool, "origin_chain", prompts_mod.seed_default("origin_chain")
+        ),
+        coverage_prompt=await prompts_mod.active_text(
+            pool, "expected_coverage", prompts_mod.seed_default("expected_coverage")
         ),
     )
     _ASSETS_CACHE.put("assets", version, assets)
@@ -1142,6 +1150,10 @@ def ops_meta(
             # Social origin leg (#453) — claim mode only, display-only.
             "social_checked": lv.social_checked,
             "social_hits": lv.social_hits,
+            # Absence-as-evidence (#454) — claim mode only.
+            "coverage_judged": lv.coverage_judged,
+            "coverage_expected": lv.coverage_expected,
+            "fresh_absent": lv.fresh_absent,
         }
     return out
 
@@ -1418,6 +1430,11 @@ async def run_claim_analysis(
                 if (_LIVE and _ORIGIN) else None
             ),
             social_search=make_social_search() if (_LIVE and _ORIGIN and _SOCIAL) else None,
+            coverage_judge=(
+                (lambda claim: coverage_mod.expected_coverage(
+                    claim, prompt=assets.coverage_prompt))
+                if (_LIVE and _COVERAGE) else None
+            ),
             nli=make_nli(),
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),
