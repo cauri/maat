@@ -40,6 +40,15 @@ _MAX_CLAIM_CHARS = 300
 _KINDS = ("fact", "projection", "opinion")
 _SUBJECTS = ("public", "private", "none")
 
+# #456 — scheme'd URLs are stripped from normalised claim text before it reaches ANY search leg:
+# a URL smuggled inside a typed claim must never become a fetch target or a search operator
+# (SSRF-by-search). Bare domains stay — "example.com was hacked" is a legitimate claim subject.
+_URL_RX = re.compile(r"https?://\S+", re.I)
+
+
+def strip_urls(text: str) -> str:
+    return " ".join(_URL_RX.sub(" ", text).split())
+
 
 class ClaimifyError(ValueError):
     """A user-facing normalisation failure — its message is safe to show the reader verbatim."""
@@ -167,7 +176,9 @@ def _validated(obj: dict, max_claims: int) -> NormalisedInput:
             raise ClaimifyError(_CANT_READ)
         if kind not in _KINDS or subject not in _SUBJECTS:
             raise ClaimifyError(_CANT_READ)
-        text = " ".join(text.split())[:_MAX_CLAIM_CHARS]
+        text = strip_urls(" ".join(text.split()))[:_MAX_CLAIM_CHARS]
+        if not text:
+            continue  # the "claim" was only a URL — nothing checkable survives the strip
         key = text.casefold()
         if key in seen:  # the model split one assertion into duplicates — keep the first
             continue
