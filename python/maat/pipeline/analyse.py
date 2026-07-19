@@ -41,6 +41,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from maat.acquire.factcheck import FactCheck
 from maat.acquire.fetch import FetchedPage, fetch_page
 from maat.learning.article_credibility import ArticleClaim, score_article
 from maat.learning.claim_credibility import score_claims
@@ -128,6 +129,14 @@ class LiveMeta:
                                  # the "was one shallow pass enough?" signal (low → recall is fine)
     authority_corroborated: int = 0  # #434: claims with >=1 accepted tier-1/2 AUTHORITY source
     authority_contradicted: int = 0  # #434: claims a grounded tier-1/2 authority CONTRADICTS
+    # Claim-mode braid (P16 #451) — the fact-check leg's coverage. ``factcheck_checked`` False
+    # means the leg was OFF (no key / gated), never silently: absence of the signal is itself
+    # surfaced. hits = reviews found; supported/refuted = reviews that PASSED the same-fact NLI
+    # gate and moved a verdict (mixed/unclear ratings never do).
+    factcheck_checked: bool = False
+    factcheck_hits: int = 0
+    factcheck_supported: int = 0
+    factcheck_refuted: int = 0
 
 
 @dataclass(frozen=True)
@@ -214,6 +223,11 @@ ProgressFn = Callable[[str, dict[str, Any]], None]
 # ``deep`` (S3 #401, optional kwarg): a larger-budget second pass for claims a first pass left
 # uncorroborated — same prompt, more searches, so recall improves without an in-app prompt change.
 WebSearchFn = Callable[..., Sequence[Sequence[Citation]]]
+# ``FactCheckFn`` (P16 #451): published professional fact-checks per claim text (aligned with the
+# input order), from the ClaimReview corpus. The serving layer implements it with the Google Fact
+# Check Tools API; None = leg off (no key), surfaced in LiveMeta, never silent. The pipeline
+# same-fact gates every review with NLI before a rating can move anything.
+FactCheckFn = Callable[[Sequence[str], str], Sequence[Sequence[FactCheck]]]
 
 
 @dataclass(frozen=True)
@@ -1535,6 +1549,7 @@ def analyse_claim(
     corpus_lookup: CorpusLookup | None = None,
     web_search: WebSearchFn | None = None,
     authority_search: WebSearchFn | None = None,
+    fact_check: FactCheckFn | None = None,
     nli: NliFn | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
@@ -1554,12 +1569,21 @@ def analyse_claim(
     """Weigh one reader-typed statement (P16 #450): normalise → decompose → corroborate → score.
 
     The SAME evidence journey a novel article claim takes inside ``analyse_article`` — corpus
-    match, web-search + authority legs in parallel, NLI gate, Apify fallback, deep re-search of
-    still-lone claims — with three claim-mode differences: there is no fetch/gate/extract (the
-    input IS the claim), the reader is never an originator (``_claim_reading``), and the deep
-    pass runs for EVERY still-lone claim (a single claim gets the whole budget — no search cap,
-    no ``unchecked`` state). Raises ``AnalyseError`` with a user-facing message for input Maat
-    declines (nothing checkable, private individuals).
+    match, web-search + authority legs in parallel, NLI gate, deep re-search of still-lone
+    claims — with claim-mode stances: there is no fetch/gate/extract (the input IS the claim),
+    the reader is never an originator (``_claim_reading``), and the deep pass runs for EVERY
+    still-lone claim (a single claim gets the whole budget — no search cap, no ``unchecked``
+    state). Raises ``AnalyseError`` with a user-facing message for input Maat declines (nothing
+    checkable, private individuals).
+
+    THE BRAID (#451, locked with cauri: every tool, every time): claim mode never relies on one
+    leg. The web-search pass opens at the DEEP budget; the authority leg and the fact-check leg
+    (published ClaimReview fact-checks, NLI same-fact-gated) run in parallel with it; and the
+    candidate leg (Apify/GDELT via ``search``) runs ALWAYS and merges — not as a fallback. A
+    same-fact professional fact-check rated FALSE refutes the claim even when outlets carry it
+    (rumour coverage repeating a debunked claim is exactly the failure this catches); rated TRUE
+    it corroborates as one more independent originator; mixed/unclear ratings never move a
+    verdict.
 
     Pure orchestration over the same injected seams as ``analyse_article`` — testable offline.
     """
@@ -1635,35 +1659,50 @@ def analyse_claim(
         )))
 
     live: LiveMeta | None = None
-    have_live = web_search is not None or search is not None or authority_search is not None
+    have_live = (web_search is not None or search is not None
+                 or authority_search is not None or fact_check is not None)
     if not have_live or not novel_idx:
         for i in novel_idx:
             resolve(i, _claim_reading(
                 fact_claims[i], extremities[i], [], {}, reputation, knobs=knobs,
             ))
         if have_live:
-            live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None)
+            live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None,
+                            factcheck_checked=fact_check is not None)
     else:
         emit("searching", {"claims": len(novel_idx)})
         cite_fetch = _CiteFetch(fetch)
         shared = _LiveShared(live_max_candidates)
         novel_texts = [fact_claims[i].text for i in novel_idx]
 
-        # No own outlet to exclude in claim mode — the reader isn't a publisher.
+        # No own outlet to exclude in claim mode — the reader isn't a publisher. The general
+        # pass opens at the DEEP budget (#451): the reader asked about exactly these claims, so
+        # the shallow-first economy of article mode has nothing to save.
         def _pass(fn: WebSearchFn | None, label: str) -> Sequence[Sequence[Citation]]:
             if fn is None:
                 return [() for _ in novel_idx]
             try:
-                return fn(novel_texts, "")
-            except Exception as e:  # noqa: BLE001 - a failed pass leaves the Apify fallback
+                return fn(novel_texts, "", deep=True)
+            except Exception as e:  # noqa: BLE001 - a failed pass leaves the other legs
                 log.warning("claim-mode %s failed: %s", label, type(e).__name__)
                 return [() for _ in novel_idx]
 
-        with ThreadPoolExecutor(max_workers=2) as ex:
+        def _fc_pass() -> Sequence[Sequence[FactCheck]]:
+            if fact_check is None:
+                return [() for _ in novel_idx]
+            try:
+                return fact_check(novel_texts, norm.language)
+            except Exception as e:  # noqa: BLE001 - a failed leg never sinks the braid
+                log.warning("claim-mode fact-check leg failed: %s", type(e).__name__)
+                return [() for _ in novel_idx]
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
             fut_gen = ex.submit(_pass, web_search, "web-search")
             fut_auth = ex.submit(_pass, authority_search, "authority-search")
-            general, authority = fut_gen.result(), fut_auth.result()
+            fut_fc = ex.submit(_fc_pass)
+            general, authority, factchecks = fut_gen.result(), fut_auth.result(), fut_fc.result()
         citations: dict[int, list[Citation]] = {}
+        fc_by_idx: dict[int, list[FactCheck]] = {}
         for k, i in enumerate(novel_idx):
             merged = [  # #434: authority citations FIRST — same merge order as article mode
                 *(authority[k] if k < len(authority) else ()),
@@ -1671,11 +1710,64 @@ def analyse_claim(
             ]
             if merged:
                 citations[i] = merged
+            fcs = list(factchecks[k]) if k < len(factchecks) else []
+            if fcs:
+                fc_by_idx[i] = fcs
 
-        tally = {"web": 0, "contra": 0, "fallback": 0, "neutral": 0, "auth": 0, "auth_contra": 0}
+        tally = {"web": 0, "contra": 0, "fallback": 0, "neutral": 0, "auth": 0, "auth_contra": 0,
+                 "fc_hits": sum(len(v) for v in fc_by_idx.values()),
+                 "fc_support": 0, "fc_refute": 0}
         web_counted: set[int] = set()
         neutral_counted: set[int] = set()
         tally_lock = threading.Lock()
+        # The braided extras per claim — candidate-leg + fact-check rows and the fact-check
+        # refutation flag — remembered so the deep-rescue re-fold keeps the WHOLE braid, not just
+        # the web citations (rows, bodies, weights, fc_refuted).
+        extras: dict[int, tuple[list[ClaimRow], dict[str, str], dict[str, float], bool]] = {}
+
+        def _fact_check_rows(
+            i: int, claim: Claim,
+        ) -> tuple[list[ClaimRow], dict[str, str], dict[str, float], bool]:
+            """The fact-check leg for ONE claim (#451): NLI same-fact gate first (their claim
+            text vs ours — a review of a DIFFERENT claim moves nothing), then the rating.
+            FALSE → refute; TRUE → one corroborating row at full attribution (a named
+            organisation publishing a reviewed verdict); mixed/unclear → never moves a verdict.
+            Two checkers disagreeing (false + true on the same fact) cancel to the evidence
+            fold — genuinely contested is not "Refuted"."""
+            rows: list[ClaimRow] = []
+            bodies: dict[str, str] = {}
+            weights: dict[str, float] = {}
+            refuted = supported = 0
+            seen: set[str] = set()
+            for k, fc in enumerate(fc_by_idx.get(i, ())):
+                if not fc.review_url or fc.review_url in seen:
+                    continue
+                seen.add(fc.review_url)
+                verdict, _ = judge_entailment_scored(
+                    nli, fc.claim_text, claim.text,
+                    min_entail=nli_entail_min, min_contradict=nli_contradict_min,
+                )
+                if verdict != "entails":  # not the same fact (or NLI down) — never trust a match
+                    continue
+                if fc.polarity == "false":
+                    refuted += 1
+                elif fc.polarity == "true":
+                    supported += 1
+                    source = fc.site or fc.publisher or "fact-check"
+                    rows.append(ClaimRow(
+                        id=f"fc-{i}-{k}", text=fc.claim_text,
+                        article_id=fc.review_url, source=source,
+                    ))
+                    bodies[fc.review_url] = (
+                        f"{fc.review_title} — rated {fc.rating} by {fc.publisher}."
+                        if fc.review_title else fc.claim_text
+                    )
+                    weights[fc.review_url] = 1.0
+            if refuted or supported:
+                with tally_lock:
+                    tally["fc_refute"] += refuted
+                    tally["fc_support"] += supported
+            return rows, bodies, weights, bool(refuted and not supported)
 
         def live_one(i: int) -> None:
             claim = fact_claims[i]
@@ -1708,27 +1800,50 @@ def analyse_claim(
                 with tally_lock:
                     tally["web"] += 1
                     web_counted.add(i)
-            else:
-                if cits:
-                    with tally_lock:
-                        tally["neutral"] += 1
-                        neutral_counted.add(i)
-                if search is not None:
-                    matched_rows, bodies = _apify_rows(
-                        i, claim, search=search, extract=extract, embed=embed, shared=shared,
-                        accept_candidate=accept_candidate, own_canon="", url="",
-                        same_fact_threshold=same_fact_threshold,
+            elif cits:
+                with tally_lock:
+                    tally["neutral"] += 1
+                    neutral_counted.add(i)
+            # The braid (#451): the candidate leg (Apify/GDELT) runs ALWAYS and merges — not as
+            # a fallback. New URLs only; a page the web leg already accepted stays one originator.
+            extra_rows: list[ClaimRow] = []
+            extra_bodies: dict[str, str] = {}
+            extra_weights: dict[str, float] = {}
+            if search is not None:
+                cand_rows, cand_bodies = _apify_rows(
+                    i, claim, search=search, extract=extract, embed=embed, shared=shared,
+                    accept_candidate=accept_candidate, own_canon="", url="",
+                    same_fact_threshold=same_fact_threshold,
+                )
+                have = {r.article_id for r in matched_rows}
+                fresh = [r for r in cand_rows if r.article_id not in have]
+                if fresh:
+                    extra_rows.extend(fresh)
+                    extra_bodies.update(
+                        {u: b for u, b in cand_bodies.items() if u not in bodies}
                     )
-                    if matched_rows and web_search is not None:
-                        with tally_lock:
-                            tally["fallback"] += 1
-            dispute = (contradicted and not matched_rows) or primary_contradicted
+                    with tally_lock:
+                        tally["fallback"] += 1
+            fc_rows, fc_bodies, fc_weights, fc_refuted = _fact_check_rows(i, claim)
+            extra_rows.extend(r for r in fc_rows if r.article_id not in
+                              {x.article_id for x in matched_rows})
+            extra_bodies.update(fc_bodies)
+            extra_weights.update(fc_weights)
+            extras[i] = (extra_rows, extra_bodies, extra_weights, fc_refuted)
+            all_rows = [*matched_rows, *extra_rows]
+            all_bodies = {**bodies, **extra_bodies}
+            all_weights = {**weights, **extra_weights}
+            # A same-fact fact-check rated FALSE refutes even when outlets carry the claim —
+            # rumour coverage repeating a debunked claim is the exact failure this catches. A web
+            # contradiction still disputes only when nothing corroborates (conservative, as in
+            # article mode); an authority contradiction disputes regardless (#434).
+            dispute = fc_refuted or (contradicted and not all_rows) or primary_contradicted
             if dispute:
                 with tally_lock:
                     tally["contra"] += 1
             resolve(i, _claim_reading(
-                fact_claims[i], extremities[i], matched_rows, bodies, reputation,
-                disputed=dispute, ownership=ownership, cite_weights=weights, knobs=knobs,
+                fact_claims[i], extremities[i], all_rows, all_bodies, reputation,
+                disputed=dispute, ownership=ownership, cite_weights=all_weights, knobs=knobs,
                 primary_urls=primary_urls, primary_contradicted=primary_contradicted,
             ))
 
@@ -1767,10 +1882,17 @@ def analyse_claim(
                 )
                 if not wr.rows:
                     return
+                # Re-fold the WHOLE braid (#451): the deep web rows PLUS the candidate/fact-check
+                # extras this claim already earned — a rescue must never drop braided evidence.
+                ex_rows, ex_bodies, ex_weights, fc_refuted = extras.get(i, ([], {}, {}, False))
+                web_ids = {r.article_id for r in wr.rows}
+                all_rows = [*wr.rows, *(r for r in ex_rows if r.article_id not in web_ids)]
                 reading, rated = _claim_reading(
-                    fact_claims[i], extremities[i], wr.rows, wr.bodies, reputation,
-                    disputed=wr.primary_contradicted, ownership=ownership,
-                    cite_weights=wr.weights, knobs=knobs, primary_urls=wr.primary_urls,
+                    fact_claims[i], extremities[i], all_rows,
+                    {**wr.bodies, **ex_bodies}, reputation,
+                    disputed=fc_refuted or wr.primary_contradicted, ownership=ownership,
+                    cite_weights={**wr.weights, **ex_weights}, knobs=knobs,
+                    primary_urls=wr.primary_urls,
                     primary_contradicted=wr.primary_contradicted,
                 )
                 if reading.independent_originators > readings[i].independent_originators:
@@ -1791,10 +1913,15 @@ def analyse_claim(
             searched_claims=len(novel_idx), skipped_claims=0,
             candidates_considered=shared.considered, candidates_used=len(shared.bodies),
             web_corroborated=tally["web"], web_contradicted=tally["contra"],
-            web_neutral=tally["neutral"], apify_fallbacks=tally["fallback"],
+            web_neutral=tally["neutral"],
+            # In the claim-mode braid this counts candidate-leg CONTRIBUTIONS (the leg always
+            # runs and merges, #451), not fallbacks — same field, per-mode meaning.
+            apify_fallbacks=tally["fallback"],
             nli_available=nli is not None, deep_searched=deep_searched,
             deep_rescued=deep_rescued,
             authority_corroborated=tally["auth"], authority_contradicted=tally["auth_contra"],
+            factcheck_checked=fact_check is not None, factcheck_hits=tally["fc_hits"],
+            factcheck_supported=tally["fc_support"], factcheck_refuted=tally["fc_refute"],
         )
 
     done = [r for r in readings if r is not None]
