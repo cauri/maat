@@ -62,6 +62,7 @@ from maat.pipeline.corroborate import (
 from maat.pipeline.extract import extract_claims
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
+from maat.acquire.social import SocialPost
 from maat.pipeline.origin import OriginChain, OriginHit, OriginTrace, build_trace
 from maat.providers.seam import mistral_embed
 
@@ -142,6 +143,10 @@ class LiveMeta:
     # with something in it (confidence != "none"). 0/0 for article analyses.
     origin_searched: int = 0
     origin_traced: int = 0
+    # Social origin leg (#453) — display-only; checked False = leg off (no key / gated), never
+    # silent. hits = guarded matching posts that produced a "circulating since" card.
+    social_checked: bool = False
+    social_hits: int = 0
 
 
 @dataclass(frozen=True)
@@ -243,6 +248,9 @@ FactCheckFn = Callable[[Sequence[str], str], Sequence[Sequence[FactCheck]]]
 # a grounded chain or None. Both optional; a missing seam degrades the trace, never the analysis.
 OriginSearchFn = Callable[[str], Sequence[OriginHit]]
 OriginExtractFn = Callable[[str, list[tuple[str, str]]], OriginChain | None]
+# ``SocialSearchFn`` (#453): social posts matching one claim (X/Reddit via Apify) — origin-trace
+# DISPLAY only, structurally: it returns SocialPost, which no fold accepts. Never corroboration.
+SocialSearchFn = Callable[[str], Sequence[SocialPost]]
 
 
 @dataclass(frozen=True)
@@ -1615,6 +1623,7 @@ def analyse_claim(
     fact_check: FactCheckFn | None = None,
     origin_search: OriginSearchFn | None = None,
     origin_extract: OriginExtractFn | None = None,
+    social_search: SocialSearchFn | None = None,
     nli: NliFn | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
@@ -2003,11 +2012,13 @@ def analyse_claim(
         )
 
     # ── origin trace (#452): who said it first — provenance BESIDE the verdict, never inside ──
-    want_trace = origin_search is not None or origin_extract is not None or bool(fc_by_idx)
+    want_trace = (origin_search is not None or origin_extract is not None
+                  or social_search is not None or bool(fc_by_idx))
     if want_trace:
         emit("tracing", {"claims": n})
         trace_lock = threading.Lock()
         traced_count = [0]
+        social_hits = [0]
 
         def trace_one(i: int) -> None:
             reading = readings[i]
@@ -2024,6 +2035,12 @@ def analyse_claim(
                     hits = list(origin_search(fact_claims[i].text))
                 except Exception as e:  # noqa: BLE001 - a dead leg degrades the trace only
                     log.warning("origin search failed: %s", type(e).__name__)
+            posts: list[SocialPost] = []
+            if social_search is not None:  # #453 — display-only, never touches the fold
+                try:
+                    posts = list(social_search(fact_claims[i].text))
+                except Exception as e:  # noqa: BLE001
+                    log.warning("social origin search failed: %s", type(e).__name__)
             chain: OriginChain | None = None
             if origin_extract is not None:
                 docs = _top_docs(rows, bodies, reputation)
@@ -2040,21 +2057,23 @@ def analyse_claim(
                 chain=chain,
                 carriers=reading.independent_originators,
                 top_carriers=_top_carriers(rows, reputation),
+                social_posts=posts,
             )
             readings[i] = replace(reading, origin=trace)
-            if trace.confidence != "none":
-                with trace_lock:
+            with trace_lock:
+                if trace.confidence != "none":
                     traced_count[0] += 1
+                if trace.social is not None:
+                    social_hits[0] += 1
             emit("traced", {"index": i, "trace": trace})
 
         with ThreadPoolExecutor(max_workers=min(max_workers, n)) as ex:
             list(ex.map(trace_one, range(n)))
         if live is None:
             live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None,
-                            factcheck_checked=fact_check is not None,
-                            origin_searched=n, origin_traced=traced_count[0])
-        else:
-            live = replace(live, origin_searched=n, origin_traced=traced_count[0])
+                            factcheck_checked=fact_check is not None)
+        live = replace(live, origin_searched=n, origin_traced=traced_count[0],
+                       social_checked=social_search is not None, social_hits=social_hits[0])
 
     done = [r for r in readings if r is not None]
     score = score_claims([

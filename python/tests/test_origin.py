@@ -177,3 +177,54 @@ def test_build_trace_honest_empty_states():
     )
     assert weak.confidence == "weak"   # a date without a name is a trace, not an attribution
     assert weak.attributed_to == ""
+
+
+# --- the social leg (#453) --------------------------------------------------------------------
+
+
+def _post(**kw):
+    from maat.acquire.social import SocialPost
+
+    return SocialPost(
+        platform=kw.pop("platform", "x"),
+        author=kw.pop("author", "@TechLeaks"),
+        author_public=kw.pop("author_public", True),
+        text=kw.pop("text", "Musk and Cook agree to merge SpaceX and Apple"),
+        url=kw.pop("url", "https://x.com/TechLeaks/1"),
+        created_at=kw.pop("created_at", "2026-07-07T08:00:00+00:00"),
+        engagement=kw.pop("engagement", 1600),
+    )
+
+
+def test_social_post_becomes_earliest_and_circulating_card():
+    trace = build_trace(
+        _CLAIM,
+        evidence=[("bbc.com", "https://bbc.com/x", "2026-07-12")],
+        hits=[], fact_checks=[], chain=None,
+        carriers=1, top_carriers=["bbc.com"],
+        social_posts=[_post()],
+    )
+    assert trace.social == {"platform": "X", "author": "@TechLeaks on X",
+                            "url": "https://x.com/TechLeaks/1", "date": "2026-07-07",
+                            "engagement": 1600}
+    # The dated post is an earliest CANDIDATE — and here it wins.
+    assert trace.earliest["date"] == "2026-07-07"
+    assert trace.earliest["source"] == "@TechLeaks on X"
+    # …but social alone never names an origin: attribution stays empty, confidence weak.
+    assert trace.attributed_to == "" and trace.confidence == "weak"
+
+
+def test_social_guards_unrelated_undated_and_private_posts():
+    unrelated = _post(text="Apple pie recipe thread", url="https://x.com/a/9")
+    undated = _post(created_at="", url="https://x.com/a/8")
+    private = _post(author="@tiny", author_public=False,
+                    created_at="2026-07-05T00:00:00+00:00", url="https://x.com/tiny/7")
+    trace = build_trace(
+        _CLAIM, evidence=[], hits=[], fact_checks=[], chain=None,
+        carriers=0, top_carriers=[],
+        social_posts=[unrelated, undated, private],
+    )
+    # Only the private-but-matching post survives the guards — anonymised on every surface.
+    assert trace.social["author"] == "a social media account on X"
+    assert trace.earliest["source"] == "a social media account on X"
+    assert "@tiny" not in str(trace)

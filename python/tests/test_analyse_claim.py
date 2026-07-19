@@ -624,3 +624,28 @@ def test_origin_search_failure_degrades_to_no_trace_data():
     assert reading.origin is not None
     assert reading.origin.confidence == "none"     # honest empty trace, analysis unharmed
     assert result.live.origin_traced == 0
+
+
+def test_social_leg_is_display_only_never_corroboration():
+    from maat.acquire.social import SocialPost
+
+    post = SocialPost(platform="x", author="@TechLeaks", author_public=True,
+                      text=f"BREAKING: {_VOTE}", url="https://x.com/TechLeaks/1",
+                      created_at="2026-07-07T08:00:00+00:00", engagement=900)
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="routine"),
+        web_search=lambda texts, own, deep=False: [[] for _ in texts],
+        social_search=lambda text: [post],
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    # Zero originators still — a viral post is provenance, not corroboration.
+    assert reading.independent_originators == 0
+    assert reading.verdict == "No independent support found yet"
+    assert reading.origin is not None
+    assert reading.origin.social["author"] == "@TechLeaks on X"
+    assert reading.origin.earliest["date"] == "2026-07-07"
+    assert result.live.social_checked is True and result.live.social_hits == 1
