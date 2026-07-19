@@ -48,7 +48,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import numpy as np
 
 from maat import events as events_mod
-from maat.acquire import apify, gdelt, source_gate
+from maat.acquire import apify, factcheck, gdelt, source_gate
 from maat.acquire.fetch import FetchedPage, fetch_article, fetch_page
 from maat.acquire.source_gate import prefiltered_reject
 from maat.learning.reputation import SourceReputation, fold_reputation, reputation_score
@@ -112,6 +112,10 @@ _SEARCH_MODEL = os.environ.get("MAAT_ANALYSE_SEARCH_MODEL", "claude-sonnet-4-6")
 # Tiered authority (#434) — the source-of-truth-seeking leg, on by default (cauri: the FIRST level
 # of fact checking). Runs in parallel with the general pass; off → exactly the pre-#434 behaviour.
 _AUTHORITY = os.environ.get("MAAT_ANALYSE_AUTHORITY", "1") not in ("0", "false", "no")
+# Fact-check leg (P16 #451) — published ClaimReview fact-checks braided into CLAIM mode. Needs the
+# (free) Google Fact Check Tools key; no key → the leg is off and LiveMeta records it, never silent.
+_FACTCHECK = os.environ.get("MAAT_ANALYSE_FACTCHECK", "1") not in ("0", "false", "no")
+_FACTCHECK_KEY = os.environ.get("MAAT_FACTCHECK_KEY", "").strip()
 # NLI entailment gate thresholds (#389) — tunable in prod without a deploy once the web_neutral
 # recall-drift signal shows whether the gate is too strict. Model swap is the other lever
 # (MAAT_NLI_MODEL, in pipeline/nli.py).
@@ -767,6 +771,26 @@ def make_authority_search(denied: set[str], prompt_seed: str):
     return authority_search
 
 
+def make_fact_check(key: str):
+    """The pipeline's FactCheckFn (#451): published ClaimReview fact-checks per claim text, from
+    the Google Fact Check Tools API — one query per claim, concurrently, each best-effort (a dead
+    query returns [] for its claim, never sinks the braid). None when no key is configured — the
+    pipeline surfaces the leg as off in LiveMeta."""
+    if not key:
+        return None
+
+    def fact_check(claim_texts: Sequence[str], language: str) -> list[list[factcheck.FactCheck]]:
+        if not claim_texts:
+            return []
+        with ThreadPoolExecutor(max_workers=len(claim_texts)) as ex:
+            return list(ex.map(
+                lambda t: factcheck.search_fact_checks(t, key=key, language=language),
+                claim_texts,
+            ))
+
+    return fact_check
+
+
 def make_nli():
     """The pipeline's NLI seam (entailment judge) — the loaded cross-encoder, or None when the NLI
     model is unavailable (gated by MAAT_CONTRADICTION_NLI). None → the pipeline does not count
@@ -1030,6 +1054,11 @@ def ops_meta(
             "nli_available": lv.nli_available,
             "deep_searched": lv.deep_searched,
             "deep_rescued": lv.deep_rescued,
+            # Claim-mode braid (#451) — all 0/False for article analyses (leg not braided there).
+            "factcheck_checked": lv.factcheck_checked,
+            "factcheck_hits": lv.factcheck_hits,
+            "factcheck_supported": lv.factcheck_supported,
+            "factcheck_refuted": lv.factcheck_refuted,
         }
     return out
 
@@ -1294,6 +1323,7 @@ async def run_claim_analysis(
                 make_authority_search(assets.denied, assets.authority_prompt)
                 if (_LIVE and _WEB_SEARCH and _AUTHORITY) else None
             ),
+            fact_check=make_fact_check(_FACTCHECK_KEY) if (_LIVE and _FACTCHECK) else None,
             nli=make_nli(),
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),

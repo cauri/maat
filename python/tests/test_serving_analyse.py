@@ -338,6 +338,9 @@ def test_ops_meta_carries_coverage_never_the_public_payload(monkeypatch):
         "candidates_used": 4, "web_corroborated": 3, "web_contradicted": 1,
         "web_neutral": 2, "apify_fallbacks": 2, "nli_available": True,
         "deep_searched": 0, "deep_rescued": 0,
+        # #451 — the fact-check leg is braided into CLAIM mode only; article runs read 0/False.
+        "factcheck_checked": False, "factcheck_hits": 0,
+        "factcheck_supported": 0, "factcheck_refuted": 0,
     }
     # the public payload (served + cached) carries no ops block and no coverage numbers
     assert "ops" not in payload

@@ -20,6 +20,7 @@ from maat.pipeline.analyse import (
     analyse_claim,
     claim_mode_verdict,
 )
+from maat.pipeline.claim import Claim
 from maat.pipeline.claimify import NormalisedClaim, NormalisedInput
 from maat.pipeline.corroborate import ClaimRow
 
@@ -195,14 +196,35 @@ def test_lone_contradiction_reads_refuted():
     assert result.score.label == "Refuted"
 
 
-def test_deep_pass_rescues_a_lone_claim():
-    calls = {"deep": 0}
+def test_first_pass_opens_at_the_deep_budget():
+    seen = []
 
     def web_search(texts, own, deep=False):
-        if deep:
-            calls["deep"] += 1
-            return [_vote_citations() for _ in texts]
-        return [[] for _ in texts]
+        seen.append(deep)
+        return [_vote_citations() for _ in texts]
+
+    analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=web_search,
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    # #451: the reader asked about exactly this claim — no shallow-first economy to protect.
+    assert seen == [True]
+
+
+def test_deep_pass_rescues_a_lone_claim():
+    calls = {"n": 0}
+
+    def web_search(texts, own, deep=False):
+        assert deep is True          # every claim-mode pass runs at the deep budget (#451)
+        calls["n"] += 1
+        if calls["n"] == 1:          # pass 1 finds nothing …
+            return [[] for _ in texts]
+        return [_vote_citations() for _ in texts]  # … the still-lone re-search rescues
 
     result = analyse_claim(
         _VOTE,
@@ -214,7 +236,7 @@ def test_deep_pass_rescues_a_lone_claim():
         fetch=_no_fetch,
     )
     (reading,) = result.facts
-    assert calls["deep"] == 1
+    assert calls["n"] == 2
     assert reading.independent_originators == 2
     assert result.live is not None
     assert result.live.deep_searched == 1
@@ -371,3 +393,146 @@ def test_score_claims_forecast_wording():
     score = score_claims([])
     assert score.forecast_only is True
     assert score.label == "Nothing to check — opinion or forecast"
+
+
+# --- the evidence braid (#451) ----------------------------------------------------------------
+
+
+def _fc(polarity_rating, *, claim_text=_VOTE, url="https://factcheck.afp.com/vote",
+        publisher="AFP Fact Check", site="factcheck.afp.com"):
+    from maat.acquire.factcheck import FactCheck, rating_polarity
+
+    return FactCheck(
+        claim_text=claim_text, claimant="viral posts", claim_date="2026-07-10",
+        publisher=publisher, site=site, review_url=url,
+        review_title="Checked", review_date="2026-07-11",
+        rating=polarity_rating, polarity=rating_polarity(polarity_rating),
+    )
+
+
+def test_factcheck_false_refutes_even_when_outlets_carry_the_claim():
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [_vote_citations() for _ in texts],
+        fact_check=lambda texts, lang: [[_fc("False")] for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    assert reading.disputed is True
+    assert reading.verdict == "Refuted — contradicted by independent reporting"
+    assert result.score.label == "Refuted"
+    assert result.live is not None
+    assert result.live.factcheck_checked is True
+    assert result.live.factcheck_refuted == 1
+
+
+def test_factcheck_true_is_one_more_independent_originator():
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [_vote_citations() for _ in texts],
+        fact_check=lambda texts, lang: [[_fc("True")] for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    assert reading.independent_originators == 3      # bbc + rts + the fact-checker
+    assert result.live.factcheck_supported == 1
+
+
+def test_factcheck_of_a_different_claim_moves_nothing():
+    other = _fc("False", claim_text="A completely unrelated statement about sports")
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [_vote_citations() for _ in texts],
+        fact_check=lambda texts, lang: [[other] for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    assert reading.disputed is False                  # failed the same-fact NLI gate
+    assert result.live.factcheck_hits == 1            # found, counted — just never trusted
+    assert result.live.factcheck_refuted == 0
+
+
+def test_disagreeing_factchecks_cancel_to_the_evidence_fold():
+    checks = [_fc("False"),
+              _fc("True", url="https://fullfact.org/vote", publisher="Full Fact",
+                  site="fullfact.org")]
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [_vote_citations() for _ in texts],
+        fact_check=lambda texts, lang: [checks for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    assert reading.disputed is False                  # genuinely contested is not "Refuted"
+    assert reading.verdict != "Refuted — contradicted by independent reporting"
+    assert result.live.factcheck_refuted == 1 and result.live.factcheck_supported == 1
+
+
+def test_candidate_leg_braids_with_web_rows_not_as_fallback():
+    from maat.pipeline.analyse import LiveCandidate
+
+    bbc_only = [Citation(url="https://bbc.com/vote", domain="bbc.com", quote=_BBC_QUOTE)]
+    rts_cand = LiveCandidate(url="https://rts.ch/vote", domain="rts.ch", title="t",
+                             body=_RTS_QUOTE)
+
+    def fake_extract(body, **kw):
+        return [Claim(text=_VOTE, voice="own", evidence_span=body[:20])]
+
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [bbc_only for _ in texts],
+        search=lambda q: [rts_cand],
+        extract=fake_extract,
+        embed=lambda texts: [[1.0, 0.0] for _ in texts],   # every text = the same fact
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    # The candidate leg ran ALONGSIDE a successful web pass and its outlet merged in.
+    assert reading.independent_originators == 2
+    assert result.live.apify_fallbacks == 1
+
+
+def test_deep_rescue_keeps_braided_factcheck_evidence():
+    calls = {"n": 0}
+
+    def web_search(texts, own, deep=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [[] for _ in texts]
+        return [_vote_citations() for _ in texts]
+
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=web_search,
+        fact_check=lambda texts, lang: [[_fc("True")] for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    # Pass 1: fact-checker only (1 originator). Deep rescue adds bbc+rts — and must KEEP the
+    # fact-checker in the re-fold: 3, not 2.
+    assert reading.independent_originators == 3
+    assert result.live.deep_rescued == 1
