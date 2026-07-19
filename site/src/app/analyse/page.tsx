@@ -5,7 +5,7 @@ import Analyser from "./analyser";
 
 const DEFAULT_TITLE = "Maat — weigh the news";
 const DEFAULT_DESC =
-  "Paste a link to any news article. Maat breaks it into its claims, checks each one against independent reporting, and gives the article one clear read.";
+  "Paste a link to any news article — or type a claim you've heard. Maat checks each claim against independent reporting and primary sources, and traces where it came from.";
 
 // Per-analysis OG/Twitter tags for a shared ?id= link: when a platform crawls the URL it unfurls
 // the article's verdict card. (The live tab's client-side ?id= update doesn't re-run this — it
@@ -24,7 +24,8 @@ export async function generateMetadata({
   const card = `${PUBLIC_ORIGIN}/card?id=${encodeURIComponent(id)}&format=landscape`;
   const pageUrl = `${PUBLIC_ORIGIN}/analyse?id=${encodeURIComponent(id)}`;
   const headline = a.overall.forecast_only ? a.overall.label : `${a.overall.label} · ${a.overall.score}/100`;
-  const title = a.share?.og_title ?? `Maat weighed “${a.title ?? "this article"}”`;
+  const subject = a.kind === "claim" ? (a.checked?.display ?? "this claim") : (a.title ?? "this article");
+  const title = a.share?.og_title ?? `Maat weighed “${subject}”`;
   const description =
     a.share?.og_description ??
     `${headline}. Maat weighs each factual claim against independent reporting — not tone or bias.`;
@@ -60,18 +61,18 @@ export default function AnalysePage() {
         <section className="hero">
           <h1>Weigh the news.</h1>
           <p className="lede">
-            Paste a link to a news article. Maat breaks it into its claims and checks each one
-            against independent reporting.
+            Paste a link to a news article — or type a claim you&rsquo;ve heard. Maat checks
+            every claim against independent reporting and primary sources, and traces where it
+            came from.
           </p>
           <Suspense>
             <Analyser />
           </Suspense>
         </section>
         <footer className="foot">
-          Maat measures whether an article&rsquo;s factual claims hold up against independent
-          reporting — not its tone, its bias, or what it leaves out. Surprising claims are held
-          to a higher bar than everyday ones. ·{" "}
-          <a href="https://www.maat.press/privacy">Privacy</a>
+          Maat measures whether factual claims hold up against independent reporting and primary
+          sources — not tone, bias, or who told you. Surprising claims are held to a higher bar
+          than everyday ones. · <a href="https://www.maat.press/privacy">Privacy</a>
         </footer>
       </main>
     </>

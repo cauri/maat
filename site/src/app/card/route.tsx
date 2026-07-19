@@ -134,14 +134,17 @@ export async function GET(request: Request) {
       >
         {Wordmark}
 
-        {/* Article */}
+        {/* Subject — the article's title, or the canonical claim ("We checked", P16 #450). */}
         <div style={{ display: "flex", flexDirection: "column", marginTop: square ? 28 : 10 }}>
           <div style={{ display: "flex", fontSize: square ? 46 : 40, fontWeight: 700, lineHeight: 1.18 }}>
-            {trim(a.title || "Untitled article", square ? 120 : 110)}
+            {a.kind === "claim"
+              ? `“${trim(a.checked?.display || "this claim", square ? 116 : 106)}”`
+              : trim(a.title || "Untitled article", square ? 120 : 110)}
           </div>
           <div style={{ display: "flex", color: MUT, fontSize: square ? 28 : 24, marginTop: 14 }}>
-            {a.source}
-            {a.publisher.rated ? `  ·  publisher track record ${a.publisher.score}%` : ""}
+            {a.kind === "claim"
+              ? "a claim, checked against independent reporting"
+              : `${a.source ?? ""}${a.publisher?.rated ? `  ·  publisher track record ${a.publisher.score}%` : ""}`}
           </div>
         </div>
 
@@ -172,7 +175,9 @@ export async function GET(request: Request) {
 
         {/* Scope */}
         <div style={{ display: "flex", color: MUT, fontSize: square ? 22 : 19, borderTop: `1px solid ${LINE}`, paddingTop: 18, lineHeight: 1.35 }}>
-          Maat weighs whether an article&apos;s factual claims hold up against independent reporting — not its tone or bias.
+          {a.kind === "claim"
+            ? "Maat weighs whether a claim holds up against independent reporting and primary sources — not who told you."
+            : "Maat weighs whether an article's factual claims hold up against independent reporting — not its tone or bias."}
         </div>
       </div>
     ),
