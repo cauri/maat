@@ -29,6 +29,7 @@ from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
 from maat.learning.hindsight import HINDSIGHT_RESOLVE_PROMPT, HINDSIGHT_TRIAGE_PROMPT
 from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT
 from maat.pipeline.claimify import PROMPT as CLAIMIFY_PROMPT
+from maat.pipeline.origin import PROMPT as ORIGIN_CHAIN_PROMPT
 from maat.pipeline.grounding import GROUNDING_PROMPT
 from maat.pipeline.triage import TRIAGE_LLM_PROMPT
 from maat.acquire.source_gate import PROMPT as SOURCE_GATE_PROMPT
@@ -302,6 +303,15 @@ PROMPTS: list[dict] = [
      "guard); the engine enforces a fixed JSON schema and rejects anything else — a reply is "
      "never repaired into something plausible.",
      "placeholders": ["{reader_input}", "{max_claims}"]},
+    {"key": "origin_chain", "label": "Origin trace (who does the evidence credit?)",
+     "default": ORIGIN_CHAIN_PROMPT, "status": "draft", "source": "maat/pipeline/origin.py",
+     "description": "The origin trace's attribution-chain pass (P16 #452): over the top evidence "
+     "bodies for one claim, extract who each source credits as the origin ('according to', "
+     "'first reported by', 'began circulating on') and the chain it travelled. The cited "
+     "sentence must actually appear in a document or the whole chain is discarded "
+     "(anti-fabrication); an unattributed claim honestly returns origin null. Provenance rides "
+     "beside the verdict and never moves the score.",
+     "placeholders": ["{claim}", "{documents}"]},
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
      "description": "Would turn a reader's natural-language interest ('West African politics') into "

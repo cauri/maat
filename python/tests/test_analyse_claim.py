@@ -536,3 +536,91 @@ def test_deep_rescue_keeps_braided_factcheck_evidence():
     # fact-checker in the re-fold: 3, not 2.
     assert reading.independent_originators == 3
     assert result.live.deep_rescued == 1
+
+
+# --- the origin trace (#452) ------------------------------------------------------------------
+
+
+def _origin_hit(seendate="20260709T080000Z"):
+    from maat.pipeline.origin import OriginHit
+
+    return OriginHit(url="https://old.example/musk", domain="old.example",
+                     title="Parliament postponed budget vote say officials", seendate=seendate)
+
+
+def test_origin_trace_rides_the_reading_and_never_moves_the_score():
+    from maat.pipeline.origin import OriginChain
+
+    baseline = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [_vote_citations() for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    traced = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [_vote_citations() for _ in texts],
+        origin_search=lambda text: [_origin_hit()],
+        origin_extract=lambda text, docs: OriginChain(
+            who="the speaker's office", kind="official", date_hint="", quote="q",
+            chain=["the speaker's office", "bbc.com"]),
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = traced.facts
+    assert reading.origin is not None
+    assert reading.origin.attributed_to == "the speaker's office"
+    assert reading.origin.earliest == {"date": "2026-07-09", "source": "old.example",
+                                       "url": "https://old.example/musk"}
+    assert reading.origin.carriers == 2
+    assert set(reading.origin.top_carriers) == {"bbc.com", "rts.ch"}
+    # Provenance rides BESIDE the verdict: identical score with and without the trace.
+    assert traced.score.score == baseline.score.score
+    assert traced.live.origin_searched == 1 and traced.live.origin_traced == 1
+    assert baseline.facts[0].origin is None  # no origin seams → no trace pretence
+
+
+def test_origin_trace_events_and_factcheck_seed():
+    events: list[tuple[str, dict]] = []
+    analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [[] for _ in texts],
+        fact_check=lambda texts, lang: [[_fc("False")] for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+        progress=lambda kind, data: events.append((kind, data)),
+    )
+    kinds = [k for k, _ in events]
+    assert "tracing" in kinds and "traced" in kinds
+    trace = next(d["trace"] for k, d in events if k == "traced")
+    # No chain pass, no dated evidence — but the fact-checker's claimant seeds the attribution.
+    assert trace.attributed_to == "viral posts"
+    assert trace.confidence == "strong"
+
+
+def test_origin_search_failure_degrades_to_no_trace_data():
+    def boom(_text):
+        raise OSError("gdelt down")
+
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="routine"),
+        web_search=lambda texts, own, deep=False: [[] for _ in texts],
+        origin_search=boom,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    assert reading.origin is not None
+    assert reading.origin.confidence == "none"     # honest empty trace, analysis unharmed
+    assert result.live.origin_traced == 0

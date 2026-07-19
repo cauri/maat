@@ -35,7 +35,7 @@ import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
@@ -62,6 +62,7 @@ from maat.pipeline.corroborate import (
 from maat.pipeline.extract import extract_claims
 from maat.pipeline.extremity import rate_extremity
 from maat.pipeline.identity import canonical_source
+from maat.pipeline.origin import OriginChain, OriginHit, OriginTrace, build_trace
 from maat.providers.seam import mistral_embed
 
 log = logging.getLogger("maat.pipeline.analyse")
@@ -137,6 +138,10 @@ class LiveMeta:
     factcheck_hits: int = 0
     factcheck_supported: int = 0
     factcheck_refuted: int = 0
+    # Origin trace (P16 #452) — claims the trace pass ran for, and how many produced a trace
+    # with something in it (confidence != "none"). 0/0 for article analyses.
+    origin_searched: int = 0
+    origin_traced: int = 0
 
 
 @dataclass(frozen=True)
@@ -185,6 +190,10 @@ class ClaimReading:
                                     # carried with NO score, excluded from the overall, and offered
                                     # to the reader for an on-demand force-check (#397). Never
                                     # conflate "checked, found alone" with "never checked".
+    # P16 #452 — CLAIM mode only: the origin trace (who said it first, when, who carries it).
+    # Provenance rides BESIDE the verdict, never inside it — it does not move the score. Always
+    # None for article-mode readings.
+    origin: OriginTrace | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +237,12 @@ WebSearchFn = Callable[..., Sequence[Sequence[Citation]]]
 # Check Tools API; None = leg off (no key), surfaced in LiveMeta, never silent. The pipeline
 # same-fact gates every review with NLI before a rating can move anything.
 FactCheckFn = Callable[[Sequence[str], str], Sequence[Sequence[FactCheck]]]
+# Origin-trace seams (P16 #452). ``OriginSearchFn``: earliest-window search — dated, oldest-first
+# coverage candidates for one claim (serving: GDELT DOC sorted dateasc over a wide window).
+# ``OriginExtractFn``: the attribution-chain LLM pass over (source, body) evidence docs — returns
+# a grounded chain or None. Both optional; a missing seam degrades the trace, never the analysis.
+OriginSearchFn = Callable[[str], Sequence[OriginHit]]
+OriginExtractFn = Callable[[str, list[tuple[str, str]]], OriginChain | None]
 
 
 @dataclass(frozen=True)
@@ -711,20 +726,25 @@ def entailment_weight(strength: float, min_entail: float = 0.5, *, floor: float 
 
 class _CiteFetch:
     """Fetch each cited URL at most once across all claims (many claims cite the same page) and
-    cache the ladder body. A ``None`` entry caches a failed fetch so it is not retried."""
+    cache the ladder body. A ``None`` entry caches a failed fetch so it is not retried.
+    Publication dates ride along when the page states one (P16 #452 — the origin trace's
+    evidence-dating signal; free, the ladder already parses them)."""
 
     def __init__(self, fetch: Callable[[str], FetchedPage | None]) -> None:
         self._fetch = fetch
         self._lock = threading.Lock()
         self._bodies: dict[str, str | None] = {}
+        self._dates: dict[str, str | None] = {}
 
     def body(self, url: str) -> str | None:
         with self._lock:
             if url in self._bodies:
                 return self._bodies[url]
+        date: str | None = None
         try:
             page = self._fetch(url)
             got = page.body if page and page.body else None
+            date = page.date if page else None
         except Exception as e:  # noqa: BLE001 - a dead cited URL drops that source, never the run
             log.warning("cite-fetch url=%s failed: %s", url, type(e).__name__)
             got = None
@@ -732,7 +752,13 @@ class _CiteFetch:
             log.info("cite-fetch url=%s no body — citation judged on NLI alone", url)
         with self._lock:
             self._bodies.setdefault(url, got)
+            self._dates.setdefault(url, date)
             return self._bodies[url]
+
+    def date(self, url: str) -> str | None:
+        """The publication date of an already-fetched page (None: unknown / never fetched)."""
+        with self._lock:
+            return self._dates.get(url)
 
 
 class WebRows(NamedTuple):
@@ -1541,6 +1567,43 @@ def _claim_corpus_reading(
     return reading, rated
 
 
+def _top_docs(
+    rows: list[ClaimRow], bodies: dict[str, str], reputation: Mapping[str, float],
+    *, cap: int = 3,
+) -> list[tuple[str, str]]:
+    """The evidence documents worth an attribution-chain read (#452): (source, body) pairs,
+    proven-track-record sources first, longer bodies first within a tier — a full article beats
+    a bare quote for finding "according to …" chains."""
+    seen: set[str] = set()
+    ranked: list[tuple[int, int, str, str]] = []
+    for r in rows:
+        body = bodies.get(r.article_id, "")
+        if not body or r.article_id in seen:
+            continue
+        seen.add(r.article_id)
+        rated = _rep(reputation, r.source) is not None
+        ranked.append((0 if rated else 1, -len(body), r.source, body))
+    ranked.sort()
+    return [(source, body) for _, _, source, body in ranked[:cap]]
+
+
+def _top_carriers(
+    rows: list[ClaimRow], reputation: Mapping[str, float], *, cap: int = 3,
+) -> list[str]:
+    """Up to ``cap`` carrier names for the origin trace — proven track records first, first-seen
+    order within a tier. Public by design (#452: provenance names names)."""
+    seen: set[str] = set()
+    carriers: list[tuple[int, int, str]] = []
+    for k, r in enumerate(rows):
+        name = r.source
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        carriers.append((0 if _rep(reputation, name) is not None else 1, k, name))
+    carriers.sort()
+    return [name for _, _, name in carriers[:cap]]
+
+
 def analyse_claim(
     text: str,
     *,
@@ -1550,6 +1613,8 @@ def analyse_claim(
     web_search: WebSearchFn | None = None,
     authority_search: WebSearchFn | None = None,
     fact_check: FactCheckFn | None = None,
+    origin_search: OriginSearchFn | None = None,
+    origin_extract: OriginExtractFn | None = None,
     nli: NliFn | None = None,
     search: SearchFn | None = None,
     accept_candidate: Callable[[LiveCandidate], bool] | None = None,
@@ -1584,6 +1649,12 @@ def analyse_claim(
     (rumour coverage repeating a debunked claim is exactly the failure this catches); rated TRUE
     it corroborates as one more independent originator; mixed/unclear ratings never move a
     verdict.
+
+    THE ORIGIN TRACE (#452): after the verdicts settle, a provenance pass runs per claim —
+    evidence-page dates, an earliest-window search (oldest-first), a grounded attribution-chain
+    read of the top evidence, and the fact-checkers' claimant/date seeds — folded into an
+    ``OriginTrace`` that rides on the reading. It NAMES the earliest carrier and attributed
+    origin (locked with cauri: provenance is the answer), and it never moves the score.
 
     Pure orchestration over the same injected seams as ``analyse_article`` — testable offline.
     """
@@ -1658,6 +1729,12 @@ def analyse_claim(
             lambda i: extremity_of(fact_claims[i].text), novel_idx
         )))
 
+    # Shared across the live pass AND the origin-trace pass (#452), so both see the same fetched
+    # pages/dates and fact-check seeds — hoisted above the branch (empty when no live legs ran).
+    cite_fetch = _CiteFetch(fetch)
+    fc_by_idx: dict[int, list[FactCheck]] = {}
+    final_evidence: dict[int, tuple[list[ClaimRow], dict[str, str]]] = {}
+
     live: LiveMeta | None = None
     have_live = (web_search is not None or search is not None
                  or authority_search is not None or fact_check is not None)
@@ -1671,7 +1748,6 @@ def analyse_claim(
                             factcheck_checked=fact_check is not None)
     else:
         emit("searching", {"claims": len(novel_idx)})
-        cite_fetch = _CiteFetch(fetch)
         shared = _LiveShared(live_max_candidates)
         novel_texts = [fact_claims[i].text for i in novel_idx]
 
@@ -1702,7 +1778,6 @@ def analyse_claim(
             fut_fc = ex.submit(_fc_pass)
             general, authority, factchecks = fut_gen.result(), fut_auth.result(), fut_fc.result()
         citations: dict[int, list[Citation]] = {}
-        fc_by_idx: dict[int, list[FactCheck]] = {}
         for k, i in enumerate(novel_idx):
             merged = [  # #434: authority citations FIRST — same merge order as article mode
                 *(authority[k] if k < len(authority) else ()),
@@ -1833,6 +1908,7 @@ def analyse_claim(
             all_rows = [*matched_rows, *extra_rows]
             all_bodies = {**bodies, **extra_bodies}
             all_weights = {**weights, **extra_weights}
+            final_evidence[i] = (all_rows, all_bodies)  # the origin trace reads this (#452)
             # A same-fact fact-check rated FALSE refutes even when outlets carry the claim —
             # rumour coverage repeating a debunked claim is the exact failure this catches. A web
             # contradiction still disputes only when nothing corroborates (conservative, as in
@@ -1887,15 +1963,17 @@ def analyse_claim(
                 ex_rows, ex_bodies, ex_weights, fc_refuted = extras.get(i, ([], {}, {}, False))
                 web_ids = {r.article_id for r in wr.rows}
                 all_rows = [*wr.rows, *(r for r in ex_rows if r.article_id not in web_ids)]
+                all_bodies = {**wr.bodies, **ex_bodies}
                 reading, rated = _claim_reading(
                     fact_claims[i], extremities[i], all_rows,
-                    {**wr.bodies, **ex_bodies}, reputation,
+                    all_bodies, reputation,
                     disputed=fc_refuted or wr.primary_contradicted, ownership=ownership,
                     cite_weights={**wr.weights, **ex_weights}, knobs=knobs,
                     primary_urls=wr.primary_urls,
                     primary_contradicted=wr.primary_contradicted,
                 )
                 if reading.independent_originators > readings[i].independent_originators:
+                    final_evidence[i] = (all_rows, all_bodies)  # the trace follows the rescue
                     with tally_lock:
                         deep_rescued += 1
                         if i not in web_counted:
@@ -1923,6 +2001,60 @@ def analyse_claim(
             factcheck_checked=fact_check is not None, factcheck_hits=tally["fc_hits"],
             factcheck_supported=tally["fc_support"], factcheck_refuted=tally["fc_refute"],
         )
+
+    # ── origin trace (#452): who said it first — provenance BESIDE the verdict, never inside ──
+    want_trace = origin_search is not None or origin_extract is not None or bool(fc_by_idx)
+    if want_trace:
+        emit("tracing", {"claims": n})
+        trace_lock = threading.Lock()
+        traced_count = [0]
+
+        def trace_one(i: int) -> None:
+            reading = readings[i]
+            if reading is None:
+                return
+            rows, bodies = final_evidence.get(i, ([], {}))
+            if not rows and reading.matched_cluster_id is not None and matches[i] is not None:
+                # A corpus-matched claim: the cluster's own members are the carriers.
+                rows, bodies = list(matches[i].member_claims), dict(matches[i].bodies)
+            evidence = [(r.source, r.article_id, cite_fetch.date(r.article_id)) for r in rows]
+            hits: list[OriginHit] = []
+            if origin_search is not None:
+                try:
+                    hits = list(origin_search(fact_claims[i].text))
+                except Exception as e:  # noqa: BLE001 - a dead leg degrades the trace only
+                    log.warning("origin search failed: %s", type(e).__name__)
+            chain: OriginChain | None = None
+            if origin_extract is not None:
+                docs = _top_docs(rows, bodies, reputation)
+                if docs:
+                    try:
+                        chain = origin_extract(fact_claims[i].text, docs)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("origin chain pass failed: %s", type(e).__name__)
+            trace = build_trace(
+                fact_claims[i].text,
+                evidence=evidence,
+                hits=hits,
+                fact_checks=list(fc_by_idx.get(i, ())),
+                chain=chain,
+                carriers=reading.independent_originators,
+                top_carriers=_top_carriers(rows, reputation),
+            )
+            readings[i] = replace(reading, origin=trace)
+            if trace.confidence != "none":
+                with trace_lock:
+                    traced_count[0] += 1
+            emit("traced", {"index": i, "trace": trace})
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, n)) as ex:
+            list(ex.map(trace_one, range(n)))
+        if live is None:
+            live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None,
+                            factcheck_checked=fact_check is not None,
+                            origin_searched=n, origin_traced=traced_count[0])
+        else:
+            live = replace(live, origin_searched=n, origin_traced=traced_count[0])
 
     done = [r for r in readings if r is not None]
     score = score_claims([
