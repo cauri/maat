@@ -88,11 +88,13 @@ def score_claims(claims: list[ArticleClaim]) -> StoryScore:
         )
 
     label = base.label
-    if base.band == "single" and all(
-        c.independent_originators == 0 for c in claims if c.central
-    ):
+    why = _claim_why(list(base.why), plural)
+    central = [c for c in claims if c.central] or claims
+    if base.band == "single" and all(c.independent_originators == 0 for c in central):
         # Nobody published this at all — "Single source" would invent one.
         label = "No independent support found"
-    return StoryScore(
-        base.score, base.band, label, _claim_why(list(base.why), plural), base.capped, False,
-    )
+        if all(c.fresh_absence for c in central):
+            # #454 — hours old: absence is expected, not damning. Say so.
+            label = "Too early to tell"
+            why.append("first seen only hours ago — too early for independent reporting")
+    return StoryScore(base.score, base.band, label, why, base.capped, False)

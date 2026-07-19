@@ -344,6 +344,7 @@ def test_ops_meta_carries_coverage_never_the_public_payload(monkeypatch):
         "factcheck_supported": 0, "factcheck_refuted": 0,
         "origin_searched": 0, "origin_traced": 0,
         "social_checked": False, "social_hits": 0,
+        "coverage_judged": 0, "coverage_expected": 0, "fresh_absent": 0,
     }
     # the public payload (served + cached) carries no ops block and no coverage numbers
     assert "ops" not in payload

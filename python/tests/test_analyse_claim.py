@@ -649,3 +649,90 @@ def test_social_leg_is_display_only_never_corroboration():
     assert reading.origin.social["author"] == "@TechLeaks on X"
     assert reading.origin.earliest["date"] == "2026-07-07"
     assert result.live.social_checked is True and result.live.social_hits == 1
+
+
+# --- absence as evidence (#454) ---------------------------------------------------------------
+
+
+def _absence_kwargs(extremity="extraordinary", **kw):
+    base = dict(
+        reputation={},
+        normalise=_normalise_fact(_RUMOUR),
+        extremity_of=_extremity({_RUMOUR: extremity}, default=extremity),
+        web_search=lambda texts, own, deep=False: [[] for _ in texts],
+        fetch=_no_fetch,
+    )
+    base.update(kw)
+    return base
+
+
+def test_expected_coverage_hardens_the_absence_verdict():
+    result = analyse_claim(_RUMOUR, **_absence_kwargs(
+        coverage_judge=lambda text: True,
+    ))
+    (reading,) = result.facts
+    assert reading.verdict == ("No credible support found — a claim of this scale would be "
+                               "widely reported")
+    assert reading.tier == "floor"
+    assert result.score.label == "No credible support"        # still disqualified
+    assert result.live.coverage_judged == 1 and result.live.coverage_expected == 1
+
+
+def test_niche_big_claim_keeps_the_standard_reading():
+    result = analyse_claim(_RUMOUR, **_absence_kwargs(
+        coverage_judge=lambda text: False,
+    ))
+    (reading,) = result.facts
+    assert reading.verdict.endswith("below the bar for an extraordinary claim")
+    assert result.live.coverage_judged == 1 and result.live.coverage_expected == 0
+
+
+def test_fresh_claim_softens_to_too_early_and_is_not_disqualified():
+    from datetime import datetime, timezone
+
+    from maat.pipeline.origin import OriginHit
+
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+    hit = OriginHit(url="https://old.example/m", domain="old.example",
+                    title="Musk Cook merge SpaceX Apple", seendate="20260719T060000Z")
+    judged = {"n": 0}
+
+    def judge(_text):
+        judged["n"] += 1
+        return True
+
+    result = analyse_claim(_RUMOUR, **_absence_kwargs(
+        origin_search=lambda text: [hit],
+        coverage_judge=judge,
+        now=now,
+    ))
+    (reading,) = result.facts
+    assert reading.verdict == "Too early to tell — no independent support yet"
+    assert reading.tier == "lo"
+    assert judged["n"] == 0                          # fresh beats the judge — never called
+    assert result.score.band != "disqualified"       # breaking news is not punished
+    assert result.score.label == "Too early to tell"
+    assert result.live.fresh_absent == 1
+
+
+def test_debunked_claim_stays_refuted_not_absent():
+    result = analyse_claim(_RUMOUR, **_absence_kwargs(
+        fact_check=lambda texts, lang: [[_fc("False", claim_text=_RUMOUR)] for _ in texts],
+        coverage_judge=lambda text: True,
+        nli=lambda p, h: ("entailment", 0.9),
+    ))
+    (reading,) = result.facts
+    assert reading.verdict == "Refuted — contradicted by independent reporting"
+    assert result.score.label == "Refuted"
+    assert result.live.coverage_judged == 0          # disputed claims never reach the judge
+
+
+def test_routine_absent_claim_is_never_judged_or_hardened():
+    result = analyse_claim(_VOTE, **_absence_kwargs(
+        extremity="routine",
+        normalise=_normalise_fact(_VOTE),
+        coverage_judge=lambda text: True,
+    ))
+    (reading,) = result.facts
+    assert reading.verdict == "No independent support found yet"
+    assert result.live.coverage_judged == 0

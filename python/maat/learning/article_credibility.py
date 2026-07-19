@@ -88,6 +88,10 @@ class ArticleClaim:
     primary_contradicted: bool = False
     rated_originator: bool = False
     why: list[str] = field(default_factory=list)
+    # P16 #454 (claim mode) — the claim's earliest trace is HOURS old: a big claim with no
+    # support yet is "too early to tell", not disqualified. The claim-mode caller sets this from
+    # the origin trace; the article path never does (its breaking-news protection is extremity).
+    fresh_absence: bool = False
 
 
 def _disqualifiers(central: list[ArticleClaim]) -> list[str]:
@@ -98,7 +102,10 @@ def _disqualifiers(central: list[ArticleClaim]) -> list[str]:
             reasons.append("a central claim is contradicted by the primary source")
         elif c.disputed or c.grounding == "contradicted":
             reasons.append("a central claim is contradicted by stronger reporting")
-        elif c.extremity in _BIG and c.independent_originators <= 1 and not c.has_primary:
+        elif (c.extremity in _BIG and c.independent_originators <= 1 and not c.has_primary
+              and not c.fresh_absence):
+            # ``fresh_absence`` (#454): a big claim first seen hours ago is not yet a failure —
+            # it lands in the normal low bands ("too early to tell"), never the floor.
             reasons.append(f"a central {c.extremity} claim rests on a single unsupported source")
     return list(dict.fromkeys(reasons))
 

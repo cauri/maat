@@ -249,6 +249,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
         "authority_search",  # draft backend (#434) — the tiered-authority leg, cauri to review
         "claimify",  # draft backend (P16 #450) — claim-mode normaliser, cauri to review
         "origin_chain",  # draft backend (P16 #452) — origin-trace attribution chain, cauri to review
+        "expected_coverage",  # draft backend (P16 #454) — absence-as-evidence judge, cauri to review
         "hindsight_triage", "hindsight_resolve",  # draft backend (#435) — hindsight reputation
         "prompt_chat_agent", "console_assistant", "sia",  # draft: chat helper, page assistant, Sia (#306)
         "summarizer_ondevice", "reranker_ondevice",  # on-device (Apple)
@@ -265,7 +266,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     assert by_status["active"] == {"extract", "classify", "extremity", "acquire_queries", "source_gate"}
     assert by_status["draft"] == {
         "topics_enrich", "curation_geotag", "triage_llm", "grounding", "authority_search",
-        "claimify", "origin_chain", "hindsight_triage", "hindsight_resolve",
+        "claimify", "origin_chain", "expected_coverage", "hindsight_triage", "hindsight_resolve",
         "prompt_chat_agent", "console_assistant", "sia"
     }
     assert by_status["on-device"] == {"summarizer_ondevice", "reranker_ondevice"}
@@ -274,7 +275,7 @@ def test_prompt_registry_surfaces_all_runtime_prompts_with_status_and_source():
     assert prompts.EDITABLE_KEYS == frozenset(
         {"extract", "classify", "extremity", "acquire_queries", "source_gate",
          "topics_enrich", "curation_geotag", "triage_llm", "grounding", "authority_search",
-         "claimify", "origin_chain", "hindsight_triage", "hindsight_resolve",
+         "claimify", "origin_chain", "expected_coverage", "hindsight_triage", "hindsight_resolve",
          "prompt_chat_agent", "console_assistant", "sia"}
     )
     assert "summarizer_ondevice" not in prompts.EDITABLE_KEYS
