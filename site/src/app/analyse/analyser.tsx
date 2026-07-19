@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Analysis, PublicClaim } from "@/lib/types";
+import type { Analysis, PublicClaim, PublicOrigin } from "@/lib/types";
 import MiniPage, { type MiniFact } from "./mini-page";
+import OriginCard from "./origin-card";
 import ShareCard from "./share-card";
 import Weighing from "./weighing";
 
@@ -12,6 +13,12 @@ import Weighing from "./weighing";
 type Skeleton = { text: string; speaker: string | null; central: boolean; position: number };
 type ChipState = "queued" | "checking";
 type Phase = "idle" | "reading" | "weighing" | "done" | "error";
+type Mode = "article" | "claim";
+
+// One field, two modes (P16 #450) — mirrors the server's routing rule exactly: a full http(s)
+// URL or a bare host+path (one token, a dot in the host). A real claim contains spaces, so it
+// can never match; a pasted link never gets weighed as a string of words.
+const URL_SHAPED = /^(?:https?:\/\/\S+|(?:[\w-]+\.)+[a-z]{2,}(?:\/\S*)?)$/i;
 
 const EXTREMITY_LEVELS = ["routine", "ordinary", "notable", "significant", "extraordinary"];
 const EX_RANK: Record<string, number> = { routine: 0, ordinary: 1, notable: 2, significant: 3, extraordinary: 4 };
@@ -166,7 +173,10 @@ function ClaimRow({
 }
 
 export default function Analyser() {
-  const [url, setUrl] = useState("");
+  const [input, setInput] = useState("");
+  const [mode, setMode] = useState<Mode>("article");
+  const [checked, setChecked] = useState<{ display: string } | null>(null); // "We checked: …"
+  const [origins, setOrigins] = useState<(PublicOrigin | undefined)[]>([]); // traced live (#452)
   const [phase, setPhase] = useState<Phase>("idle");
   const [activity, setActivity] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -187,7 +197,7 @@ export default function Analyser() {
   const stageRef = useRef<HTMLDivElement>(null);
   const prevTops = useRef<Map<number, number>>(new Map());
 
-  // A shared link (?id=an-…) renders the stored analysis directly — no reading/weighing.
+  // A shared link (?id=an-… / ?id=cl-…) renders the stored analysis directly — no reading/weighing.
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("id");
     if (!id) return;
@@ -195,8 +205,10 @@ export default function Analyser() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (d?.analysis) {
-          setAnalysis(d.analysis as Analysis);
-          setUrl((d.analysis as Analysis).url);
+          const a = d.analysis as Analysis;
+          setAnalysis(a);
+          setMode(a.kind === "claim" ? "claim" : "article");
+          setInput(a.kind === "claim" ? (a.checked?.display ?? "") : (a.url ?? ""));
           setPhase("done");
         }
       })
@@ -307,13 +319,21 @@ export default function Analyser() {
   const analyse = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (running.current || !url.trim()) return;
+      const trimmed = input.trim();
+      if (running.current || !trimmed) return;
+      // One field, two modes (P16 #450): URL-shaped input → article; anything else → claim.
+      const isUrl = URL_SHAPED.test(trimmed);
+      const nextMode: Mode = isUrl ? "article" : "claim";
       running.current = true;
-      morphed.current = false;
+      // Claim mode has no article to read — no mini-page, no morph: straight to weighing.
+      morphed.current = nextMode === "claim";
       highlightRefs.current.clear();
       rowRefs.current.clear();
       prevTops.current.clear();
-      setPhase("reading");
+      setMode(nextMode);
+      setChecked(null);
+      setOrigins([]);
+      setPhase(nextMode === "claim" ? "weighing" : "reading");
       setError(null);
       setAnalysis(null);
       setMeta(null);
@@ -322,13 +342,16 @@ export default function Analyser() {
       setChipStates([]);
       setResolvedCount(0);
       setDropped(0);
-      setMorphComplete(false);
-      setActivity("Fetching the article…");
+      setMorphComplete(nextMode === "claim");
+      setActivity(nextMode === "claim" ? "Understanding the claim…" : "Fetching the article…");
       try {
+        const body = isUrl
+          ? { url: trimmed.toLowerCase().startsWith("http") ? trimmed : `https://${trimmed}` }
+          : { text: trimmed };
         const res = await fetch("/api/analyse", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: url.trim() }),
+          body: JSON.stringify(body),
         });
         if (res.status === 429) throw new Error("You've hit the analysis limit for now — try again in a few minutes.");
         if (!res.ok || !res.body) throw new Error("Something went wrong starting the analysis — try again shortly.");
@@ -337,6 +360,27 @@ export default function Analyser() {
           if (event === "fetched") {
             setMeta({ title: (d.title as string) ?? null, source: (d.source as string) ?? "", date: (d.date as string) ?? null });
             setActivity("Reading the article and pulling out every claim it makes…");
+          } else if (event === "understood") {
+            // Claim mode (P16 #450): the canonical "We checked: …" line + the claim rows.
+            const understood = (d.claims as { text: string; kind: string }[]) ?? [];
+            const facts = understood
+              .filter((c) => c.kind === "fact")
+              .map((c) => ({ text: c.text, speaker: null, central: false, position: 0 }));
+            setChecked({ display: (d.display as string) ?? "" });
+            setSkeletons(facts);
+            setClaims(new Array(facts.length).fill(undefined));
+            setChipStates(new Array(facts.length).fill("queued"));
+            setOrigins(new Array(facts.length).fill(undefined));
+            setActivity("Searching independent reporting and primary sources…");
+          } else if (event === "tracing") {
+            setActivity("Searching for who said it first…");
+          } else if (event === "traced") {
+            const idx = d.index as number;
+            setOrigins((prev) => {
+              const next = prev.slice();
+              next[idx] = d.origin as PublicOrigin;
+              return next;
+            });
           } else if (event === "extracted") {
             const facts = ((d.facts as Skeleton[]) ?? []).map((f) => ({ ...f, position: f.position ?? 0 }));
             setSkeletons(facts);
@@ -385,14 +429,15 @@ export default function Analyser() {
         running.current = false;
       }
     },
-    [url],
+    [input],
   );
 
   // Force-check ONE "Not checked" claim on demand (#397): run the live path for it and swap the row
   // in place (the overall hero is the batch read and doesn't move — over-cap claims are non-central).
   const forceCheck = useCallback(
     async (i: number, claim: PublicClaim) => {
-      const target = analysis?.url ?? url;
+      // Article mode only — claim mode has no search cap, so every claim is already checked.
+      const target = analysis?.url ?? (mode === "article" ? input : "");
       if (!target || claim.checked) return;
       setForcing((prev) => new Set(prev).add(i));
       setCheckErrors((prev) => {
@@ -432,32 +477,41 @@ export default function Analyser() {
         });
       }
     },
-    [analysis, url],
+    [analysis, input, mode],
   );
 
   const busy = phase === "reading" || phase === "weighing";
   // Show the mini-page from the moment we start reading (a scanning shell during the fetch wait),
   // through the morph; it collapses out (CSS) once weighing begins so it never leaves a gap.
-  const showMini = phase === "reading" || phase === "weighing";
+  // Claim mode never shows it — there is no article being read.
+  const showMini = mode === "article" && (phase === "reading" || phase === "weighing");
   const showList = phase === "weighing" || phase === "done";
+  // A single typed claim is trivially central — the tag would be noise; it returns for
+  // decomposed sets, where "which claim anchors the verdict" is real information.
+  const suppressCentral = mode === "claim" && (analysis?.claims.length ?? skeletons.length) <= 1;
   const listSkeletons = analysis
-    ? analysis.claims.map((c) => ({ text: c.text, speaker: c.speaker, central: c.central, position: 0 }))
+    ? analysis.claims.map((c) => ({
+        text: c.text, speaker: c.speaker, central: suppressCentral ? false : c.central, position: 0,
+      }))
     : skeletons;
   const listClaims: (PublicClaim | undefined)[] = analysis ? analysis.claims : claims;
   const order = useMemo(() => orderedIndices(listClaims), [listClaims]);
   const uncheckedCount = listClaims.filter((c) => c && !c.checked).length;
   const miniFacts: MiniFact[] = skeletons.map((s) => ({ text: s.text, central: s.central, position: s.position }));
+  // The origin card (#452): the stored primary trace once done, the live-traced one meanwhile.
+  const origin = analysis?.origin ?? (mode === "claim" ? origins[0] : undefined) ?? null;
+  const checkedLine = analysis?.checked?.display ?? checked?.display ?? "";
 
   return (
     <>
       <form className="paste" onSubmit={analyse}>
         <input
-          type="url"
+          type="text"
           required
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="https:// — paste an article link"
-          aria-label="Article URL"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Paste an article link — or type a claim you’ve heard"
+          aria-label="Article link or claim"
           disabled={busy}
         />
         <button type="submit" disabled={busy}>
@@ -493,7 +547,14 @@ export default function Analyser() {
         {phase === "weighing" && <Weighing done={resolvedCount} total={skeletons.length} />}
       </div>
 
-      {(meta || analysis) && (phase === "weighing" || phase === "done") && (
+      {mode === "claim" && checkedLine && (phase === "weighing" || phase === "done") && (
+        <div className="card checked-line">
+          <span className="checked-label">We checked</span>
+          <p className="checked-text">“{checkedLine}”</p>
+        </div>
+      )}
+
+      {mode === "article" && (meta || analysis) && (phase === "weighing" || phase === "done") && (
         <div className="card article-head">
           <h2>{analysis?.title ?? meta?.title ?? "Untitled article"}</h2>
           <div className="meta">
@@ -541,6 +602,10 @@ export default function Analyser() {
           )}
           <div className="scope">{analysis.scope}</div>
         </div>
+      )}
+
+      {mode === "claim" && origin && (phase === "done" || phase === "weighing") && (
+        <OriginCard origin={origin} />
       )}
 
       {showList && listSkeletons.length > 0 && (

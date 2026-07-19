@@ -299,3 +299,28 @@ footer.foot a { color: var(--mut); }
   .mp-hl.lit, .mp-scan, .weigh-beam { animation: none; }
   .mp-hl.lit { opacity: 1; transform: none; }
 }
+
+/* ── claim mode (P16 #450/#452): the "We checked" line + the origin card ───────────────────── */
+.checked-line { display: flex; flex-direction: column; gap: 4px; }
+.checked-line .checked-label {
+  font: 600 12px/1 var(--sans); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--gold);
+}
+.checked-line .checked-text { margin: 0; font: 400 21px/1.35 var(--serif); }
+
+.origin-card { display: flex; flex-direction: column; gap: 10px; }
+.origin-row { display: flex; gap: 14px; align-items: baseline; }
+.origin-label {
+  flex: 0 0 108px; font: 600 12px/1.5 var(--sans); letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--mut);
+}
+.origin-value { font-size: 15.5px; }
+.origin-value a { color: var(--gold); text-decoration-color: var(--line); }
+.origin-chain { color: var(--mut); }
+.origin-engagement { color: var(--mut); }
+.origin-empty { margin: 0; color: var(--mut); }
+.origin-note { margin: 2px 0 0; font-size: 12.5px; color: var(--mut); font-style: italic; }
+@media (max-width: 560px) {
+  .origin-row { flex-direction: column; gap: 2px; }
+  .origin-label { flex-basis: auto; }
+}
