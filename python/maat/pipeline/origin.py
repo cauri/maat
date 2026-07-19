@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from maat.acquire.factcheck import FactCheck
+from maat.acquire.social import SocialPost
 from maat.providers.seam import claude_complete
 
 log = logging.getLogger("maat.pipeline.origin")
@@ -137,6 +138,9 @@ class OriginTrace:
     carriers: int              # independent carriers (post wire-collapse) — from the fold
     top_carriers: list[str]    # up to 3 carrier names, proven track records first
     confidence: str            # "strong" | "weak" | "none" — how solid the trace is
+    # #453 — the earliest matching SOCIAL post ("circulating on X since <date>"): display only,
+    # never corroboration; author named only when plainly public (else "a social media account").
+    social: dict | None = None
 
 
 # ── dates ────────────────────────────────────────────────────────────────────────────────────────
@@ -256,6 +260,16 @@ def extract_chain(
 # ── the trace builder ────────────────────────────────────────────────────────────────────────────
 
 
+_PLATFORM_LABEL = {"x": "X", "reddit": "Reddit"}
+
+
+def _social_label(post: SocialPost) -> str:
+    """The author label the page may show — named ONLY when plainly public (#453/#456)."""
+    platform = _PLATFORM_LABEL.get(post.platform, post.platform)
+    who = post.author if post.author_public else "a social media account"
+    return f"{who} on {platform}"
+
+
 def build_trace(
     claim_text: str,
     *,
@@ -265,13 +279,15 @@ def build_trace(
     chain: OriginChain | None,
     carriers: int,
     top_carriers: list[str],
+    social_posts: list[SocialPost] | None = None,
 ) -> OriginTrace:
-    """Fold the four provenance signals into ONE trace (pure — every input already gathered).
+    """Fold the provenance signals into ONE trace (pure — every input already gathered).
 
     Earliest = the oldest dated candidate across evidence pages, guarded earliest-window hits,
-    and fact-check claim dates. Attribution = the grounded chain's origin, else the fact-checkers'
-    claimant. Confidence: "strong" needs a NAMED origin from a grounded chain or a fact-check;
-    "weak" is dates without a name; "none" is carriers only."""
+    fact-check claim dates, and guarded social posts (#453 — candidates for the DATE, never for
+    corroboration). Attribution = the grounded chain's origin, else the fact-checkers' claimant.
+    Confidence: "strong" needs a NAMED origin from a grounded chain or a fact-check; "weak" is
+    dates without a name; "none" is carriers only."""
     candidates: list[tuple[datetime, str, str]] = []  # (when, source, url)
     for source, url, date in evidence:
         when = parse_when(date)
@@ -286,6 +302,29 @@ def build_trace(
         if when is not None:
             source = fc.claimant or (f"per {fc.publisher}" if fc.publisher else "unknown")
             candidates.append((when, source, fc.review_url))
+
+    # #453 — the social leg: matching posts are earliest-DATE candidates and the "circulating
+    # since" card, nothing more. The same-story guard applies to post text as to headlines.
+    social: dict | None = None
+    matching = sorted(
+        (
+            (parse_when(p.created_at), p)
+            for p in (social_posts or ())
+            if parse_when(p.created_at) is not None and title_matches(p.text, claim_text)
+        ),
+        key=lambda pair: pair[0],
+    )
+    if matching:
+        when, post = matching[0]
+        label = _social_label(post)
+        candidates.append((when, label, post.url))
+        social = {
+            "platform": _PLATFORM_LABEL.get(post.platform, post.platform),
+            "author": label,
+            "url": post.url,
+            "date": _iso_date(when),
+            "engagement": post.engagement,
+        }
 
     earliest: dict | None = None
     if candidates:
@@ -318,4 +357,5 @@ def build_trace(
         carriers=carriers,
         top_carriers=top_carriers[:3],
         confidence=confidence,
+        social=social,
     )

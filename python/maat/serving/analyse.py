@@ -48,7 +48,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import numpy as np
 
 from maat import events as events_mod
-from maat.acquire import apify, factcheck, gdelt, source_gate
+from maat.acquire import apify, factcheck, gdelt, social, source_gate
 from maat.acquire.fetch import FetchedPage, fetch_article, fetch_page
 from maat.acquire.source_gate import prefiltered_reject
 from maat.learning.reputation import SourceReputation, fold_reputation, reputation_score
@@ -120,6 +120,9 @@ _FACTCHECK_KEY = os.environ.get("MAAT_FACTCHECK_KEY", "").strip()
 # Origin trace (P16 #452) — the provenance pass for CLAIM mode (earliest-window GDELT search +
 # attribution-chain read). On by default; provenance rides beside the verdict, never in the score.
 _ORIGIN = os.environ.get("MAAT_ANALYSE_ORIGIN", "1") not in ("0", "false", "no")
+# Social origin leg (#453) — X/Reddit search feeding the trace DISPLAY only (never corroboration;
+# the source-gate rejection of social stands). Needs the Apify key; off → recorded, never silent.
+_SOCIAL = os.environ.get("MAAT_ANALYSE_SOCIAL", "1") not in ("0", "false", "no")
 # NLI entailment gate thresholds (#389) — tunable in prod without a deploy once the web_neutral
 # recall-drift signal shows whether the gate is too strict. Model swap is the other lever
 # (MAAT_NLI_MODEL, in pipeline/nli.py).
@@ -807,6 +810,23 @@ def make_origin_search():
     return origin_search
 
 
+def make_social_search():
+    """The pipeline's SocialSearchFn (#453): X + Reddit posts matching a claim, both legs in
+    parallel, each best-effort. None when the Apify key is absent — the pipeline records the leg
+    as off. Display-only by type: SocialPost feeds the origin trace and nothing else."""
+    if not social.available():
+        return None
+
+    def social_search(claim_text: str) -> list[social.SocialPost]:
+        query = " ".join(claim_text.split()[:12])
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut_x = ex.submit(social.search_x, query)
+            fut_r = ex.submit(social.search_reddit, query)
+            return [*fut_x.result(), *fut_r.result()]
+
+    return social_search
+
+
 def make_fact_check(key: str):
     """The pipeline's FactCheckFn (#451): published ClaimReview fact-checks per claim text, from
     the Google Fact Check Tools API — one query per claim, concurrently, each best-effort (a dead
@@ -876,6 +896,8 @@ def public_origin(trace: Any) -> dict[str, Any]:
         "carriers": trace.carriers,
         "top_carriers": list(trace.top_carriers),
         "confidence": trace.confidence,
+        # #453 — "circulating on X since <date>"; author pre-anonymised unless plainly public.
+        "social": trace.social,
     }
 
 
@@ -1117,6 +1139,9 @@ def ops_meta(
             # Origin trace (#452) — claim mode only; 0/0 for article analyses.
             "origin_searched": lv.origin_searched,
             "origin_traced": lv.origin_traced,
+            # Social origin leg (#453) — claim mode only, display-only.
+            "social_checked": lv.social_checked,
+            "social_hits": lv.social_hits,
         }
     return out
 
@@ -1392,6 +1417,7 @@ async def run_claim_analysis(
                     claim, docs, prompt=assets.origin_prompt))
                 if (_LIVE and _ORIGIN) else None
             ),
+            social_search=make_social_search() if (_LIVE and _ORIGIN and _SOCIAL) else None,
             nli=make_nli(),
             search=make_searcher() if _LIVE else None,
             accept_candidate=make_accept(assets.denied),

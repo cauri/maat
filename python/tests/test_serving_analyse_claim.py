@@ -274,6 +274,7 @@ def _trace(**kw):
         carriers=kw.pop("carriers", 2),
         top_carriers=kw.pop("top_carriers", ["bbc.com", "rts.ch"]),
         confidence=kw.pop("confidence", "strong"),
+        social=kw.pop("social", None),
     )
 
 
@@ -299,7 +300,15 @@ def test_traced_progress_maps_to_public_origin():
         "attributed_to": "viral social media posts", "kind": "social",
         "chain": ["viral social media posts", "dailyx.com"], "carriers": 2,
         "top_carriers": ["bbc.com", "rts.ch"], "confidence": "strong",
+        "social": None,
     }}
+
+
+def test_public_origin_carries_the_circulating_card():
+    trace = _trace(social={"platform": "X", "author": "a social media account on X",
+                           "url": "https://x.com/t/1", "date": "2026-07-07",
+                           "engagement": 900})
+    assert sa.public_origin(trace)["social"]["author"] == "a social media account on X"
 
 
 def test_make_origin_search_maps_gdelt_hits_and_survives_failure(monkeypatch):
