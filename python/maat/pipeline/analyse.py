@@ -43,8 +43,10 @@ import numpy as np
 
 from maat.acquire.fetch import FetchedPage, fetch_page
 from maat.learning.article_credibility import ArticleClaim, score_article
+from maat.learning.claim_credibility import score_claims
 from maat.learning.story_credibility import StoryScore
 from maat.pipeline.claim import Claim
+from maat.pipeline.claimify import ClaimifyError, NormalisedInput, normalise_input
 from maat.pipeline.classify import classify_claims
 from maat.pipeline.corroborate import (
     SAME_FACT_THRESHOLD,
@@ -1377,4 +1379,442 @@ def check_one_claim(
         claim, body, source, extremity, matched_rows, bodies, reputation,
         disputed=dispute, ownership=ownership, cite_weights=weights, knobs=knobs,
         primary_urls=primary_urls, primary_contradicted=primary_contradicted,
+    )
+
+
+# ── claim mode (P16 #449, #450): weigh ONE reader-typed claim, no carrying article ───────────────
+
+# Claims about identifiable private individuals are declined outright (locked with cauri,
+# 2026-07-19) — Maat weighs public claims, and a free-text box must not become a way to put a
+# verdict next to a private person's name. Refined by the claim gate (#456).
+PRIVATE_DECLINE = (
+    "Maat weighs claims about public figures, organisations, and events — it doesn't check "
+    "claims about private individuals."
+)
+
+
+@dataclass(frozen=True)
+class ClaimAnalysis:
+    """The full result for one reader-typed claim input — claim mode's ``ArticleAnalysis``.
+
+    There is no URL, no publisher, no page: ``display`` is the canonical "We checked: …" line
+    (the normalised claim(s), never the raw input — the raw text is kept server-side only)."""
+
+    input_text: str
+    display: str
+    language: str
+    facts: list[ClaimReading]
+    projections: list[ClaimReading]  # opinions/forecasts in the input — shown, never truth-scored
+    score: StoryScore
+    live: LiveMeta | None = None
+
+
+def claim_mode_verdict(
+    confidence: float,
+    independent_originators: int,
+    has_primary: bool,
+    extremity: str,
+    *,
+    disputed: bool = False,
+    grounding: str | None = None,
+    primary_contradicted: bool = False,
+) -> tuple[str, str]:
+    """Verdict wording for ONE reader-typed claim — (label, tier).
+
+    Differs from ``claim_verdict`` (article mode) in who is speaking: an article's lone claim has
+    a carrier ("Only this source so far"); a typed claim has NOBODY behind it until evidence is
+    found, so zero originators reads "No independent support found" — a source is never invented —
+    and a contradiction reads "Refuted" (the reader asked whether it holds; it doesn't), not
+    "Disputed" (an article being argued with)."""
+    if primary_contradicted:
+        return "Refuted — contradicted by the primary source", "floor"
+    if disputed or grounding == "contradicted":
+        return "Refuted — contradicted by independent reporting", "floor"
+    if independent_originators == 0:
+        if extremity in _BIG:
+            article = "an" if extremity[:1] in "aeiou" else "a"
+            return (
+                f"No credible support found — below the bar for {article} {extremity} claim",
+                "floor",
+            )
+        return "No independent support found yet", "lo"
+    if independent_originators == 1:
+        if has_primary:
+            return "Stated by the primary source", "mid"
+        return "Reported by a single source so far", ("mid" if confidence >= 0.60 else "lo")
+    return confidence_label(
+        confidence,
+        independent_originators=independent_originators,
+        has_primary=has_primary,
+        extremity=extremity,
+    )
+
+
+def _claim_reading(
+    claim: Claim, extremity: str,
+    rows: list[ClaimRow], bodies: dict[str, str],
+    reputation: Mapping[str, float],
+    *, disputed: bool = False, ownership: dict[str, str] | None = None,
+    cite_weights: dict[str, float] | None = None,
+    knobs: ScoringKnobs | None = None,
+    primary_urls: set[str] | None = None,
+    primary_contradicted: bool = False,
+) -> tuple[ClaimReading, bool]:
+    """Fold the EVIDENCE for a reader-typed claim — the typed claim itself is never a row.
+
+    This is the one structural difference from ``_live_reading``: the reader is ASKING, not
+    publishing, so their statement contributes no originator, no attribution weight, nothing —
+    zero evidence folds to zero confidence (``corroborate_fixed`` needs at least one claim, and
+    honesty needs the zero to stay a zero, not read as a single source)."""
+    kn = knobs or ScoringKnobs()
+    disputed = disputed or primary_contradicted
+    grounding = "contradicted" if disputed else None
+    if rows:
+        cor = corroborate_fixed(
+            rows, bodies, extremity, grounding=grounding,
+            primary_urls=primary_urls, ownership=ownership, reputation=dict(reputation),
+            attribution=dict(cite_weights or {}),  # S5 #403 — evidence graded, nothing else
+            **kn.fixed_kwargs(),
+        )
+        confidence, originators, has_primary = (
+            cor.confidence, cor.independent_originators, cor.has_primary
+        )
+    else:
+        confidence, originators, has_primary = 0.0, 0, False
+    verdict, tier = claim_mode_verdict(
+        confidence, originators, has_primary, extremity,
+        disputed=disputed, grounding=grounding, primary_contradicted=primary_contradicted,
+    )
+    reading = ClaimReading(
+        claim=claim, extremity=extremity, confidence=confidence,
+        independent_originators=originators, has_primary=has_primary,
+        disputed=disputed, grounding=grounding, verdict=verdict, tier=tier,
+        matched_cluster_id=None, primary_contradicted=primary_contradicted,
+    )
+    rated = any(_rep(reputation, r.source) is not None for r in rows)
+    return reading, rated
+
+
+def _claim_corpus_reading(
+    claim: Claim, match: CorpusFact, reputation: Mapping[str, float],
+    ownership: dict[str, str] | None = None, knobs: ScoringKnobs | None = None,
+) -> tuple[ClaimReading, bool] | None:
+    """A typed claim that clusters with an existing Maat fact inherits that cluster's standing —
+    WITHOUT folding the reader in as an originator (cf. ``_corpus_reading``, where the pasted
+    article genuinely carries the claim). ``None`` when the cluster arrived unhydrated (no member
+    claims) — the caller falls through to the live path rather than trusting an empty fold."""
+    if not match.member_claims:
+        return None
+    kn = knobs or ScoringKnobs()
+    cor = corroborate_fixed(
+        list(match.member_claims), dict(match.bodies), match.extremity,
+        grounding=match.grounding, ownership=ownership, reputation=dict(reputation),
+        **kn.fixed_kwargs(),
+    )
+    verdict, tier = claim_mode_verdict(
+        cor.confidence, cor.independent_originators, cor.has_primary, match.extremity,
+        disputed=match.disputed, grounding=match.grounding,
+    )
+    reading = ClaimReading(
+        claim=claim, extremity=match.extremity, confidence=cor.confidence,
+        independent_originators=cor.independent_originators, has_primary=cor.has_primary,
+        disputed=match.disputed, grounding=match.grounding, verdict=verdict, tier=tier,
+        matched_cluster_id=match.cluster_id,
+    )
+    rated = any(
+        _rep(reputation, s) is not None for grp in match.originator_sources for s in grp
+    )
+    return reading, rated
+
+
+def analyse_claim(
+    text: str,
+    *,
+    reputation: Mapping[str, float],
+    ownership: dict[str, str] | None = None,
+    corpus_lookup: CorpusLookup | None = None,
+    web_search: WebSearchFn | None = None,
+    authority_search: WebSearchFn | None = None,
+    nli: NliFn | None = None,
+    search: SearchFn | None = None,
+    accept_candidate: Callable[[LiveCandidate], bool] | None = None,
+    normalise: Callable[[str], NormalisedInput] = normalise_input,
+    extremity_of: Callable[[str], str] = rate_extremity,
+    extract: Callable[..., list[Claim]] = extract_claims,
+    embed: Callable[[list[str]], list[list[float]]] = mistral_embed,
+    fetch: Callable[[str], FetchedPage | None] = fetch_page,
+    same_fact_threshold: float = SAME_FACT_THRESHOLD,
+    nli_entail_min: float = 0.5,
+    nli_contradict_min: float = 0.6,
+    live_max_candidates: int = 18,
+    max_workers: int = 4,
+    knobs: ScoringKnobs | None = None,
+    progress: ProgressFn | None = None,
+) -> ClaimAnalysis:
+    """Weigh one reader-typed statement (P16 #450): normalise → decompose → corroborate → score.
+
+    The SAME evidence journey a novel article claim takes inside ``analyse_article`` — corpus
+    match, web-search + authority legs in parallel, NLI gate, Apify fallback, deep re-search of
+    still-lone claims — with three claim-mode differences: there is no fetch/gate/extract (the
+    input IS the claim), the reader is never an originator (``_claim_reading``), and the deep
+    pass runs for EVERY still-lone claim (a single claim gets the whole budget — no search cap,
+    no ``unchecked`` state). Raises ``AnalyseError`` with a user-facing message for input Maat
+    declines (nothing checkable, private individuals).
+
+    Pure orchestration over the same injected seams as ``analyse_article`` — testable offline.
+    """
+    def emit(kind: str, data: dict[str, Any]) -> None:
+        if progress is not None:
+            try:
+                progress(kind, data)
+            except Exception:  # noqa: BLE001 - progress is advisory, never fatal
+                log.debug("progress emit failed", exc_info=True)
+
+    raw = " ".join((text or "").split())
+    if not raw:
+        raise AnalyseError("type a claim to check")
+    try:
+        norm = normalise(raw)
+    except ClaimifyError as e:
+        raise AnalyseError(str(e)) from e
+    if any(c.subject == "private" for c in norm.claims):
+        raise AnalyseError(PRIVATE_DECLINE)
+
+    emit("understood", {
+        "display": norm.display, "language": norm.language,
+        "claims": [{"text": c.text, "kind": c.kind} for c in norm.claims],
+    })
+
+    fact_claims = [
+        Claim(id=f"typed-{k}", text=c.text, voice="own", in_headline=True,
+              evidence_span="", kind="fact")
+        for k, c in enumerate(norm.claims) if c.kind == "fact"
+    ]
+    proj_readings = [
+        ClaimReading(
+            claim=Claim(id=f"typed-p{k}", text=c.text, voice="own", evidence_span="",
+                        kind="projection"),
+            extremity="", confidence=0.0, independent_originators=0, has_primary=False,
+            disputed=False, grounding=None, verdict="Forecast / opinion — not scored for truth",
+            tier="none", matched_cluster_id=None,
+        )
+        for k, c in enumerate(norm.claims) if c.kind != "fact"
+    ]
+
+    if not fact_claims:
+        return ClaimAnalysis(
+            input_text=raw, display=norm.display, language=norm.language,
+            facts=[], projections=proj_readings, score=score_claims([]),
+        )
+
+    n = len(fact_claims)
+    readings: list[ClaimReading | None] = [None] * n
+    rated_flags: list[bool] = [False] * n
+
+    def resolve(i: int, pair: tuple[ClaimReading, bool]) -> None:
+        readings[i], rated_flags[i] = pair
+        emit("claim", {"index": i, "total": n, "reading": readings[i]})
+
+    matches: Sequence[CorpusFact | None]
+    matches = corpus_lookup([c.text for c in fact_claims]) if corpus_lookup else [None] * n
+    novel_idx: list[int] = []
+    for i, m in enumerate(matches):
+        got = (
+            _claim_corpus_reading(fact_claims[i], m, reputation, ownership, knobs)
+            if m is not None else None
+        )
+        if got is not None:
+            resolve(i, got)
+        else:
+            novel_idx.append(i)
+    emit("matched", {"matched": n - len(novel_idx), "novel": len(novel_idx)})
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, max(1, n))) as ex:
+        extremities = dict(zip(novel_idx, ex.map(
+            lambda i: extremity_of(fact_claims[i].text), novel_idx
+        )))
+
+    live: LiveMeta | None = None
+    have_live = web_search is not None or search is not None or authority_search is not None
+    if not have_live or not novel_idx:
+        for i in novel_idx:
+            resolve(i, _claim_reading(
+                fact_claims[i], extremities[i], [], {}, reputation, knobs=knobs,
+            ))
+        if have_live:
+            live = LiveMeta(0, 0, 0, 0, nli_available=nli is not None)
+    else:
+        emit("searching", {"claims": len(novel_idx)})
+        cite_fetch = _CiteFetch(fetch)
+        shared = _LiveShared(live_max_candidates)
+        novel_texts = [fact_claims[i].text for i in novel_idx]
+
+        # No own outlet to exclude in claim mode — the reader isn't a publisher.
+        def _pass(fn: WebSearchFn | None, label: str) -> Sequence[Sequence[Citation]]:
+            if fn is None:
+                return [() for _ in novel_idx]
+            try:
+                return fn(novel_texts, "")
+            except Exception as e:  # noqa: BLE001 - a failed pass leaves the Apify fallback
+                log.warning("claim-mode %s failed: %s", label, type(e).__name__)
+                return [() for _ in novel_idx]
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut_gen = ex.submit(_pass, web_search, "web-search")
+            fut_auth = ex.submit(_pass, authority_search, "authority-search")
+            general, authority = fut_gen.result(), fut_auth.result()
+        citations: dict[int, list[Citation]] = {}
+        for k, i in enumerate(novel_idx):
+            merged = [  # #434: authority citations FIRST — same merge order as article mode
+                *(authority[k] if k < len(authority) else ()),
+                *(general[k] if k < len(general) else ()),
+            ]
+            if merged:
+                citations[i] = merged
+
+        tally = {"web": 0, "contra": 0, "fallback": 0, "neutral": 0, "auth": 0, "auth_contra": 0}
+        web_counted: set[int] = set()
+        neutral_counted: set[int] = set()
+        tally_lock = threading.Lock()
+
+        def live_one(i: int) -> None:
+            claim = fact_claims[i]
+            emit("checking", {"index": i})
+            matched_rows: list[ClaimRow] = []
+            bodies: dict[str, str] = {}
+            weights: dict[str, float] = {}
+            contradicted = False
+            primary_urls: set[str] = set()
+            primary_contradicted = False
+            cits = citations.get(i)
+            if cits:
+                wr = _websearch_rows(
+                    i, claim, cits, url="", own_canon="",
+                    accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
+                    nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    entail_floor=(knobs.entail_floor if knobs else None),
+                )
+                matched_rows, bodies, contradicted, weights = (
+                    wr.rows, wr.bodies, wr.contradicted, wr.weights
+                )
+                primary_urls, primary_contradicted = wr.primary_urls, wr.primary_contradicted
+                if primary_urls or primary_contradicted:
+                    with tally_lock:
+                        if primary_urls:
+                            tally["auth"] += 1
+                        if primary_contradicted:
+                            tally["auth_contra"] += 1
+            if matched_rows:
+                with tally_lock:
+                    tally["web"] += 1
+                    web_counted.add(i)
+            else:
+                if cits:
+                    with tally_lock:
+                        tally["neutral"] += 1
+                        neutral_counted.add(i)
+                if search is not None:
+                    matched_rows, bodies = _apify_rows(
+                        i, claim, search=search, extract=extract, embed=embed, shared=shared,
+                        accept_candidate=accept_candidate, own_canon="", url="",
+                        same_fact_threshold=same_fact_threshold,
+                    )
+                    if matched_rows and web_search is not None:
+                        with tally_lock:
+                            tally["fallback"] += 1
+            dispute = (contradicted and not matched_rows) or primary_contradicted
+            if dispute:
+                with tally_lock:
+                    tally["contra"] += 1
+            resolve(i, _claim_reading(
+                fact_claims[i], extremities[i], matched_rows, bodies, reputation,
+                disputed=dispute, ownership=ownership, cite_weights=weights, knobs=knobs,
+                primary_urls=primary_urls, primary_contradicted=primary_contradicted,
+            ))
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(novel_idx))) as ex:
+            list(ex.map(live_one, novel_idx))
+
+        # S3 #401, claim-mode stance: EVERY still-lone claim gets the deeper pass — the reader
+        # asked about exactly this claim, so "was one shallow pass enough?" is never the answer.
+        deep_searched = deep_rescued = 0
+        still_lone = [
+            i for i in novel_idx
+            if readings[i] is not None and readings[i].independent_originators <= 1
+            and not readings[i].disputed
+        ]
+        if web_search is not None and still_lone:
+            deep_searched = len(still_lone)
+            emit("searching", {"claims": deep_searched, "deep": True})
+            try:
+                deeper = web_search([fact_claims[i].text for i in still_lone], "", deep=True)
+            except Exception as e:  # noqa: BLE001 - a failed deep pass leaves the pass-1 read
+                log.warning("claim-mode deep pass failed (%s)", type(e).__name__)
+                deeper = []
+
+            def deepen(pair: tuple[int, int]) -> None:
+                nonlocal deep_rescued
+                k, i = pair
+                extra = deeper[k] if k < len(deeper) else ()
+                if not extra:
+                    return
+                merged = [*(citations.get(i) or ()), *extra]
+                wr = _websearch_rows(
+                    i, fact_claims[i], merged, url="", own_canon="",
+                    accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
+                    nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    entail_floor=(knobs.entail_floor if knobs else None),
+                )
+                if not wr.rows:
+                    return
+                reading, rated = _claim_reading(
+                    fact_claims[i], extremities[i], wr.rows, wr.bodies, reputation,
+                    disputed=wr.primary_contradicted, ownership=ownership,
+                    cite_weights=wr.weights, knobs=knobs, primary_urls=wr.primary_urls,
+                    primary_contradicted=wr.primary_contradicted,
+                )
+                if reading.independent_originators > readings[i].independent_originators:
+                    with tally_lock:
+                        deep_rescued += 1
+                        if i not in web_counted:
+                            tally["web"] += 1
+                            web_counted.add(i)
+                        if i in neutral_counted:
+                            tally["neutral"] = max(0, tally["neutral"] - 1)
+                            neutral_counted.discard(i)
+                    resolve(i, (reading, rated))
+
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(still_lone))) as ex:
+                list(ex.map(deepen, list(enumerate(still_lone))))
+
+        live = LiveMeta(
+            searched_claims=len(novel_idx), skipped_claims=0,
+            candidates_considered=shared.considered, candidates_used=len(shared.bodies),
+            web_corroborated=tally["web"], web_contradicted=tally["contra"],
+            web_neutral=tally["neutral"], apify_fallbacks=tally["fallback"],
+            nli_available=nli is not None, deep_searched=deep_searched,
+            deep_rescued=deep_rescued,
+            authority_corroborated=tally["auth"], authority_contradicted=tally["auth_contra"],
+        )
+
+    done = [r for r in readings if r is not None]
+    score = score_claims([
+        ArticleClaim(
+            confidence=r.confidence,
+            independent_originators=r.independent_originators,
+            has_primary=r.has_primary,
+            extremity=r.extremity,
+            central=True,  # the reader asked about exactly this claim — every claim is load-bearing
+            disputed=r.disputed,
+            grounding=r.grounding,
+            rated_originator=rated,
+            primary_contradicted=r.primary_contradicted,
+        )
+        for r, rated in zip(done, rated_flags)
+    ])
+    emit("scored", {"score": score.score, "band": score.band, "label": score.label})
+
+    return ClaimAnalysis(
+        input_text=raw, display=norm.display, language=norm.language,
+        facts=done, projections=proj_readings, score=score, live=live,
     )

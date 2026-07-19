@@ -28,6 +28,7 @@ from maat.pipeline.extract import PROMPT as EXTRACT_PROMPT
 from maat.pipeline.extremity import PROMPT as EXTREMITY_PROMPT
 from maat.learning.hindsight import HINDSIGHT_RESOLVE_PROMPT, HINDSIGHT_TRIAGE_PROMPT
 from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT
+from maat.pipeline.claimify import PROMPT as CLAIMIFY_PROMPT
 from maat.pipeline.grounding import GROUNDING_PROMPT
 from maat.pipeline.triage import TRIAGE_LLM_PROMPT
 from maat.acquire.source_gate import PROMPT as SOURCE_GATE_PROMPT
@@ -292,6 +293,15 @@ PROMPTS: list[dict] = [
      "gates mark their URL primary; a grounded authority CONTRADICTION disputes the claim even "
      "when outlets corroborate, and disqualifies a central claim.",
      "placeholders": ["{own_domain}", "{claims}"]},
+    {"key": "claimify", "label": "Claim normaliser (reader-typed claim → checkable claims)",
+     "default": CLAIMIFY_PROMPT, "status": "draft", "source": "maat/pipeline/claimify.py",
+     "description": "Claim mode's front door (P16 #450): turns one reader-typed statement — "
+     "hearsay, a question, a compound rumour — into at most three canonical declarative claims "
+     "the engine can weigh, classifying kind (fact/projection/opinion) and subject "
+     "(public/private — private is declined, #456). Treats the input strictly as data (injection "
+     "guard); the engine enforces a fixed JSON schema and rejects anything else — a reply is "
+     "never repaired into something plausible.",
+     "placeholders": ["{reader_input}", "{max_claims}"]},
     {"key": "topics_enrich", "label": "NL-interest → acquisition topics (LLM enrichment)",
      "default": TOPICS_LLM_PROMPT, "status": "draft", "source": "maat/serving/topics.py",
      "description": "Would turn a reader's natural-language interest ('West African politics') into "

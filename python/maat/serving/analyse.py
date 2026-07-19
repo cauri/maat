@@ -6,11 +6,14 @@ query), the truth-over-time reputation fold, operator source denials, and the li
 (Apify primary, GDELT fallback — the same acquisition channels the feed trusts).
 
 Endpoints (mounted under /api/v2 like the feed):
-  POST /api/v2/analyse           {url} → Server-Sent Events: claims stream in as they resolve,
-                                  ending in the full analysis. Strictly rate-limited per IP and
-                                  bounded by a global concurrency gate (LLM work per request).
+  POST /api/v2/analyse           {url} XOR {text} → Server-Sent Events: claims stream in as they
+                                  resolve, ending in the full analysis. A URL analyses the
+                                  article; typed text analyses the CLAIM (P16 #450 — normalise →
+                                  corroborate → verdict; URL-shaped text routes to the article
+                                  path). Strictly rate-limited per IP and bounded by a global
+                                  concurrency gate (LLM work per request).
   GET  /api/v2/analyse/{id}      A completed analysis by id (in-process LRU → events log) — the
-                                  shareable, cache-fast path.
+                                  shareable, cache-fast path. Serves both kinds (an-/cl- ids).
 
 Isolation (locked): analysed URLs NEVER enter the canonical store — no articles/claims/clusters
 rows, no reputation effect. Each completed analysis is published as an ``analysis.completed``
@@ -55,11 +58,13 @@ from maat.pipeline.analyse import (
     AnalyseError,
     ArticleAnalysis,
     Citation,
+    ClaimAnalysis,
     ClaimReading,
     CorpusFact,
     LiveCandidate,
     ScoringKnobs,
     analyse_article,
+    analyse_claim,
     check_one_claim,
     match_claims,
     sanitise_body,
@@ -67,6 +72,8 @@ from maat.pipeline.analyse import (
 from maat import prompts as prompts_mod
 from maat.pipeline.authority import AUTHORITY_SEARCH_PROMPT, parse_authority_citations
 from maat.pipeline.claim import Claim
+from maat.pipeline.claimify import PROMPT as CLAIMIFY_PROMPT
+from maat.pipeline.claimify import normalise_input
 from maat.pipeline.corroborate import SAME_FACT_THRESHOLD, ClaimRow
 from maat.pipeline.identity import canonical_source
 from maat.pipeline.ownership import evidenced_ownership, fold_ownership
@@ -87,6 +94,11 @@ log = logging.getLogger("maat.serving.analyse")
 SCOPE_LINE = (
     "Maat measures whether this article's factual claims hold up against independent reporting"
     " — not tone, bias, or what it leaves out."
+)
+
+CLAIM_SCOPE_LINE = (
+    "Maat measures whether this claim holds up against independent reporting and primary sources"
+    " — not opinion, prediction, or who told you."
 )
 
 # ── knobs (box .env; defaults are production-sane) ───────────────────────────────────────────────
@@ -159,6 +171,14 @@ def normalise_url(url: str) -> str:
 def analysis_id(url: str) -> str:
     """Stable id for an analysis = hash of the normalised URL (mirrors the clock's article ids)."""
     return "an-" + hashlib.sha1(normalise_url(url).encode()).hexdigest()[:18]
+
+
+def claim_analysis_id(text: str) -> str:
+    """Stable id for a CLAIM analysis (P16 #450) = hash of the casefolded, whitespace-collapsed
+    input, so re-typing the same claim (any capitalisation/spacing) hits the cache. The ``cl-``
+    prefix keeps claim and article ids distinct in the shared events-log cache."""
+    norm = " ".join(text.split()).casefold()
+    return "cl-" + hashlib.sha1(norm.encode()).hexdigest()[:18]
 
 
 _VARIANT_PREFIXES = ("www.", "amp.", "m.", "mobile.")
@@ -265,6 +285,8 @@ class _Assets:
     # #434 — the authority-search prompt, resolved from the prompt store (operator-editable via
     # /prompts, seed = the DRAFT in pipeline/authority.py) once per assets build, like the knobs.
     authority_prompt: str = AUTHORITY_SEARCH_PROMPT
+    # P16 #450 — the claim normaliser's prompt, resolved the same way (seed in pipeline/claimify.py).
+    claimify_prompt: str = CLAIMIFY_PROMPT
 
 
 _ASSETS_CACHE = VersionCache(maxsize=2)
@@ -406,6 +428,9 @@ async def _load_assets(pool: Any) -> _Assets:
         same_fact=overrides["same_fact_threshold"],
         authority_prompt=await prompts_mod.active_text(
             pool, "authority_search", prompts_mod.seed_default("authority_search")
+        ),
+        claimify_prompt=await prompts_mod.active_text(
+            pool, "claimify", prompts_mod.seed_default("claimify")
         ),
     )
     _ASSETS_CACHE.put("assets", version, assets)
@@ -914,6 +939,58 @@ def share_copy(analysis: ArticleAnalysis, reasons: list[str]) -> dict[str, Any]:
     )
 
 
+def _build_claim_share(*, display: str, label: str, score: int, forecast_only: bool,
+                       top_reason: str, tally: dict[str, int]) -> dict[str, Any]:
+    """Per-platform share text for a CLAIM verdict (P16 #450) — same keys as ``_build_share`` so
+    the share card and OG unfurl render either kind unchanged. Measured tone; the shared object is
+    the claim itself in quotes, never the reader's raw wording."""
+    disp = _trim(display, 90)
+    headline = label if forecast_only else f"{label} · {score}/100"
+    top = _cap(top_reason) if top_reason else ""
+    og_description = _trim(
+        f"{headline}. " + (f"{top}. " if top else "")
+        + "Maat weighs a claim against independent reporting and primary sources.",
+        200,
+    )
+    twitter_text = _trim(
+        f"I ran “{_trim(display, 64)}” through Maat: {headline}."
+        + (f" {top}." if top else "") + " Check any claim yourself →",
+        240,
+    )
+    linkedin_text = (
+        "I checked a claim with Maat, which weighs how well it holds up against independent "
+        "reporting and primary sources.\n\n"
+        f"Claim: “{disp}”\nVerdict: {headline}."
+        + (f"\nKey finding: {top}." if top else "")
+        + "\n\nMaat weighs claims, not opinions. Check any claim at maat.press/analyse"
+    )
+    instagram_caption = (
+        f"Maat weighed “{disp}”: {headline}." + (f" {top}." if top else "")
+        + "\n\nMaat scores how well a claim holds up against independent reporting and primary "
+        "sources — not who told you.\n\n"
+        "Check any claim yourself — link in bio (maat.press/analyse)\n\n"
+        "#news #medialiteracy #factcheck #journalism #press #maat"
+    )
+    return {
+        "headline": headline,
+        "tally": tally,
+        "og_title": _trim(f"Maat weighed “{disp}”", 90),
+        "og_description": og_description,
+        "twitter_text": twitter_text,
+        "linkedin_text": linkedin_text,
+        "instagram_caption": instagram_caption,
+    }
+
+
+def claim_share_copy(analysis: ClaimAnalysis, reasons: list[str]) -> dict[str, Any]:
+    return _build_claim_share(
+        display=analysis.display, label=analysis.score.label, score=analysis.score.score,
+        forecast_only=analysis.score.forecast_only,
+        top_reason=reasons[0] if reasons else "",
+        tally=claim_tally(analysis.facts),
+    )
+
+
 def share_copy_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Rebuild the share block from a stored public payload — for analyses cached before the
     share feature shipped, so a shared link to any of them still unfurls + renders a card."""
@@ -927,13 +1004,16 @@ def share_copy_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def ops_meta(analysis: ArticleAnalysis, *, secs: float | None = None) -> dict[str, Any]:
+def ops_meta(
+    analysis: ArticleAnalysis | ClaimAnalysis, *, secs: float | None = None
+) -> dict[str, Any]:
     """Operator-only coverage meta for the ``analysis.completed`` audit event (#382): what the live
     pass actually covered and HOW corroboration was reached (web vs Apify fallback, contradictions,
     NLI availability, injection-guard drops, wall-clock). NEVER merged into the public payload —
-    the served cache reads only the ``analysis`` key, so this stays off the wire ("what, not how")."""
-    out: dict[str, Any] = {"dropped_claims": analysis.dropped_claims,
-                           "merged_claims": analysis.merged_claims}
+    the served cache reads only the ``analysis`` key, so this stays off the wire ("what, not how").
+    Claim mode (#450) has no span guard and no consolidation, so those counters read 0 there."""
+    out: dict[str, Any] = {"dropped_claims": getattr(analysis, "dropped_claims", 0),
+                           "merged_claims": getattr(analysis, "merged_claims", 0)}
     if secs is not None:
         out["secs"] = secs
     if analysis.live is not None:
@@ -959,6 +1039,7 @@ def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
     reasons = public_reasons(analysis)
     return {
         "analysis_id": aid,
+        "kind": "article",
         "url": analysis.url,
         "source": analysis.source,
         "title": analysis.title,
@@ -987,6 +1068,34 @@ def public_payload(analysis: ArticleAnalysis, aid: str) -> dict[str, Any]:
         "projections": [public_projection(r) for r in analysis.projections],
         "share": share_copy(analysis, reasons),
         "scope": SCOPE_LINE,
+        "analysed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def claim_public_payload(analysis: ClaimAnalysis, aid: str) -> dict[str, Any]:
+    """The public payload for a CLAIM analysis (P16 #450). Same envelope as an article's where the
+    shapes coincide (overall / claims / projections / share / scope), so the page and card render
+    both kinds; no publisher block (nobody is publishing — the reader asked), and ``checked``
+    carries the canonical "We checked: …" line, NEVER the reader's raw input (which stays
+    server-side only — it must not reach share cards or OG tags, #456)."""
+    reasons = list(analysis.score.why)  # claim_credibility already words these for the reader
+    return {
+        "analysis_id": aid,
+        "kind": "claim",
+        "checked": {"display": analysis.display, "language": analysis.language},
+        "overall": {
+            "score": analysis.score.score,
+            "band": analysis.score.band,
+            "label": analysis.score.label,
+            "reasons": reasons,
+            "capped": analysis.score.capped,
+            "forecast_only": analysis.score.forecast_only,
+            "unchecked": 0,  # claim mode has no search cap — every checkable claim is checked
+        },
+        "claims": [public_claim(r) for r in analysis.facts],
+        "projections": [public_projection(r) for r in analysis.projections],
+        "share": claim_share_copy(analysis, reasons),
+        "scope": CLAIM_SCOPE_LINE,
         "analysed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1152,6 +1261,71 @@ async def run_analysis(
     return payload
 
 
+async def run_claim_analysis(
+    state: Any, text: str, *, refresh: bool = False,
+    progress: Callable[[str, dict], None] | None = None,
+) -> dict:
+    """Analyse one reader-typed claim (P16 #450) — or serve the fresh cached result — returning
+    the public payload. The claim-mode ``run_analysis``: no fetch, no gate, no publisher
+    registration; the same semaphore, assets, cache discipline, and isolation (the claim never
+    enters the canonical store; the completed analysis is an ``analysis.completed`` event under
+    its ``cl-`` id). Raises AnalyseError for anything the caller did wrong; everything else is
+    internal and masked at the wire."""
+    aid = claim_analysis_id(text)
+    pool = state.pool
+    if not refresh:
+        payload = await cached_payload(pool, aid)
+        if payload is not None and _fresh(payload.get("analysed_at")):
+            return payload
+
+    async with _SEM:  # bound concurrent LLM analyses; queued requests wait their turn
+        assets = await _load_assets(pool)
+        loop = asyncio.get_running_loop()
+        lookup = make_corpus_lookup(loop, pool, assets)
+        t_analyse = time.monotonic()
+        analysis = await asyncio.to_thread(
+            analyse_claim,
+            text,
+            reputation=assets.reputation,
+            ownership=assets.ownership,
+            corpus_lookup=lookup,
+            web_search=make_web_search(assets.denied) if (_LIVE and _WEB_SEARCH) else None,
+            authority_search=(
+                make_authority_search(assets.denied, assets.authority_prompt)
+                if (_LIVE and _WEB_SEARCH and _AUTHORITY) else None
+            ),
+            nli=make_nli(),
+            search=make_searcher() if _LIVE else None,
+            accept_candidate=make_accept(assets.denied),
+            normalise=lambda t: normalise_input(t, prompt=assets.claimify_prompt),
+            # Cited-page verification uses the FAST ladder rungs only, as in article mode — a
+            # walled citation falls back to the NLI judgement rather than paying the slow rungs.
+            fetch=lambda u: fetch_page(u, fast=True),
+            nli_entail_min=_NLI_ENTAIL_MIN,
+            nli_contradict_min=_NLI_CONTRADICT_MIN,
+            live_max_candidates=_MAX_CANDIDATES,
+            same_fact_threshold=assets.same_fact,
+            knobs=assets.knobs,   # promoted Config-panel overrides (#412) apply to claim mode too
+            progress=progress,
+        )
+    payload = claim_public_payload(analysis, aid)
+    _cache_put(aid, payload)
+    nats = getattr(state, "nats", None)
+    if nats is not None:
+        try:  # durable cache + audit trail; best-effort, never blocks the response
+            await events_mod.publish(
+                nats, "analysis.completed", aid,
+                {
+                    "analysis_id": aid, "analysis": payload,
+                    "ops": ops_meta(analysis, secs=round(time.monotonic() - t_analyse, 1)),
+                },
+                tenant_id=events_mod.PUBLIC_TENANT,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("analysis.completed publish failed for %s: %s", aid, type(e).__name__)
+    return payload
+
+
 async def run_check(
     state: Any, url: str, text: str, *,
     voice: str = "own", speaker: str | None = None, central: bool = False,
@@ -1224,6 +1398,12 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# A ``text`` input that is really a link: a full http(s) URL, or a bare host+path with a dot in
+# the host ("www.bbc.com/news/x", "bbc.co.uk/live") — one token, no spaces. Deliberately narrow:
+# a real claim contains spaces, so it can never match.
+_URL_SHAPED = re.compile(r"^(?:https?://\S+|(?:[\w-]+\.)+[a-z]{2,}(?:/\S*)?)$", re.I)
+
+
 def _public_progress(kind: str, data: dict) -> dict:
     """Progress events cross the public wire — map internal readings to the public claim shape.
     Counts and indices only, never source names (what, not how)."""
@@ -1235,6 +1415,15 @@ def _public_progress(kind: str, data: dict) -> dict:
         }
     if kind == "checking":
         return {"index": data.get("index")}
+    if kind == "understood":  # claim mode (P16 #450): the canonical "We checked" line + kinds
+        return {
+            "display": data.get("display"),
+            "language": data.get("language"),
+            "claims": [
+                {"text": c.get("text"), "kind": c.get("kind")}
+                for c in data.get("claims", []) if isinstance(c, dict)
+            ],
+        }
     return data
 
 
@@ -1244,7 +1433,11 @@ def _public_progress(kind: str, data: dict) -> dict:
 if BaseModel is not None:
 
     class AnalyseReq(BaseModel):
-        url: str = Field(min_length=8, max_length=2048)
+        # One field on the page, two modes on the wire (P16 #450): a URL analyses the article; a
+        # typed statement analyses the claim. Exactly one of url/text — enforced in the endpoint
+        # (422), not by pydantic, so the error is a plain message, not a validation tree.
+        url: str | None = Field(default=None, min_length=8, max_length=2048)
+        text: str | None = Field(default=None, min_length=1, max_length=2000)
         refresh: bool = False
 
     class CheckReq(BaseModel):
@@ -1272,8 +1465,24 @@ def _make_router():
                 status_code=429,
                 headers={"Retry-After": str(_LIMITER.retry_after())},
             )
+        if (req.url is None) == (req.text is None):
+            return JSONResponse(
+                {"detail": "provide exactly one of url (an article) or text (a claim)"},
+                status_code=422,
+            )
+        # One field, two modes (P16 #450): a URL-shaped ``text`` (with or without scheme) is the
+        # article path — the reader pasted a link into the claim box, and "weigh this URL as a
+        # string of words" is never what they meant.
+        url, text = req.url, req.text
+        if text is not None:
+            stripped = text.strip()
+            if _URL_SHAPED.match(stripped):
+                url, text = (
+                    stripped if stripped.lower().startswith(("http://", "https://"))
+                    else f"https://{stripped}"
+                ), None
         state = request.app.state
-        aid = analysis_id(req.url)
+        aid = claim_analysis_id(text) if text is not None else analysis_id(url)
         queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -1282,8 +1491,11 @@ def _make_router():
 
         async def runner() -> None:
             try:
-                payload = await run_analysis(state, req.url, refresh=req.refresh,
-                                             progress=progress)
+                payload = await (
+                    run_claim_analysis(state, text, refresh=req.refresh, progress=progress)
+                    if text is not None
+                    else run_analysis(state, url, refresh=req.refresh, progress=progress)
+                )
                 queue.put_nowait(("done", {"analysis": payload}))
             except AnalyseError as e:  # user-facing by contract — safe to show verbatim
                 queue.put_nowait(("error", {"detail": str(e)}))
