@@ -32,6 +32,8 @@ _REWORD = [
     (re.compile(r"^a central claim is contradicted by stronger reporting$"),
      ("contradicted by independent reporting",
       "one claim is contradicted by independent reporting")),
+    (re.compile(r"^a central (extraordinary) claim rests on a single unsupported source$"),
+     (r"an \1 claim with no independent support", r"an \1 claim with no independent support")),
     (re.compile(r"^a central (\w+) claim rests on a single unsupported source$"),
      (r"a \1 claim with no independent support", r"a \1 claim with no independent support")),
 ]
