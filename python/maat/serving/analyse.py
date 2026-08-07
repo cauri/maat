@@ -131,6 +131,10 @@ _COVERAGE = os.environ.get("MAAT_ANALYSE_COVERAGE", "1") not in ("0", "false", "
 # (MAAT_NLI_MODEL, in pipeline/nli.py).
 _NLI_ENTAIL_MIN = float(os.environ.get("MAAT_ANALYSE_NLI_ENTAIL_MIN", "0.5"))
 _NLI_CONTRADICT_MIN = float(os.environ.get("MAAT_ANALYSE_NLI_CONTRADICT_MIN", "0.6"))
+# #457 — the DISQUALIFYING primary-contradiction path holds a stricter NLI bar than an
+# ordinary dispute (calibrated on the claim eval: settled-true claims were reading Refuted
+# off single mis-scored authority quotes at 0.6; real debunk language scores above 0.85).
+_NLI_KILL_MIN = float(os.environ.get("MAAT_ANALYSE_NLI_KILL_MIN", "0.85"))
 _GATED = os.environ.get("MAAT_ANALYSE_GATE", "1") not in ("0", "false", "no")
 _MAX_SEARCHES = int(os.environ.get("MAAT_ANALYSE_MAX_SEARCHES", "10"))
 _MAX_CANDIDATES = int(os.environ.get("MAAT_ANALYSE_MAX_CANDIDATES", "18"))
@@ -1343,6 +1347,7 @@ async def run_analysis(
             fetch=lambda u: page if u == ident else fetch_page(u, fast=True),
             nli_entail_min=_NLI_ENTAIL_MIN,
             nli_contradict_min=_NLI_CONTRADICT_MIN,
+            nli_contradict_kill_min=_NLI_KILL_MIN,
             live_max_searches=_MAX_SEARCHES,
             live_max_candidates=_MAX_CANDIDATES,
             body_max_chars=_BODY_CHARS,
@@ -1444,6 +1449,7 @@ async def run_claim_analysis(
             fetch=lambda u: fetch_page(u, fast=True),
             nli_entail_min=_NLI_ENTAIL_MIN,
             nli_contradict_min=_NLI_CONTRADICT_MIN,
+            nli_contradict_kill_min=_NLI_KILL_MIN,
             live_max_candidates=_MAX_CANDIDATES,
             same_fact_threshold=assets.same_fact,
             knobs=assets.knobs,   # promoted Config-panel overrides (#412) apply to claim mode too
@@ -1512,6 +1518,7 @@ async def run_check(
             fetch=lambda u: fetch_page(u, fast=True),
             nli_entail_min=_NLI_ENTAIL_MIN,
             nli_contradict_min=_NLI_CONTRADICT_MIN,
+            nli_contradict_kill_min=_NLI_KILL_MIN,
             live_max_candidates=_MAX_CANDIDATES,
             same_fact_threshold=assets.same_fact,
             knobs=assets.knobs,   # the forced path honours the same promoted knobs (#412)

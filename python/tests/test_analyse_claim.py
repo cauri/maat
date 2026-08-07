@@ -736,3 +736,61 @@ def test_routine_absent_claim_is_never_judged_or_hardened():
     (reading,) = result.facts
     assert reading.verdict == "No independent support found yet"
     assert result.live.coverage_judged == 0
+
+
+# --- contradiction-precision calibration (#457) -----------------------------------------------
+
+
+def _nli_weak_contradiction(premise, hypothesis):
+    """Real corroboration + a WEAK (0.7) authority contradiction — the false-Refuted shape the
+    eval measured on settled-true claims (date/negation confusion in the small NLI model)."""
+    texts = (premise, hypothesis)
+    if "held its funeral" in premise:
+        return ("contradiction", 0.70)
+    if all("postponed" in t for t in texts):
+        return ("entailment", 0.9)
+    return ("neutral", 0.9)
+
+
+def test_weak_authority_contradiction_no_longer_disqualifies():
+    weak_denial = Citation(url="https://parliament.gov/schedule", domain="parliament.gov",
+                           quote="Parliament held its funeral service on Tuesday", tier=2)
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [_vote_citations() for _ in texts],
+        authority_search=lambda texts, own, deep=False: [[weak_denial] for _ in texts],
+        nli=_nli_weak_contradiction,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    # 0.70 < the 0.85 kill bar: no disqualification; the corroborated read stands.
+    assert reading.primary_contradicted is False
+    assert reading.verdict in ("Corroborated", "Well corroborated")
+    # …while a STRONG contradiction (0.95, the real-debunk shape) still kills — pinned by
+    # test_authority_contradiction_refutes_even_alongside_support above.
+
+
+def test_authority_leg_disagreeing_with_itself_cancels_the_kill():
+    support = Citation(url="https://parliament.gov/statement", domain="parliament.gov",
+                       quote=_BBC_QUOTE, tier=2)
+    denial = Citation(url="https://parliament.gov/deny", domain="parliament.gov",
+                      quote="The budget vote was not postponed", tier=2)
+    result = analyse_claim(
+        _VOTE,
+        reputation={},
+        normalise=_normalise_fact(_VOTE),
+        extremity_of=_extremity({}, default="notable"),
+        web_search=lambda texts, own, deep=False: [[] for _ in texts],
+        authority_search=lambda texts, own, deep=False: [[support, denial] for _ in texts],
+        nli=fake_nli,
+        fetch=_no_fetch,
+    )
+    (reading,) = result.facts
+    # One tier-2 quote supports, another contradicts (both at full strength): the authority is
+    # internally ambiguous — the kill flag cancels to the fold, the supporting primary stays.
+    assert reading.primary_contradicted is False
+    assert reading.has_primary is True
+    assert not reading.verdict.startswith("Refuted")
