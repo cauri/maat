@@ -61,7 +61,10 @@ from maat.serving.analyse import (
 from maat.acquire.fetch import fetch_page
 
 CONCURRENCY = 3          # provider seams carry their own RPM throttles; stay modest
-PER_CLAIM_TIMEOUT = 600  # hard ceiling per fixture — liveness rule: every step has a timeout
+# Hard ceiling per fixture — liveness rule: every step has a timeout. 900 after the first run:
+# the zero-coverage worst path (deep re-search + every braid leg finding nothing) measured
+# ~600-700s — a real product-latency finding (#457), not a hang.
+PER_CLAIM_TIMEOUT = 900
 
 _HIGH_BANDS = ("corroborated", "established")
 
@@ -156,9 +159,9 @@ async def run(fixtures: list[dict], out_path: Path) -> int:
     results: list[dict] = []
 
     async def one(fx: dict) -> None:
-        t0 = time.monotonic()
         outcome: dict
         async with sem:
+            t0 = time.monotonic()  # after the semaphore — measure the claim, not the queue
             try:
                 analysis = await asyncio.wait_for(
                     asyncio.to_thread(analyse_claim, fx["text"], **seams),

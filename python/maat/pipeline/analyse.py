@@ -696,9 +696,10 @@ def judge_entailment_scored(
     'does the evidence dispute the claim'). 'unknown' when the model is unavailable — the caller
     then does NOT count the source (it never trusts the search model's own claim→source mapping).
 
-    The strength (S5 #403) is the best entailment probability across the two directions — 0.0
-    whenever the verdict is not 'entails' — so a source that asserts the fact head-on can count
-    more than one that barely clears the gate (``entailment_weight`` maps it to a fold weight)."""
+    The strength (S5 #403) is the best entailment probability across the two directions when the
+    verdict is 'entails' (``entailment_weight`` maps it to a fold weight), the CONTRADICTION
+    probability when the verdict is 'contradicts' (#457 — the disqualifying primary-contradiction
+    path holds it to a stricter bar than an ordinary dispute), and 0.0 otherwise."""
     if nli is None:
         return "unknown", 0.0
     forward = nli(quote, claim_text)
@@ -713,7 +714,7 @@ def judge_entailment_scored(
     if strength > 0.0:
         return "entails", strength
     if forward is not None and forward[0] == _NLI_CONTRADICT and forward[1] >= min_contradict:
-        return "contradicts", 0.0
+        return "contradicts", forward[1]
     return "neutral", 0.0
 
 
@@ -801,6 +802,7 @@ def _websearch_rows(
     url: str, own_canon: str, accept_candidate: Callable[[LiveCandidate], bool] | None,
     cite_fetch: _CiteFetch, nli: NliFn | None, nli_min: float, contradict_min: float,
     entail_floor: float | None = None,
+    contradict_kill_min: float = 0.85,
 ) -> WebRows:
     """One claim's web-search corroboration. For each offered citation: exclude the pasted outlet /
     denied domains, then NLI-JUDGE the quote against the claim (the hard gate — entailment counts,
@@ -837,11 +839,16 @@ def _websearch_rows(
         )
         if verdict == "contradicts":
             contradicted = True
-            if cit.tier >= 1:
-                # #434 — the AUTHORITY itself says otherwise. Disqualifying strength, so it earns
-                # the SAME anti-fabrication standard as acceptance: if we can fetch the page and
-                # the quote's content is wholly absent, don't count it; unfetchable → judged on
-                # NLI alone, symmetric with the acceptance path.
+            # #434 — the AUTHORITY itself says otherwise: DISQUALIFYING strength. #457 measured
+            # what that power costs when granted cheaply — settled-true claims (six originators
+            # corroborating) read "Refuted" off one mis-scored quote at the ordinary 0.6 bar —
+            # so the kill flag holds a STRICTER NLI bar (``contradict_kill_min``) than a plain
+            # dispute: real debunk language ("did not happen", "the claim is false") scores far
+            # above it; date/negation confusions in the small NLI model land below. It also
+            # still earns the same anti-fabrication standard as acceptance: if we can fetch the
+            # page and the quote's content is wholly absent, don't count it; unfetchable →
+            # judged on NLI alone, symmetric with the acceptance path.
+            if cit.tier >= 1 and strength >= contradict_kill_min:
                 pbody = cite_fetch.body(cit.url)
                 if pbody is None or quote_grounded(cit.quote, pbody):
                     primary_contradicted = True
@@ -874,6 +881,16 @@ def _websearch_rows(
             # An ACCEPTED (NLI-entailed, grounded) tier-1/2 authority citation: its URL becomes a
             # primary source for the fold — the primary lift + "Stated by the primary source".
             primary_urls.add(cit.url)
+    if primary_contradicted and primary_urls:
+        # #457 — the authority leg DISAGREES WITH ITSELF (one tier-1/2 quote supports, another
+        # contradicts). An internally ambiguous authority must not carry disqualifying power;
+        # it cancels to the evidence fold — the same rule disagreeing fact-checkers follow
+        # (#451). The corroborating primary stays; the kill flag drops. Measured on #457's eval:
+        # this shape appeared only on TRUE claims (the ChatGPT fixture corroborated and
+        # "contradicted" by the authority leg in one pass).
+        log.info("authority leg disagrees with itself for claim %r — kill flag cancelled",
+                 claim.text[:60])
+        primary_contradicted = False
     return WebRows(rows, bodies, contradicted, weights, primary_urls, primary_contradicted)
 
 
@@ -1044,6 +1061,7 @@ def analyse_article(
     same_fact_threshold: float = SAME_FACT_THRESHOLD,
     nli_entail_min: float = 0.5,
     nli_contradict_min: float = 0.6,
+    nli_contradict_kill_min: float = 0.85,
     live_max_searches: int = 10,
     live_max_candidates: int = 18,
     body_max_chars: int = 60_000,
@@ -1209,6 +1227,7 @@ def analyse_article(
                     i, claim, cits, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    contradict_kill_min=nli_contradict_kill_min,
                     entail_floor=(knobs.entail_floor if knobs else None),
                 )
                 matched_rows, bodies, contradicted, weights = wr.rows, wr.bodies, wr.contradicted, wr.weights
@@ -1286,6 +1305,7 @@ def analyse_article(
                     i, fact_claims[i], merged, url=url, own_canon=own_canon,
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    contradict_kill_min=nli_contradict_kill_min,
                     entail_floor=(knobs.entail_floor if knobs else None),
                 )
                 rows, bodies2, weights2 = wr.rows, wr.bodies, wr.weights
@@ -1383,6 +1403,7 @@ def check_one_claim(
     same_fact_threshold: float = SAME_FACT_THRESHOLD,
     nli_entail_min: float = 0.5,
     nli_contradict_min: float = 0.6,
+    nli_contradict_kill_min: float = 0.85,
     live_max_candidates: int = 18,
     knobs: ScoringKnobs | None = None,
 ) -> tuple[ClaimReading, bool]:
@@ -1425,6 +1446,7 @@ def check_one_claim(
                 0, claim, cits, url=url, own_canon=own_canon,
                 accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                 nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    contradict_kill_min=nli_contradict_kill_min,
                 entail_floor=(knobs.entail_floor if knobs else None),
             )
             matched_rows, bodies, contradicted, weights = wr.rows, wr.bodies, wr.contradicted, wr.weights
@@ -1650,6 +1672,7 @@ def analyse_claim(
     same_fact_threshold: float = SAME_FACT_THRESHOLD,
     nli_entail_min: float = 0.5,
     nli_contradict_min: float = 0.6,
+    nli_contradict_kill_min: float = 0.85,
     live_max_candidates: int = 18,
     max_workers: int = 4,
     knobs: ScoringKnobs | None = None,
@@ -1883,6 +1906,7 @@ def analyse_claim(
                     i, claim, cits, url="", own_canon="",
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    contradict_kill_min=nli_contradict_kill_min,
                     entail_floor=(knobs.entail_floor if knobs else None),
                 )
                 matched_rows, bodies, contradicted, weights = (
@@ -1978,6 +2002,7 @@ def analyse_claim(
                     i, fact_claims[i], merged, url="", own_canon="",
                     accept_candidate=accept_candidate, cite_fetch=cite_fetch, nli=nli,
                     nli_min=nli_entail_min, contradict_min=nli_contradict_min,
+                    contradict_kill_min=nli_contradict_kill_min,
                     entail_floor=(knobs.entail_floor if knobs else None),
                 )
                 if not wr.rows:
