@@ -8,6 +8,13 @@ on:
 # Deterministic gates only. Live-LLM evals run elsewhere (advisory + nightly), never
 # on the merge gate — non-determinism must not own the merge button (DECISIONS D16).
 jobs:
+  caddy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker pull caddy:2.11.4
+      - run: python3 deploy/check-caddy-host.py
+
   rust:
     runs-on: ubuntu-latest
     defaults:
@@ -113,7 +120,7 @@ jobs:
   # Push-to-deploy: only on main, only after the deterministic gates pass.
   # Deploys the infra baseline today; extends to the app image once it exists.
   deploy:
-    needs: [rust, python]
+    needs: [rust, python, caddy]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:

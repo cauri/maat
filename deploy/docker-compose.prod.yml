@@ -361,6 +361,8 @@ services:
       MAAT_WG_SUBNET: ${MAAT_WG_SUBNET:-10.8.0.0/24}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Host ingress settings survive normal app deploys; empty on standalone hosts.
+      - /etc/maat/caddy-host:/etc/caddy/host-overrides:ro
       - caddydata:/data
       - caddyconfig:/config
     depends_on:
