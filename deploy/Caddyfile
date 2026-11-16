@@ -15,6 +15,10 @@
 # The admin cert is still issued over the public :80 (HTTP-01) — the A record is public, so no
 # DNS-01 / OVH-API secret is needed (D32). The SSH tunnel stays as break-glass.
 
+# Optional host-owned TCP gateway settings. An empty directory keeps the normal
+# public listeners. A populated override must preserve source IPs for the WG gate.
+import host-overrides/*.caddy
+
 {$MAAT_HOST} {
 	encode zstd gzip
 

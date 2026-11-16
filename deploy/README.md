@@ -22,3 +22,22 @@ The operator console (`admin.maat.press`) is gated by WireGuard (network) + Goog
 email allow-list (identity), separate from the app's user auth. One-time setup (Google secrets in
 `/root/.env`, `deploy/wireguard.sh`), login, break-glass, and verification are in
 **[`ADMIN_AUTH.md`](ADMIN_AUTH.md)**.
+
+## Sharing the host's web ports
+
+The Caddy service reads optional host-owned `*.caddy` files from
+`/etc/maat/caddy-host`. Leave the directory empty for the normal public listeners.
+A TCP gateway can use this include to move Caddy to private listeners while
+preserving the application's routes through future deployments.
+
+The gateway must supply its observed source IP through PROXY protocol; public
+listeners must never accept a caller-supplied PROXY header. Private Caddy
+listeners must require the header. This preserves the WireGuard `remote_ip`
+restriction on the admin site. HTTP forwarded headers do not authorize access.
+Validate the complete Caddyfile before activating an override, then verify both
+public denial and real WireGuard access. Protect these listeners from other
+containers; loopback processes able to send PROXY headers are trusted.
+
+`docker pull caddy:2.11.4 && python3 deploy/check-caddy-host.py` checks the real
+Caddy adapter with default and gateway configurations, including private
+listeners, required PROXY headers, unchanged upstreams and the WireGuard gate.
